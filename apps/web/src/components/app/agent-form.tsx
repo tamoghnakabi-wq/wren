@@ -7,7 +7,9 @@ import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { ENGINE_MODELS, SOURCES, sourceInfo } from '@/lib/client/sources';
 import type { Agent, Connection } from '@/lib/client/types';
-import { AGENT_COLORS, AGENT_ICONS, AgentAvatar } from '../agent-avatar';
+import { AGENT_COLORS } from '../agent-avatar';
+import { CHARACTER_KEYS, CHARACTERS, characterFor, MOOD_LABEL, type CharacterKey, type Mood } from '@/lib/characters';
+import { AgentCharacter } from '../agent-character';
 import { Badge, Card, cx, Input, Label, Select, Spinner, Switch, Textarea } from '../ui';
 import { useApp } from './provider';
 
@@ -26,7 +28,7 @@ export interface AgentDraft {
 
 export const emptyDraft = (): AgentDraft => ({
   name: '',
-  icon: 'sparkles',
+  icon: 'pip',
   color: 'violet',
   instructions: '',
   model: { source: '', model: '' },
@@ -41,7 +43,7 @@ export function draftFromAgent(a: Agent): AgentDraft {
   const d = emptyDraft();
   return {
     name: a.name,
-    icon: a.icon,
+    icon: characterFor(a.icon),
     color: a.color,
     instructions: a.instructions,
     model: { source: a.model?.source ?? '', model: a.model?.model ?? '', connectionId: a.model?.connectionId, effort: a.model?.effort },
@@ -96,26 +98,15 @@ export function AgentForm({ draft, onChange }: { draft: AgentDraft; onChange: (d
 
   return (
     <div className="space-y-8">
-      <section className="space-y-4">
-        <div className="flex items-center gap-4">
-          <AgentAvatar icon={draft.icon} color={draft.color} size={56} />
-          <div className="flex-1">
-            <Label htmlFor="agent-name">Name</Label>
-            <Input id="agent-name" value={draft.name} maxLength={60} placeholder="e.g. Scout" onChange={(e) => set('name', e.target.value)} />
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {Object.entries(AGENT_ICONS).map(([k, Icon]) => (
-            <button key={k} type="button" onClick={() => set('icon', k)} className={cx('flex h-9 w-9 items-center justify-center rounded-xl border transition', draft.icon === k ? 'border-text bg-surface' : 'border-transparent text-muted hover:bg-bg-subtle')} aria-label={k}>
-              <Icon className="h-4.5 w-4.5" />
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(AGENT_COLORS).map(([k, c]) => (
-            <button key={k} type="button" onClick={() => set('color', k)} className={cx('h-7 w-7 rounded-full ring-offset-2 ring-offset-bg transition', draft.color === k && 'ring-2')} style={{ background: c.bg, ['--tw-ring-color' as string]: c.ring }} aria-label={k} />
-          ))}
-        </div>
+      <section className="space-y-5">
+        <CharacterStudio
+          character={characterFor(draft.icon)}
+          color={draft.color}
+          name={draft.name}
+          onCharacter={(k) => set('icon', k)}
+          onColor={(c) => set('color', c)}
+          nameField={<Input id="agent-name" value={draft.name} maxLength={60} placeholder="e.g. Scout" onChange={(e) => set('name', e.target.value)} />}
+        />
         <div>
           <Label htmlFor="agent-instructions" hint="Who this agent is, how it should work, and anything it should always or never do.">
             Instructions
@@ -380,6 +371,96 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Pick the agent's character and colour, and preview every mood. */
+function CharacterStudio({
+  character,
+  color,
+  name,
+  onCharacter,
+  onColor,
+  nameField,
+}: {
+  character: CharacterKey;
+  color: string;
+  name: string;
+  onCharacter: (k: CharacterKey) => void;
+  onColor: (c: string) => void;
+  nameField: React.ReactNode;
+}) {
+  const [mood, setMood] = useState<Exclude<Mood, 'hello'>>('idle');
+  const [greeted, setGreeted] = useState<CharacterKey | null>(null);
+  const [hover, setHover] = useState<CharacterKey | null>(null);
+  // A newly picked character says hello before showing the chosen mood.
+  const greeting = greeted !== character;
+  useEffect(() => {
+    const t = setTimeout(() => setGreeted(character), 1800);
+    return () => clearTimeout(t);
+  }, [character]);
+  const info = CHARACTERS[character];
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-stretch">
+        <div className="flex shrink-0 flex-col items-center justify-center rounded-2xl border border-border bg-bg-subtle px-6 pt-5 pb-4 sm:w-56">
+          <AgentCharacter character={character} color={color} mood={greeting ? 'hello' : mood} size={104} seed="studio" title={`${info.name}, ${greeting ? 'saying hello' : MOOD_LABEL[mood].toLowerCase()}`} />
+          <p className="mt-2 text-sm font-semibold">{name.trim() || info.name}</p>
+          <p className="text-center text-[12px] text-muted">{info.blurb}</p>
+          <div className="mt-3 grid w-full grid-cols-3 gap-1" role="radiogroup" aria-label="Preview a mood">
+            {(Object.keys(MOOD_LABEL) as (keyof typeof MOOD_LABEL)[]).map((m) => (
+              <button
+                key={m}
+                type="button"
+                role="radio"
+                aria-checked={mood === m}
+                onClick={() => {
+                  setGreeted(character);
+                  setMood(m);
+                }}
+                className={cx('rounded-full py-1 text-[11.5px] font-medium whitespace-nowrap transition', mood === m && !greeting ? 'bg-surface text-text shadow-sm' : 'text-faint hover:text-text')}
+              >
+                {MOOD_LABEL[m]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="min-w-0 flex-1 space-y-4">
+          <div>
+            <Label htmlFor="agent-name">Name</Label>
+            {nameField}
+          </div>
+          <div>
+            <p className="mb-1.5 text-sm font-medium text-text">Character</p>
+            <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Character">
+              {CHARACTER_KEYS.map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={character === k}
+                  onClick={() => onCharacter(k)}
+                  onMouseEnter={() => setHover(k)}
+                  onMouseLeave={() => setHover(null)}
+                  className={cx('flex flex-col items-center rounded-xl border px-1 pt-1.5 pb-1 transition', character === k ? 'border-text bg-surface shadow-sm' : 'border-transparent hover:bg-bg-subtle')}
+                >
+                  <AgentCharacter character={k} color={color} size={44} mood={hover === k ? 'hello' : 'idle'} still={hover !== k && character !== k} seed={k} />
+                  <span className={cx('text-[12px]', character === k ? 'font-medium text-text' : 'text-muted')}>{CHARACTERS[k].name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="mb-1.5 text-sm font-medium text-text">Colour</p>
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Colour">
+              {Object.entries(AGENT_COLORS).map(([k, c]) => (
+                <button key={k} type="button" role="radio" aria-checked={color === k} onClick={() => onColor(k)} className={cx('h-7 w-7 rounded-full ring-offset-2 ring-offset-bg transition', color === k && 'ring-2')} style={{ background: c.bg, ['--tw-ring-color' as string]: c.ring }} aria-label={k} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

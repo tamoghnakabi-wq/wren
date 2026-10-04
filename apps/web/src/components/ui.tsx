@@ -116,10 +116,11 @@ export function Spinner({ className }: { className?: string }) {
   return <Loader2 className={cx('h-4 w-4 animate-spin text-faint', className)} />;
 }
 
-export function EmptyState({ icon, title, children, action }: { icon?: ReactNode; title: string; children?: ReactNode; action?: ReactNode }) {
+export function EmptyState({ icon, art, title, children, action }: { icon?: ReactNode; art?: ReactNode; title: string; children?: ReactNode; action?: ReactNode }) {
   return (
     <div className="flex flex-col items-center px-6 py-14 text-center">
-      {icon && <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-bg-subtle text-muted">{icon}</div>}
+      {art && <div className="mb-4">{art}</div>}
+      {icon && !art && <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-bg-subtle text-muted">{icon}</div>}
       <h3 className="text-base font-semibold">{title}</h3>
       {children && <div className="mt-1.5 max-w-sm text-sm text-muted">{children}</div>}
       {action && <div className="mt-5">{action}</div>}

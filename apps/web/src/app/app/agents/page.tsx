@@ -3,10 +3,10 @@
 import Link from 'next/link';
 import { Cloud, Laptop, Plus } from 'lucide-react';
 import { AgentAvatar } from '@/components/agent-avatar';
+import { AgentCharacter } from '@/components/agent-character';
 import { useApp } from '@/components/app/provider';
 import { Button, EmptyState, PageHeader, timeAgo } from '@/components/ui';
 import { modelLabel } from '@/lib/client/sources';
-import { Bot } from 'lucide-react';
 
 export default function AgentsPage() {
   const { agents, active, devices } = useApp();
@@ -24,7 +24,15 @@ export default function AgentsPage() {
         }
       />
       {!agents.length ? (
-        <EmptyState icon={<Bot className="h-6 w-6" />} title="No agents yet" action={<Link href="/app/agents/new"><Button>Create an agent</Button></Link>}>
+        <EmptyState
+          art={
+            <span className="flex items-end">
+              <AgentCharacter character="kit" color="blue" size={52} seed="e1" />
+              <AgentCharacter character="pip" color="orange" size={68} mood="hello" seed="e2" className="-mx-1" />
+              <AgentCharacter character="sprout" color="teal" size={52} seed="e3" />
+            </span>
+          }
+          title="No agents yet" action={<Link href="/app/agents/new"><Button>Create an agent</Button></Link>}>
           Create an agent, give it a name and instructions, and hand it real work.
         </EmptyState>
       ) : (
@@ -36,7 +44,7 @@ export default function AgentsPage() {
             return (
               <Link key={a.id} href={`/app/agents/${a.id}`} className="group rounded-2xl border border-border bg-surface p-4 shadow-card transition hover:border-border-strong hover:shadow-pop">
                 <div className="flex items-start gap-3">
-                  <AgentAvatar icon={a.icon} color={a.color} size={44} live={live} />
+                  <AgentAvatar icon={a.icon} color={a.color} size={44} live={live} seed={a.id} />
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-semibold">{a.name}</p>
                     <p className="mt-0.5 truncate text-[12.5px] text-muted">{modelLabel(a.model?.source, a.model?.model)}</p>

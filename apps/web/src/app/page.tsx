@@ -1,7 +1,9 @@
 import Link from 'next/link';
-import { ArrowRight, BellRing, Check, Cloud, Hand, KeyRound, Laptop, ListChecks, Lock, MonitorSmartphone, Repeat, ShieldCheck, Smartphone, Terminal, Globe, FileText } from 'lucide-react';
+import { ArrowRight, Check, Cloud, KeyRound, Laptop, ListChecks, Lock, MonitorSmartphone, Repeat, ShieldCheck, Smartphone, Terminal, Globe, FileText } from 'lucide-react';
 import { GithubMark as Github } from '@/components/brand';
 import { AgentAvatar } from '@/components/agent-avatar';
+import { AgentCharacter } from '@/components/agent-character';
+import { CHARACTERS, type CharacterKey, type Mood } from '@/lib/characters';
 import { SiteFooter, SiteNav } from '@/components/site';
 import { DownloadButtons } from '@/components/download-buttons';
 
@@ -13,6 +15,7 @@ export default function Landing() {
         <Hero />
         <Pillars />
         <HowItWorks />
+        <Crew />
         <RemoteControl />
         <Plans />
         <Safety />
@@ -65,7 +68,7 @@ function HeroMock() {
     <div className="relative mx-auto w-full max-w-[520px]">
       <div className="rounded-[28px] border border-border bg-surface p-4 shadow-pop">
         <div className="flex items-center gap-3 border-b border-border pb-3">
-          <AgentAvatar icon="search" color="blue" size={36} live="running" />
+          <AgentAvatar icon="kit" color="blue" size={42} mood="working" seed="hero" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold">Find a 2-bed rental near the CBD</p>
             <p className="text-[12px] text-faint">Scout · Cloud computer</p>
@@ -103,7 +106,7 @@ function HeroMock() {
       </div>
       <div className="absolute -right-2 -bottom-10 w-[230px] rotate-[3deg] rounded-[26px] border border-border bg-surface p-3 shadow-pop sm:-right-10">
         <p className="flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
-          <Hand className="h-3.5 w-3.5" /> Approval needed
+          <AgentCharacter character="bolt" color="violet" mood="waiting" size={26} seed="hero-forge" /> Approval needed
         </p>
         <p className="mt-1 text-[13px] font-medium">Forge wants to run `git push origin fix/login`</p>
         <div className="mt-2.5 flex gap-1.5">
@@ -171,6 +174,35 @@ function HowItWorks() {
   );
 }
 
+function Crew() {
+  const crew: { c: CharacterKey; color: string; mood: Mood; label: string; line: string }[] = [
+    { c: 'kit', color: 'blue', mood: 'thinking', label: 'Thinking', line: 'Reading the brief' },
+    { c: 'bolt', color: 'violet', mood: 'working', label: 'Working', line: 'Running the tests' },
+    { c: 'sprout', color: 'teal', mood: 'waiting', label: 'Needs you', line: 'Asks before anything risky' },
+    { c: 'orbit', color: 'amber', mood: 'success', label: 'Done', line: 'Your shortlist is ready' },
+    { c: 'drop', color: 'rose', mood: 'error', label: 'Stuck', line: 'Says what went wrong' },
+    { c: 'pip', color: 'orange', mood: 'idle', label: 'Ready', line: 'Waiting for the next job' },
+  ];
+  return (
+    <section className="border-y border-border bg-surface/60">
+      <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
+        <h2 className="max-w-2xl font-display text-[36px] leading-tight tracking-tight sm:text-[44px]">A crew with personality.</h2>
+        <p className="mt-3 max-w-xl text-muted">Every agent gets its own character, so you can tell at a glance who’s thinking, who’s busy, and who’s waiting on you.</p>
+        <div className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          {crew.map((m) => (
+            <div key={m.c} className="flex flex-col items-center rounded-2xl border border-border bg-surface px-3 pt-5 pb-4 text-center shadow-card">
+              <AgentCharacter character={m.c} color={m.color} mood={m.mood} size={76} seed={m.c} title={`${CHARACTERS[m.c].name}, ${m.label.toLowerCase()}`} />
+              <p className="mt-2 text-sm font-semibold">{CHARACTERS[m.c].name}</p>
+              <p className="text-[12px] font-medium text-brand">{m.label}</p>
+              <p className="mt-1 text-[12px] leading-snug text-muted">{m.line}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function RemoteControl() {
   return (
     <section className="bg-primary text-primary-fg">
@@ -192,14 +224,16 @@ function RemoteControl() {
         <div className="mx-auto w-[280px] rounded-[44px] border-[10px] border-white/10 bg-bg p-3 text-text shadow-2xl">
           <div className="space-y-2.5 rounded-[32px] bg-bg p-2">
             <div className="flex items-center gap-2 rounded-2xl bg-surface p-3 shadow-card">
-              <BellRing className="h-4 w-4 text-brand" />
+              <AgentCharacter character="bolt" color="violet" mood="success" size={30} seed="phone-forge" still />
               <div className="min-w-0">
                 <p className="text-[12px] font-semibold">Forge finished</p>
                 <p className="truncate text-[11.5px] text-muted">Opened PR #42 “Fix login redirect loop”</p>
               </div>
             </div>
             <div className="rounded-2xl border border-warning/40 bg-surface p-3 shadow-card">
-              <p className="text-[11.5px] font-semibold text-warning">Atlas needs approval · High risk</p>
+              <p className="flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
+                <AgentCharacter character="orbit" color="amber" mood="waiting" size={24} seed="phone-atlas" /> Atlas needs approval · High risk
+              </p>
               <p className="mt-1 text-[12.5px] font-medium">Delete 1,204 duplicate photos in ~/Pictures/Imports</p>
               <div className="mt-2 flex gap-1.5">
                 <span className="flex-1 rounded-lg bg-primary py-1.5 text-center text-[11.5px] font-medium text-primary-fg">Approve</span>
@@ -207,7 +241,9 @@ function RemoteControl() {
               </div>
             </div>
             <div className="rounded-2xl bg-surface p-3 shadow-card">
-              <p className="text-[11.5px] font-semibold text-info">Juniper asks</p>
+              <p className="flex items-center gap-1.5 text-[11.5px] font-semibold text-info">
+                <AgentCharacter character="sprout" color="teal" mood="thinking" size={24} seed="phone-juniper" /> Juniper asks
+              </p>
               <p className="mt-1 text-[12.5px]">Window or aisle for the Hobart flight?</p>
               <div className="mt-2 rounded-full border border-border px-3 py-1.5 text-[11.5px] text-faint">Reply…</div>
             </div>

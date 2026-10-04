@@ -3,6 +3,7 @@ import type { AgentTools } from '@wren/core/types';
 export interface AgentTemplate {
   id: string;
   name: string;
+  /** Character key (see components/agent-character.tsx). */
   icon: string;
   color: string;
   tagline: string;
@@ -17,7 +18,7 @@ export const TEMPLATES: AgentTemplate[] = [
   {
     id: 'researcher',
     name: 'Scout',
-    icon: 'search',
+    icon: 'kit',
     color: 'blue',
     tagline: 'Researches anything and writes a sourced brief.',
     instructions:
@@ -30,7 +31,7 @@ export const TEMPLATES: AgentTemplate[] = [
   {
     id: 'engineer',
     name: 'Forge',
-    icon: 'code',
+    icon: 'bolt',
     color: 'violet',
     tagline: 'Clones repos, writes code, runs tests, opens PRs.',
     instructions:
@@ -43,7 +44,7 @@ export const TEMPLATES: AgentTemplate[] = [
   {
     id: 'assistant',
     name: 'Juniper',
-    icon: 'sparkles',
+    icon: 'sprout',
     color: 'teal',
     tagline: 'A personal assistant for errands, plans and drafts.',
     instructions:
@@ -56,7 +57,7 @@ export const TEMPLATES: AgentTemplate[] = [
   {
     id: 'operator',
     name: 'Atlas',
-    icon: 'compass',
+    icon: 'orbit',
     color: 'amber',
     tagline: 'Works on your own computer with your files.',
     instructions:

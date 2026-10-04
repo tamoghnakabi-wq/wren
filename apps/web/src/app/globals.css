@@ -263,3 +263,493 @@ body {
 .pb-safe {
   padding-bottom: max(env(safe-area-inset-bottom), 0px);
 }
+
+/* ------------------------------------------------------------------ Agent characters
+   See components/agent-character.tsx. Moods are classes on the <svg>
+   (.wc-idle, .wc-thinking, …); motion only runs with .wc-anim. */
+:root {
+  --wc-shadow: rgb(28 25 23 / 0.13);
+  --wc-alert: #f59e0b;
+  --wc-alert-fg: #ffffff;
+}
+.dark {
+  --wc-shadow: rgb(0 0 0 / 0.45);
+  --wc-alert: #fbbf24;
+  --wc-alert-fg: #1c1917;
+}
+.wc {
+  display: inline-block;
+  flex-shrink: 0;
+  overflow: visible;
+  color: var(--text-faint);
+}
+.wc * {
+  transform-box: view-box;
+}
+.wc .wc-eyes,
+.wc .wc-face,
+.wc .wc-spark,
+.wc .wc-gaze {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.wc-shadow {
+  fill: var(--wc-shadow);
+  transform-origin: 32px 59.3px;
+}
+.wc-body {
+  transform-origin: 32px 57px;
+}
+.wc-sm .wc-fx:not(.wc-alert) {
+  display: none;
+}
+
+/* poses that hold even when still */
+.wc-success .wc-limb-l {
+  transform: rotate(118deg);
+}
+.wc-success .wc-limb-r {
+  transform: rotate(-118deg);
+}
+.wc-waiting .wc-limb-r,
+.wc-hello .wc-limb-r {
+  transform: rotate(-122deg);
+}
+.wc-error .wc-body {
+  transform: scale(1.02, 0.97);
+}
+.wc-still .wc-conf,
+.wc-still .wc-think .b1 {
+  display: none;
+}
+.wc-still .wc-spark {
+  opacity: 0.85;
+}
+
+/* ambient motions share a per-character offset (--wc-d) so lists don't move in sync */
+.wc-anim .wc-face {
+  animation: wc-pop 0.32s cubic-bezier(0.3, 1.6, 0.5, 1) both;
+  animation-delay: 0s;
+}
+.wc-anim .wc-eyes {
+  animation: wc-blink 5.2s var(--wc-d, 0s) infinite;
+}
+.wc-anim.wc-success .wc-eyes {
+  animation: none;
+}
+.wc-anim.wc-idle .wc-body,
+.wc-anim.wc-hello .wc-body {
+  animation: wc-breathe 3.6s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim.wc-thinking .wc-body {
+  animation: wc-ponder 3.4s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim.wc-thinking .wc-gaze {
+  animation: wc-look 3.4s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim.wc-working .wc-body {
+  animation: wc-bob 0.64s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim.wc-success .wc-body {
+  animation: wc-hop 1.3s cubic-bezier(0.3, 0.7, 0.4, 1) infinite;
+  animation-delay: 0s;
+}
+.wc-anim.wc-success .wc-shadow {
+  animation: wc-shadow-hop 1.3s cubic-bezier(0.3, 0.7, 0.4, 1) infinite;
+  animation-delay: 0s;
+}
+.wc-anim.wc-error .wc-body {
+  animation: wc-shake 2.6s ease-in-out infinite;
+  animation-delay: 0s;
+}
+.wc-anim.wc-waiting .wc-body {
+  animation: wc-perk 1.5s var(--wc-d, 0s) ease-in-out infinite;
+}
+
+.wc-anim.wc-working .wc-limb-l {
+  animation: wc-type-l 0.64s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim.wc-working .wc-limb-r {
+  animation: wc-type-r 0.64s ease-in-out infinite;
+  animation-delay: calc(var(--wc-d, 0s) - 0.32s);
+}
+.wc-anim.wc-waiting .wc-limb-r,
+.wc-anim.wc-hello .wc-limb-r {
+  animation: wc-wave 1.6s var(--wc-d, 0s) ease-in-out infinite;
+}
+
+/* signature motions */
+.wc-anim .wc-tail {
+  animation: wc-wag 2.8s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-leaves {
+  animation: wc-sway 3.4s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-glow {
+  animation: wc-glow 2.4s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-ring {
+  animation: wc-rock 4.2s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-ears {
+  animation: wc-twitch 5.6s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-scarf {
+  animation: wc-flutter 2.4s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-shine {
+  animation: wc-gleam 3.8s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim .wc-bump {
+  animation: wc-puff 3.6s var(--wc-d, 0s) ease-in-out infinite;
+}
+.wc-anim.wc-working .wc-tail,
+.wc-anim.wc-success .wc-tail,
+.wc-anim.wc-working .wc-glow,
+.wc-anim.wc-working .wc-leaves,
+.wc-anim.wc-working .wc-ring,
+.wc-anim.wc-working .wc-scarf {
+  animation-duration: 0.9s;
+}
+.wc-glow {
+  opacity: 0.35;
+}
+
+/* effects */
+.wc-anim .wc-think .b1,
+.wc-anim .wc-think .b2,
+.wc-anim .wc-think .b3 {
+  animation: wc-bubble 1.8s ease-in-out infinite;
+}
+.wc-anim .wc-think .b2 {
+  animation-delay: 0.25s;
+}
+.wc-anim .wc-think .b3 {
+  animation-delay: 0.5s;
+}
+.wc-think {
+  opacity: 0.7;
+}
+.wc-anim .wc-spark {
+  animation: wc-twinkle 1.5s ease-in-out infinite;
+  animation-delay: 0s;
+}
+.wc-anim .wc-spark.s2 {
+  animation-delay: 0.5s;
+}
+.wc-anim .wc-spark.s3 {
+  animation-delay: 1s;
+}
+.wc-anim .wc-conf {
+  animation: wc-confetti 1.3s ease-out infinite;
+}
+.wc-anim .wc-sweat {
+  animation: wc-sweat 2.6s ease-in infinite;
+  animation-delay: 0s;
+}
+.wc-anim .wc-alert {
+  animation: wc-alert 1.5s ease-in-out infinite;
+}
+
+@keyframes wc-pop {
+  from {
+    transform: scale(0.8);
+    opacity: 0.3;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes wc-blink {
+  0%,
+  91%,
+  97%,
+  100% {
+    transform: scaleY(1);
+  }
+  94% {
+    transform: scaleY(0.12);
+  }
+}
+@keyframes wc-breathe {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.025, 0.975);
+  }
+}
+@keyframes wc-ponder {
+  0%,
+  100% {
+    transform: rotate(-4deg);
+  }
+  50% {
+    transform: rotate(3deg) translateY(-0.6px);
+  }
+}
+@keyframes wc-look {
+  0%,
+  100% {
+    transform: translate(-1.2px, -1.3px);
+  }
+  45% {
+    transform: translate(1.2px, -1.5px);
+  }
+  70% {
+    transform: translate(0.4px, -1.7px);
+  }
+}
+@keyframes wc-bob {
+  0%,
+  100% {
+    transform: translateY(0) scale(1.01, 0.99);
+  }
+  50% {
+    transform: translateY(-1.8px) scale(0.99, 1.01);
+  }
+}
+@keyframes wc-hop {
+  0% {
+    transform: translateY(0) scale(1, 1);
+  }
+  12% {
+    transform: translateY(0) scale(1.08, 0.9);
+  }
+  32% {
+    transform: translateY(-9px) scale(0.94, 1.07);
+  }
+  50% {
+    transform: translateY(-9.5px) scale(1, 1);
+  }
+  70% {
+    transform: translateY(0) scale(1.07, 0.92);
+  }
+  82%,
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+}
+@keyframes wc-shadow-hop {
+  0%,
+  12%,
+  70%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  40%,
+  50% {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+}
+@keyframes wc-shake {
+  0%,
+  46%,
+  100% {
+    transform: translateX(0) rotate(0) scale(1.02, 0.97);
+  }
+  6%,
+  18%,
+  30% {
+    transform: translateX(-1.3px) rotate(-2.5deg) scale(1.02, 0.97);
+  }
+  12%,
+  24%,
+  36% {
+    transform: translateX(1.3px) rotate(2.5deg) scale(1.02, 0.97);
+  }
+}
+@keyframes wc-perk {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-2.4px);
+  }
+  55% {
+    transform: translateY(0);
+  }
+}
+@keyframes wc-type-l {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  50% {
+    transform: rotate(24deg);
+  }
+}
+@keyframes wc-type-r {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  50% {
+    transform: rotate(-24deg);
+  }
+}
+@keyframes wc-wave {
+  0%,
+  100% {
+    transform: rotate(-112deg);
+  }
+  25%,
+  75% {
+    transform: rotate(-142deg);
+  }
+  50% {
+    transform: rotate(-108deg);
+  }
+}
+@keyframes wc-wag {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  50% {
+    transform: rotate(-10deg);
+  }
+}
+@keyframes wc-sway {
+  0%,
+  100% {
+    transform: rotate(-7deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+@keyframes wc-glow {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.15);
+  }
+}
+@keyframes wc-rock {
+  0%,
+  100% {
+    transform: rotate(-3.5deg);
+  }
+  50% {
+    transform: rotate(3.5deg);
+  }
+}
+@keyframes wc-twitch {
+  0%,
+  86%,
+  95%,
+  100% {
+    transform: rotate(0);
+  }
+  89% {
+    transform: rotate(-5deg);
+  }
+  92% {
+    transform: rotate(4deg);
+  }
+}
+@keyframes wc-flutter {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  50% {
+    transform: rotate(8deg);
+  }
+}
+@keyframes wc-gleam {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes wc-puff {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+@keyframes wc-bubble {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.75);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes wc-twinkle {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.3) rotate(0);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1) rotate(45deg);
+  }
+}
+@keyframes wc-confetti {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(0);
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx), var(--dy)) rotate(220deg);
+  }
+}
+@keyframes wc-sweat {
+  0%,
+  20% {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  35% {
+    opacity: 0.95;
+  }
+  85% {
+    opacity: 0.9;
+    transform: translateY(5px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+}
+@keyframes wc-alert {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.14);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wc,
+  .wc * {
+    animation: none !important;
+  }
+}

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { Cloud, Laptop } from 'lucide-react';
 import type { Session } from '@/lib/client/types';
-import { AgentAvatar } from '../agent-avatar';
+import { AgentAvatar, sessionMood } from '../agent-avatar';
 import { timeAgo } from '../ui';
 import { useApp } from './provider';
 import { StatusPill } from './status';
@@ -19,7 +19,7 @@ export function SessionList({ sessions, showAgent = true, empty }: { sessions: S
         return (
           <li key={s.id}>
             <Link href={`/app/s/${s.id}`} className="flex items-center gap-3 px-4 py-3 transition hover:bg-surface-2">
-              {showAgent && <AgentAvatar icon={a?.icon} color={a?.color} size={32} live={s.status === 'running' ? 'running' : s.status === 'waiting' ? 'waiting' : null} />}
+              {showAgent && <AgentAvatar icon={a?.icon} color={a?.color} size={36} mood={sessionMood(s.status)} still={!['running', 'queued', 'waiting'].includes(s.status)} seed={s.id} />}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[14.5px] font-medium">{s.title}</p>
                 <p className="mt-0.5 flex items-center gap-1.5 truncate text-[12.5px] text-faint">

@@ -50,7 +50,7 @@ export default function FilesPage() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">{f.name}</p>
                   <p className="flex items-center gap-1.5 truncate text-[12.5px] text-faint">
-                    {a && <AgentAvatar icon={a.icon} color={a.color} size={14} />}
+                    {a && <AgentAvatar icon={a.icon} color={a.color} size={16} still />}
                     {a?.name ?? (f.source === 'user' ? 'You' : 'Agent')} · {formatBytes(f.size)} · {timeAgo(f.created_at)}
                     {f.session_id && (
                       <Link href={`/app/s/${f.session_id}`} className="underline">

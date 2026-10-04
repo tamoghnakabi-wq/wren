@@ -139,7 +139,7 @@ export function Composer({
         {!sessionId && onAgentChange && (
           <div className="relative">
             <button onClick={() => setPickAgent((v) => !v)} className="flex h-8 items-center gap-1.5 rounded-full border border-border px-1.5 pr-2.5 text-[13px] font-medium whitespace-nowrap hover:bg-bg-subtle" disabled={!agents.length}>
-              {agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={20} /> : null}
+              {agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={22} seed={agent.id} /> : null}
               <span className="max-w-[90px] truncate sm:max-w-[140px]">{agent?.name ?? 'Choose agent'}</span>
               <ChevronDown className="h-3.5 w-3.5 text-faint" />
             </button>
@@ -154,7 +154,7 @@ export function Composer({
                     }}
                     className={cx('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-bg-subtle', a.id === agent?.id && 'bg-bg-subtle')}
                   >
-                    <AgentAvatar icon={a.icon} color={a.color} size={26} />
+                    <AgentAvatar icon={a.icon} color={a.color} size={28} seed={a.id} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-medium">{a.name}</span>
                       <span className="block truncate text-[12px] text-faint">{a.runtime === 'desktop' ? 'On your computer' : 'Cloud computer'}</span>

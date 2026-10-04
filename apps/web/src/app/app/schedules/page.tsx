@@ -51,7 +51,7 @@ function Schedules() {
             const a = agentById(x.agent_id);
             return (
               <li key={x.id} className="flex items-center gap-3 rounded-2xl border border-border bg-surface px-4 py-3.5 shadow-card">
-                <AgentAvatar icon={a?.icon} color={a?.color} size={36} />
+                <AgentAvatar icon={a?.icon} color={a?.color} size={36} seed={a?.id} />
                 <button className="min-w-0 flex-1 text-left" onClick={() => (setEditing(x), setOpen(true))}>
                   <p className="truncate font-medium">{x.name}</p>
                   <p className="truncate text-[12.5px] text-muted">

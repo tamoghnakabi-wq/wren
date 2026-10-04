@@ -1,6 +1,8 @@
 import { Bot, BookOpen, Briefcase, Code2, Compass, Globe, Heart, Lightbulb, LineChart, Mail, Megaphone, PenLine, Rocket, Search, ShoppingBag, Sparkles, Wrench } from 'lucide-react';
-import { cx } from '@/lib/cx';
+import { characterFor, type Mood } from '@/lib/characters';
+import { AgentCharacter } from './agent-character';
 
+/** Icons older agents were created with (their character is derived from it). */
 export const AGENT_ICONS = { sparkles: Sparkles, bot: Bot, code: Code2, search: Search, globe: Globe, pen: PenLine, chart: LineChart, mail: Mail, briefcase: Briefcase, compass: Compass, rocket: Rocket, book: BookOpen, wrench: Wrench, bulb: Lightbulb, heart: Heart, bag: ShoppingBag, megaphone: Megaphone } as const;
 export type AgentIcon = keyof typeof AGENT_ICONS;
 
@@ -15,19 +17,49 @@ export const AGENT_COLORS: Record<string, { bg: string; fg: string; ring: string
   slate: { bg: 'linear-gradient(135deg,#8a96a8,#5b6577)', fg: '#fff', ring: '#8a96a8' },
 };
 
-export function AgentAvatar({ icon, color, size = 36, live, className }: { icon?: string; color?: string; size?: number; live?: 'running' | 'waiting' | null; className?: string }) {
-  const Icon = AGENT_ICONS[(icon as AgentIcon) ?? 'sparkles'] ?? Sparkles;
-  const c = AGENT_COLORS[color ?? 'violet'] ?? AGENT_COLORS.violet;
-  return (
-    <span className={cx('relative inline-flex shrink-0', className)} style={{ width: size, height: size }}>
-      <span className="flex h-full w-full items-center justify-center rounded-[32%] shadow-sm" style={{ background: c.bg, color: c.fg }}>
-        <Icon style={{ width: size * 0.5, height: size * 0.5 }} strokeWidth={2.2} />
-      </span>
-      {live && (
-        <span className="absolute -right-0.5 -bottom-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-surface">
-          <span className={cx('h-2.5 w-2.5 rounded-full', live === 'running' ? 'animate-wren-pulse bg-success' : 'bg-warning')} />
-        </span>
-      )}
-    </span>
-  );
+/**
+ * An agent's character. `icon` holds the character key (older agents: an icon
+ * name, mapped to a character). Pass `mood` directly, or `live` for the
+ * running/waiting shorthand used by lists.
+ */
+export function AgentAvatar({
+  icon,
+  color,
+  size = 36,
+  live,
+  mood,
+  seed,
+  still,
+  className,
+  title,
+}: {
+  icon?: string;
+  color?: string;
+  size?: number;
+  live?: 'running' | 'waiting' | null;
+  mood?: Mood;
+  seed?: string;
+  still?: boolean;
+  className?: string;
+  title?: string;
+}) {
+  const m: Mood = mood ?? (live === 'running' ? 'working' : live === 'waiting' ? 'waiting' : 'idle');
+  return <AgentCharacter character={characterFor(icon)} color={color ?? 'violet'} mood={m} size={size} seed={seed ?? icon} still={still} className={className} title={title} />;
+}
+
+/** The mood that best describes a task from its status (lists, cards). */
+export function sessionMood(status?: string | null): Mood {
+  switch (status) {
+    case 'running':
+    case 'queued':
+      return 'working';
+    case 'waiting':
+      return 'waiting';
+    case 'completed':
+      return 'success';
+    case 'failed':
+      return 'error';
+    default:
+      return 'idle';
+  }
 }

@@ -111,7 +111,7 @@ function SidebarContent() {
       <div className="mt-1.5 flex-1 space-y-0.5 overflow-y-auto px-3 scrollbar-thin">
         {agents.map((a) => (
           <Link key={a.id} href={`/app/agents/${a.id}`} className={cx('flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition', pathname === `/app/agents/${a.id}` ? 'bg-surface shadow-sm' : 'hover:bg-surface/70')}>
-            <AgentAvatar icon={a.icon} color={a.color} size={24} live={liveAgents.get(a.id) ?? null} />
+            <AgentAvatar icon={a.icon} color={a.color} size={24} live={liveAgents.get(a.id) ?? null} seed={a.id} />
             <span className="truncate">{a.name}</span>
           </Link>
         ))}

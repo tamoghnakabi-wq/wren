@@ -128,7 +128,7 @@ export default function UsagePage() {
               const a = agentById(k);
               return (
                 <li key={k} className="flex items-center gap-2 text-sm">
-                  <AgentAvatar icon={a?.icon} color={a?.color} size={20} />
+                  <AgentAvatar icon={a?.icon} color={a?.color} size={22} still />
                   <span className="flex-1 truncate">{a?.name ?? 'Deleted agent'}</span>
                   <span className="text-muted tabular-nums">{formatTokens(v.input + v.output)}</span>
                 </li>

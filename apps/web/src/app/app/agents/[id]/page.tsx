@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { Brain, CalendarClock, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
+import { CHARACTERS, characterFor, type Mood } from '@/lib/characters';
 import { AgentForm, draftFromAgent, toPayload, type AgentDraft } from '@/components/app/agent-form';
 import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
@@ -30,7 +31,7 @@ export default function AgentPage() {
   return (
     <div>
       <div className="mb-6 flex items-center gap-4">
-        <AgentAvatar icon={agent.icon} color={agent.color} size={56} />
+        <AgentAvatar icon={agent.icon} color={agent.color} size={64} mood={agentMood(sessions.rows)} seed={agent.id} title={`${agent.name} the ${CHARACTERS[characterFor(agent.icon)].name}`} />
         <div className="min-w-0">
           <h1 className="truncate text-2xl font-semibold tracking-tight">{agent.name}</h1>
           <p className="truncate text-sm text-muted">{modelLabel(agent.model?.source, agent.model?.model)}</p>
@@ -175,4 +176,15 @@ function AgentSchedules({ agentId }: { agentId: string }) {
       </Link>
     </div>
   );
+}
+
+/** What the agent looks like right now: busy, waiting, or how its latest task went. */
+function agentMood(sessions: Session[]): Mood {
+  if (sessions.some((s) => s.status === 'running' || s.status === 'queued')) return 'working';
+  if (sessions.some((s) => s.status === 'waiting')) return 'waiting';
+  const latest = sessions[0];
+  const recent = latest && Date.now() - new Date(latest.last_event_at).getTime() < 10 * 60_000;
+  if (recent && latest.status === 'completed') return 'success';
+  if (recent && latest.status === 'failed') return 'error';
+  return 'idle';
 }

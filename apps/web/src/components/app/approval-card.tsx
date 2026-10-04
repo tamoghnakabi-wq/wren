@@ -57,7 +57,7 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
   return (
     <div className={cx('rounded-2xl border bg-surface p-4 shadow-card', approval.risk === 'critical' ? 'border-danger/40' : 'border-warning/40')}>
       <div className="flex items-start gap-3">
-        {showAgent && agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={32} /> : <ShieldAlert className="h-6 w-6 text-warning" />}
+        {showAgent && agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={36} mood="waiting" seed={agent.id} /> : <ShieldAlert className="h-6 w-6 text-warning" />}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px]">
             {showAgent && agent && <span className="font-semibold">{agent.name}</span>}

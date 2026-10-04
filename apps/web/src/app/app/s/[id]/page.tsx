@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Archive, Cloud, Download, FileText, Laptop, MoreHorizontal, Pause, Play, Square, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
+import type { Mood } from '@/lib/characters';
 import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
 import { StatusPill } from '@/components/app/status';
@@ -51,6 +52,19 @@ export default function SessionPage() {
   const usage = runs.rows.reduce((n, r) => n + (r.usage?.input_tokens ?? 0) + (r.usage?.output_tokens ?? 0), 0);
   const askingQuestion = events.rows.some((e) => e.type === 'tool' && e.status === 'awaiting_input');
   const device = devices.find((d) => d.id === s?.device_id);
+  const toolRunning = working && events.rows.some((e) => e.type === 'tool' && e.run_id === run?.id && e.status === 'running');
+  const mood: Mood =
+    sessionApprovals.length || askingQuestion || s?.status === 'waiting'
+      ? 'waiting'
+      : working
+        ? toolRunning
+          ? 'working'
+          : 'thinking'
+        : s?.status === 'completed'
+          ? 'success'
+          : s?.status === 'failed'
+            ? 'error'
+            : 'idle';
 
   useEffect(() => {
     const el = scroller.current;
@@ -141,7 +155,7 @@ export default function SessionPage() {
           <ArrowLeft className="h-5 w-5" />
         </button>
         <Link href={agent ? `/app/agents/${agent.id}` : '/app'} className="shrink-0">
-          <AgentAvatar icon={agent?.icon} color={agent?.color} size={32} live={working ? 'running' : s.status === 'waiting' ? 'waiting' : null} />
+          <AgentAvatar icon={agent?.icon} color={agent?.color} size={38} mood={mood} seed={agent?.id} />
         </Link>
         <div className="min-w-0 flex-1">
           <p className="truncate text-[15px] font-semibold">{s.title}</p>

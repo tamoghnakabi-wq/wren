@@ -96,6 +96,7 @@ export function Timeline({ events, agent, approvals, working }: { events: EventR
   const items = useMemo(() => group(events), [events]);
   const last = events[events.length - 1];
   const showThinking = working && !(last?.type === 'message' && last.status === 'streaming' && String(last.data.text ?? ''));
+  const toolRunning = events.some((e) => e.type === 'tool' && e.status === 'running');
   return (
     <div className="space-y-5">
       {items.map((it, i) => {
@@ -118,8 +119,8 @@ export function Timeline({ events, agent, approvals, working }: { events: EventR
       })}
       {showThinking && (
         <div className="flex items-center gap-3 pl-1">
-          {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={30} live="running" />}
-          <span className="text-shimmer text-sm font-medium">Working…</span>
+          {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={toolRunning ? 'working' : 'thinking'} seed={agent.name} />}
+          <span className="text-shimmer text-sm font-medium">{toolRunning ? 'Working…' : 'Thinking…'}</span>
         </div>
       )}
     </div>
@@ -165,7 +166,7 @@ function AssistantTurn({ ev, tools, agent, approvals, thinkingEv }: { ev: EventR
   if (!text && !visible.length && !streaming && !failed && !thinking) return null;
   return (
     <div className="flex gap-3">
-      <div className="w-8 shrink-0 pt-0.5">{agent && <AgentAvatar icon={agent.icon} color={agent.color} size={30} />}</div>
+      <div className="w-8 shrink-0 pt-0.5">{agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={streaming ? 'thinking' : 'idle'} still={!streaming} seed={agent.name} />}</div>
       <div className="min-w-0 flex-1 space-y-2.5">
         {(streaming || thinkingEv?.status === 'streaming') && thinking && <p className="line-clamp-2 text-[13px] text-faint italic">{thinking.slice(-220)}</p>}
         {text && (
