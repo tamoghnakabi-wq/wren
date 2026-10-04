@@ -33,6 +33,10 @@ export default function SessionPage() {
   const s = session.rows[0];
   const agent = agentById(s?.agent_id);
   const run = runs.rows[0];
+  // runs.step is only saved when a run stops, so count model turns while it works.
+  const turns = new Map<string, number>();
+  for (const e of events.rows) if (e.run_id && e.type === 'message' && e.data.role === 'assistant') turns.set(e.run_id, (turns.get(e.run_id) ?? 0) + 1);
+  const steps = runs.rows.reduce((n, r) => n + Math.max(r.step, turns.get(r.id) ?? 0), 0);
   const sessionApprovals = approvals.filter((a) => a.session_id === id);
   const working = !!run && ['queued', 'running'].includes(run.status);
   const plan = useMemo(() => {
@@ -117,7 +121,7 @@ export default function SessionPage() {
         </div>
         <div className="flex justify-between py-0.5">
           <span>Steps</span>
-          <span className="text-text tabular-nums">{runs.rows.reduce((n, r) => n + r.step, 0)}</span>
+          <span className="text-text tabular-nums">{steps}</span>
         </div>
         <div className="flex justify-between py-0.5">
           <span>Tokens</span>
