@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import Link from 'next/link';
 import { ArrowRight, Check, Cloud, KeyRound, Laptop, ListChecks, Lock, MonitorSmartphone, Repeat, ShieldCheck, Smartphone, Terminal, Globe, FileText } from 'lucide-react';
 import { GithubMark as Github } from '@/components/brand';
@@ -96,7 +97,8 @@ function HeroMock() {
           <div className="grid grid-cols-3 gap-2 p-2.5">
             {[0, 1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="space-y-1">
-                <div className="h-12 rounded-md" style={{ background: `linear-gradient(135deg, hsl(${20 + i * 40} 60% 82%), hsl(${40 + i * 40} 55% 70%))` }} />
+                {/* Fictional, AI-generated listing photos (public/demo); small enough not to need optimising. */}
+                <Image src={`/demo/rental-${i + 1}.webp`} alt="" width={480} height={160} unoptimized className="h-12 w-full rounded-md bg-bg-subtle object-cover dark:brightness-90" />
                 <div className="h-1.5 w-4/5 rounded bg-border" />
                 <div className="h-1.5 w-1/2 rounded bg-border" />
               </div>
