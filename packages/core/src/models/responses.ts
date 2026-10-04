@@ -42,6 +42,16 @@ export class ResponsesClient implements ModelClient {
     return this.cfg.namespaces ? name : flatName(ns, name);
   }
 
+  // OpenAI reserves some namespace names for its own tools (e.g. `computer`),
+  // so ours always go out prefixed and come back stripped.
+  private static apiNamespace(ns: string) {
+    return `${NS_PREFIX}${ns}`;
+  }
+
+  private static ownNamespace(ns: string) {
+    return ns.startsWith(NS_PREFIX) ? ns.slice(NS_PREFIX.length) : ns;
+  }
+
   private renderTools(tools: ToolSpec[], hosted: ModelRequest['hosted']): Json[] {
     const out: Json[] = [];
     if (this.cfg.namespaces) {
@@ -50,7 +60,7 @@ export class ResponsesClient implements ModelClient {
       for (const [ns, list] of groups) {
         out.push({
           type: 'namespace',
-          name: ns,
+          name: ResponsesClient.apiNamespace(ns),
           description: NAMESPACE_HINTS[ns] ?? `${ns} tools`,
           tools: list.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters, strict: false })),
         });
@@ -103,7 +113,7 @@ export class ResponsesClient implements ModelClient {
             type: 'function_call',
             call_id: c.callId,
             name: this.toolName(c.namespace, c.name),
-            ...(this.cfg.namespaces ? { namespace: c.namespace } : {}),
+            ...(this.cfg.namespaces ? { namespace: ResponsesClient.apiNamespace(c.namespace) } : {}),
             arguments: JSON.stringify(c.args),
           });
         }
@@ -249,7 +259,7 @@ export class ResponsesClient implements ModelClient {
         }
       } else if (item.type === 'function_call') {
         const ns = (item.namespace as string | undefined) ?? undefined;
-        const { namespace, name } = this.cfg.namespaces && ns ? { namespace: ns, name: String(item.name) } : unflatName(String(item.name));
+        const { namespace, name } = this.cfg.namespaces && ns ? { namespace: ResponsesClient.ownNamespace(ns), name: String(item.name) } : unflatName(String(item.name));
         const parsed = parseArgs(item.arguments as string);
         toolCalls.push({ callId: String(item.call_id), namespace, name, args: parsed.args, argsError: parsed.error });
       }
@@ -265,6 +275,8 @@ export class ResponsesClient implements ModelClient {
     };
   }
 }
+
+const NS_PREFIX = 'wren_';
 
 const NAMESPACE_HINTS: Record<string, string> = {
   computer: "Shell and files on the agent's computer.",
