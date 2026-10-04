@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import { spawn } from 'node:child_process';
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -78,6 +78,15 @@ export class Updater {
   private busy = false;
 
   constructor(private readonly onChange: () => void) {}
+
+  /** Delete downloads of versions already installed (each one is a full ~130 MB build). */
+  cleanup() {
+    const root = join(dataDir(), 'updates');
+    if (!existsSync(root)) return;
+    for (const v of readdirSync(root)) {
+      if (/^\d+\.\d+\.\d+/.test(v) && compareVersions(v, app.getVersion()) <= 0) rmSync(join(root, v), { recursive: true, force: true });
+    }
+  }
 
   async check(): Promise<UpdateState> {
     if (this.busy) return this.state;

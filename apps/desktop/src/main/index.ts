@@ -370,6 +370,11 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(() => {
   }
   const policy = loadPolicy();
   if (policy.launchAtLogin) app.setLoginItemSettings({ openAtLogin: true });
+  try {
+    updater.cleanup();
+  } catch {
+    /* best effort */
+  }
   setTimeout(() => void updater.check(), 15_000);
   setInterval(() => void updater.check(), 4 * 60 * 60_000);
 });
