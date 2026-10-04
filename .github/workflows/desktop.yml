@@ -1,0 +1,94 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a GitHub release (otherwise build artifacts only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+        env: { ELECTRON_SKIP_BINARY_DOWNLOAD: '1' }
+      - run: npm test -w packages/core
+      - run: npx tsc --noEmit -p apps/desktop
+
+  mac:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: node scripts/package.mjs mac
+        working-directory: apps/desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+          if-no-files-found: error
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: node scripts/package.mjs win
+        working-directory: apps/desktop
+      - name: Smoke-test the installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem apps/desktop/release/*-setup.exe | Select-Object -First 1
+          Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait
+          $app = Join-Path $env:LOCALAPPDATA 'Programs\Wren\Wren.exe'
+          if (!(Test-Path $app)) { throw "Wren.exe was not installed at $app" }
+          (Get-Item $app).VersionInfo | Format-List ProductVersion, FileDescription
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: apps/desktop/release/*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [mac, windows]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Sign update manifest
+        env:
+          WREN_UPDATER_KEY: ${{ secrets.WREN_UPDATER_KEY }}
+        run: |
+          VERSION=$(node -p "require('./apps/desktop/package.json').version")
+          TAG="v$VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          node scripts/release-manifest.mjs "$VERSION" dist "${{ github.repository }}" "$TAG"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES=releases/$TAG.md
+          [ -f "$NOTES" ] || echo "Wren $VERSION" > "$NOTES"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Wren $VERSION" --notes-file "$NOTES" --prerelease
+          gh release upload "$TAG" dist/*.dmg dist/*.zip dist/*.exe dist/wren-update.json --clobber
