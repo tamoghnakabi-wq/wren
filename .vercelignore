@@ -1,0 +1,13 @@
+apps/desktop/release
+apps/desktop/app
+apps/desktop/dist-electron
+apps/desktop/build
+.secrets
+supabase/.temp
+supabase/.branches
+**/*.dmg
+**/*.zip
+**/*.exe
+**/*.blockmap
+**/node_modules
+**/.next
