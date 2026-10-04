@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+dist/
+release/
+.vercel/
+.env*
+!.env.example
+.secrets/
+*.log
+.DS_Store
+coverage/
+apps/desktop/build-out/
+apps/desktop/dist-electron/
+test-results/
+playwright-report/
+.vercel
