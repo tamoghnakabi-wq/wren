@@ -1,22 +1,24 @@
 'use client';
 
 import { ExternalLink } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
 import { useApp } from '@/components/app/provider';
 import { Card, formatTokens, PageHeader, Spinner } from '@/components/ui';
+import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { sourceInfo } from '@/lib/client/sources';
 
+/** One day × agent × source × model, summed by /api/usage. */
 interface UsageRow {
-  id: string;
+  day: string;
   agent_id: string | null;
   source: string;
   model: string;
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
-  created_at: string;
+  calls: number;
 }
 
 const BILLED_BY: Record<string, string> = {
@@ -34,15 +36,26 @@ const BILLED_BY: Record<string, string> = {
 
 export default function UsagePage() {
   const { userId, agentById } = useApp();
-  const since = useMemo(() => new Date(Date.now() - 30 * 86400_000).toISOString(), []);
-  const rows = useLive<UsageRow>({ table: 'usage_records', eq: { user_id: userId }, order: { column: 'created_at' }, limit: 5000 });
-  const recent = rows.rows.filter((r) => r.created_at >= since);
+  // The newest usage row (live) only tells us when to re-fetch the totals.
+  const latest = useLive<{ id: string }>({ table: 'usage_records', select: 'id', eq: { user_id: userId }, order: { column: 'created_at' }, limit: 1, realtimeFilter: { column: 'user_id', value: userId } });
+  const [recent, setRecent] = useState<UsageRow[] | null>(null);
+  const changeKey = latest.rows.map((r) => r.id).join();
+  useEffect(() => {
+    let live = true;
+    api<{ rows: UsageRow[] }>('/api/usage')
+      .then((r) => live && setRecent(r.rows))
+      .catch(() => live && setRecent((cur) => cur ?? []));
+    return () => {
+      live = false;
+    };
+  }, [changeKey]);
+  const rows = { loading: recent === null };
 
   const byDay = useMemo(() => {
     const m = new Map<string, number>();
     for (let i = 29; i >= 0; i--) m.set(new Date(Date.now() - i * 86400_000).toISOString().slice(0, 10), 0);
-    for (const r of recent) {
-      const k = r.created_at.slice(0, 10);
+    for (const r of recent ?? []) {
+      const k = r.day;
       if (m.has(k)) m.set(k, m.get(k)! + r.input_tokens + r.output_tokens);
     }
     return [...m.entries()];
@@ -50,18 +63,19 @@ export default function UsagePage() {
   const max = Math.max(1, ...byDay.map(([, v]) => v));
   const group = (key: (r: UsageRow) => string) => {
     const m = new Map<string, { input: number; output: number; cached: number; calls: number }>();
-    for (const r of recent) {
+    for (const r of recent ?? []) {
       const k = key(r);
       const cur = m.get(k) ?? { input: 0, output: 0, cached: 0, calls: 0 };
       cur.input += r.input_tokens;
       cur.output += r.output_tokens;
       cur.cached += r.cached_tokens;
-      cur.calls++;
+      cur.calls += r.calls;
       m.set(k, cur);
     }
     return [...m.entries()].sort((a, b) => b[1].input + b[1].output - (a[1].input + a[1].output));
   };
-  const total = recent.reduce((n, r) => n + r.input_tokens + r.output_tokens, 0);
+  const list = recent ?? [];
+  const total = list.reduce((n, r) => n + r.input_tokens + r.output_tokens, 0);
 
   if (rows.loading) return <Spinner className="mx-auto mt-24" />;
   return (
@@ -69,8 +83,8 @@ export default function UsagePage() {
       <PageHeader title="Usage" subtitle="Model usage by your agents over the last 30 days. Each provider bills you directly; Wren adds nothing on top." />
       <div className="grid gap-4 sm:grid-cols-3">
         <Stat label="Tokens (30 days)" value={formatTokens(total)} />
-        <Stat label="Model calls" value={String(recent.length)} />
-        <Stat label="Cached input" value={formatTokens(recent.reduce((n, r) => n + r.cached_tokens, 0))} />
+        <Stat label="Model calls" value={String(list.reduce((n, r) => n + r.calls, 0))} />
+        <Stat label="Cached input" value={formatTokens(list.reduce((n, r) => n + r.cached_tokens, 0))} />
       </div>
 
       <Card className="mt-4 p-5">
@@ -104,7 +118,7 @@ export default function UsagePage() {
                 <span className="text-muted tabular-nums">{formatTokens(v.input + v.output)}</span>
               </li>
             ))}
-            {!recent.length && <li className="text-sm text-muted">No usage yet.</li>}
+            {!list.length && <li className="text-sm text-muted">No usage yet.</li>}
           </ul>
         </Card>
         <Card className="p-5">

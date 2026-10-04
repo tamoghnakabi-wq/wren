@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { assertPublicUrl } from '@wren/core/net';
+import { assertPublicUrl, guardedFetch } from '@wren/core/net';
 import type { ToolSpec } from '@wren/core';
 
 // Remote MCP servers (Streamable HTTP) as connected tools. Each server's tools
@@ -16,7 +16,8 @@ export interface McpToolInfo {
 async function connect(url: string, token?: string) {
   await assertPublicUrl(url);
   const client = new Client({ name: 'wren', version: '0.1.0' });
-  const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: token ? { authorization: `Bearer ${token}` } : {} } });
+  // guardedFetch re-checks the address on every connection (DNS can change after assertPublicUrl).
+  const transport = new StreamableHTTPClientTransport(new URL(url), { fetch: guardedFetch, requestInit: { headers: token ? { authorization: `Bearer ${token}` } : {} } });
   await client.connect(transport);
   return client;
 }

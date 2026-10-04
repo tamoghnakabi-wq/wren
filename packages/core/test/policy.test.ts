@@ -34,6 +34,17 @@ describe('shell risk', () => {
     expect(desk('security find-generic-password -s foo').risk).toBe('critical');
     expect(desk('cat ~/.ssh/id_rsa').risk).toBe('critical');
   });
+  it('catches writes hidden in read-only commands', () => {
+    expect(desk('git log > out.txt').risk).toBe('medium');
+    expect(desk('git diff --output=x.patch').risk).toBe('medium');
+    expect(desk('sort -o out.txt in.txt').risk).toBe('medium');
+    expect(desk('ls 2>&1').risk).toBe('low');
+    expect(desk('cat a 2>/dev/null').risk).toBe('low');
+    expect(desk('gh api repos/o/r/issues -f title=hi').risk).toBe('high');
+    expect(desk('gh api repos/o/r/issues --input body.json').risk).toBe('high');
+    expect(desk('gh api repos/o/r').risk).toBe('low');
+    expect(desk('find . -name "*.log" -delete').risk).toBe('high');
+  });
   it('blocks catastrophic commands', () => {
     expect(desk('rm -rf /').blocked).toBeTruthy();
     expect(desk('rm -rf ~').blocked).toBeTruthy();
@@ -62,6 +73,19 @@ describe('browser + other tools', () => {
     expect(assessCall('browser.click', { ref: 'e2' }, 'cloud', { browserTarget: { label: 'Place order' } }).risk).toBe('critical');
     expect(assessCall('browser.click', { ref: 'e2' }, 'cloud', { browserTarget: { label: 'Next page' } }).risk).toBe('low');
     expect(assessCall('browser.click', { ref: 'e2' }, 'cloud', { browserTarget: { label: 'Send message' } }).risk).toBe('high');
+  });
+  it('assesses the focused element for activating key presses', () => {
+    expect(assessCall('browser.press', { key: 'Tab' }, 'cloud').risk).toBe('low');
+    expect(assessCall('browser.press', { key: 'Enter' }, 'cloud', { browserTarget: { label: 'Buy now' } }).risk).toBe('critical');
+    expect(assessCall('browser.press', { key: 'Space' }, 'cloud', { browserTarget: { label: 'Delete account' } }).risk).toBe('high');
+    expect(assessCall('browser.press', { key: 'Control+Enter' }, 'cloud', { browserTarget: { label: 'Send' } }).risk).toBe('high');
+  });
+  it('fails closed when the element cannot be inspected', () => {
+    expect(assessCall('browser.click', { ref: 'e9' }, 'cloud').risk).toBe('high');
+    expect(assessCall('browser.press', { key: 'Enter' }, 'desktop').risk).toBe('high');
+  });
+  it('never trusts an MCP server to lower its own risk', () => {
+    expect(assessCall('mcp_abc123.delete_all', {}, 'cloud', { mcpReadOnly: true }).risk).toBe('high');
   });
   it('rates GitHub writes', () => {
     expect(assessCall('github.request', { method: 'GET', path: '/user' }, 'cloud').risk).toBe('low');

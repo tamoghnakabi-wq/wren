@@ -183,7 +183,12 @@ export class AnthropicClient implements ModelClient {
     if (sr === 'refusal') stopReason = 'refusal';
     else if (sr === 'max_tokens') stopReason = 'max_tokens';
     else if (sr === 'pause_turn') stopReason = 'other';
-    if (stopReason === 'refusal' || (stopReason === 'max_tokens' && toolCalls.length)) toolCalls.length = 0; // never run a cut-off call
+    // Never run a cut-off or refused call, but keep it paired with an error result:
+    // the raw turn is replayed as-is, and a tool_use without a tool_result is rejected.
+    if (stopReason === 'refusal' || (stopReason === 'max_tokens' && toolCalls.length)) {
+      const why = stopReason === 'refusal' ? 'Not run: the model stopped this reply.' : 'Not run: the reply was cut off before this call was complete.';
+      for (const c of toolCalls) c.argsError = why;
+    }
     const u = final.usage as unknown as Record<string, number | null>;
     return {
       text,

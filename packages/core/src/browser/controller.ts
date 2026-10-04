@@ -45,13 +45,20 @@ const SNAPSHOT_FN = `(() => {
     const r = el.getBoundingClientRect();
     return r.width > 1 && r.height > 1;
   };
+  const SECRET = /password|passwd|passcode|(^|[^a-z])(pin|otp|totp|mfa|2fa|ssn|cvc|cvv|csc|iban)([^a-z]|$)|cc-|card.?(number|num|no)|security.?code|one-time|social.?security|routing|account.?number|secret|access.?token|api.?key/i;
+  const sensitive = (el) => {
+    const t = (el.getAttribute('type') || '').toLowerCase();
+    if (t === 'password') return true;
+    const hints = [el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'), el.getAttribute('placeholder')].join(' ');
+    return SECRET.test(hints);
+  };
   const name = (el) => {
     const a = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') || '';
     if (a) return a.trim();
     const lb = el.id && document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
     if (lb) return lb.innerText.trim();
     const pl = el.getAttribute('placeholder'); if (pl) return pl.trim();
-    const t = (el.innerText || el.value || '').trim();
+    const t = (el.innerText || (sensitive(el) ? '' : el.value) || '').trim();
     return t.replace(/\\s+/g, ' ').slice(0, 100);
   };
   const role = (el) => {
@@ -93,7 +100,7 @@ const SNAPSHOT_FN = `(() => {
       const r = role(el);
       let line = '[' + ref + '] ' + r + ' "' + name(el) + '"';
       if (el.tagName === 'A') { const h = el.getAttribute('href') || ''; if (h && !h.startsWith('javascript')) line += ' -> ' + h.slice(0, 120); }
-      if (r === 'textbox') { const t = el.getAttribute('type'); if (t && t !== 'text') line += ' type=' + t; if (el.value) line += ' value="' + String(el.value).slice(0, 80) + '"'; }
+      if (r === 'textbox') { const t = el.getAttribute('type'); if (t && t !== 'text') line += ' type=' + t; if (el.value) line += sensitive(el) ? ' value=(hidden, filled in)' : ' value="' + String(el.value).slice(0, 80) + '"'; }
       if (r === 'checkbox' || r === 'radio') line += el.checked ? ' (checked)' : ' (unchecked)';
       if (r === 'select') line += ' value="' + (el.value || '') + '" options: ' + Array.from(el.options).slice(0, 15).map(o => o.text.trim()).join(' | ');
       if (el.disabled) line += ' (disabled)';
@@ -112,9 +119,11 @@ const SNAPSHOT_FN = `(() => {
 })()`;
 
 const DESCRIBE_FN = `(ref) => {
-  const el = document.querySelector('[data-wren-ref="' + ref + '"]');
-  if (!el) return null;
-  const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
+  const el = ref === '@focused' ? (document.activeElement && document.activeElement !== document.body ? document.activeElement : null) : document.querySelector('[data-wren-ref="' + ref + '"]');
+  if (!el) return ref === '@focused' ? { label: '', role: 'page' } : null;
+  const t = (el.getAttribute('type') || '').toLowerCase();
+  const hidden = t === 'password' || /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i.test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
+  const label = (el.getAttribute('aria-label') || el.innerText || (hidden ? '' : el.value) || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
   const form = el.closest('form');
   const submitText = form ? Array.from(form.querySelectorAll('button,[type=submit]')).map(b => (b.innerText || b.value || '').trim()).join(' / ').slice(0, 120) : '';
   return { label: label + (submitText && el.tagName !== 'BUTTON' ? ' (form: ' + submitText + ')' : ''), role: el.getAttribute('role') || el.tagName.toLowerCase(), inputType: el.getAttribute('type') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined, href: el.getAttribute('href') || undefined };

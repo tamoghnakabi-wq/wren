@@ -90,13 +90,21 @@ export class ChatClient implements ModelClient {
     const calls = new Map<number, { id: string; name: string; args: string }>();
     let usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
     let finish = '';
+    let done = false;
     for await (const m of readSse(res.body, req.signal)) {
-      if (m.data === '[DONE]') break;
+      if (m.data === '[DONE]') {
+        done = true;
+        break;
+      }
       let ev: Json;
       try {
         ev = JSON.parse(m.data);
       } catch {
         continue;
+      }
+      if (ev.error) {
+        const err = (typeof ev.error === 'object' ? ev.error : { message: String(ev.error) }) as Json;
+        throw new ModelError(`Local model server error: ${String(err.message ?? 'unknown error')}`, undefined, err.code ? String(err.code) : undefined, false);
       }
       const choice = ((ev.choices as Json[]) ?? [])[0];
       if (ev.usage) {
@@ -125,10 +133,13 @@ export class ChatClient implements ModelClient {
       if (choice.finish_reason) finish = String(choice.finish_reason);
     }
 
+    // A stream that just stops (no finish reason, no [DONE]) didn't succeed: don't act on it.
+    if (!finish && !done) throw new ModelError('The local model stream ended before finishing.', undefined, 'stream_interrupted', true);
+    const cutOff = finish === 'length' || finish === 'content_filter';
     const toolCalls: ModelToolCall[] = [...calls.values()].map((c, i) => {
       const { namespace, name } = unflatName(c.name);
       const p = parseArgs(c.args);
-      return { callId: c.id || `call_${Date.now().toString(36)}_${i}`, namespace, name, args: p.args, argsError: p.error };
+      return { callId: c.id || `call_${Date.now().toString(36)}_${i}`, namespace, name, args: p.args, argsError: cutOff ? 'Not run: the reply was cut off before this call was complete.' : p.error };
     });
     const rawItems: Json[] = [{ role: 'assistant', content: text, tool_calls: toolCalls.map((c) => ({ id: c.callId, name: flatName(c.namespace, c.name), arguments: JSON.stringify(c.args) })) }];
     return {

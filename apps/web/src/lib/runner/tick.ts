@@ -5,7 +5,7 @@ import { db } from '../db';
 import { resolveCloudModel, connectionSecret } from '../models';
 import { notifyUser } from '../notify';
 import { finishRun, kickTick } from '../runs';
-import { DbRunStore } from './store';
+import { DbRunStore, LeaseLostError } from './store';
 import { mcpNamespace, mcpToolSpecs, type McpToolInfo } from '../mcp';
 import { SandboxHost, WORKSPACE } from './sandbox-host';
 
@@ -22,9 +22,12 @@ const MAX_CRASHES = 3;
 export async function runTick(runId: string): Promise<string> {
   const sql = db();
   const lease = randomUUID();
+  // A lease that is still set but expired means the previous tick was killed
+  // (e.g. hit the function time limit) without cleaning up: count it as a crash.
   const claimed = await sql`
     update public.runs set lease_id = ${lease}, lease_until = now() + make_interval(secs => ${LEASE_SECONDS}),
       status = case when status = 'queued' then 'running' else status end,
+      crash_count = crash_count + case when lease_id is not null then 1 else 0 end,
       started_at = coalesce(started_at, now()), wake_at = null
     where id = ${runId} and runtime = 'cloud' and status in ('queued', 'running')
       and (lease_until is null or lease_until < now()) and (wake_at is null or wake_at <= now())
@@ -32,17 +35,21 @@ export async function runTick(runId: string): Promise<string> {
   if (!claimed.length) return 'not-claimed';
   const run = claimed[0];
   const started = Date.now();
+  if (Number(run.crash_count) >= MAX_CRASHES) {
+    await finishRun(runId, { kind: 'failed', error: 'The run kept stopping before it could finish a step (each attempt ran out of time). Try a smaller task or a faster model.', steps: run.step }, lease);
+    return 'failed';
+  }
 
   const [agent] = await sql`select * from public.agents where id = ${run.agent_id}`;
   const [profile] = await sql`select email from public.profiles where id = ${run.user_id}`;
   if (!agent) {
-    await finishRun(runId, { kind: 'failed', error: 'The agent was deleted.', steps: run.step });
+    await finishRun(runId, { kind: 'failed', error: 'The agent was deleted.', steps: run.step }, lease);
     return 'failed';
   }
   await sql`update public.sessions set status = 'running' where id = ${run.session_id} and status <> 'running'`;
 
   const modelRef = run.model as ModelRef;
-  const store = new DbRunStore({ runId, sessionId: run.session_id, agentId: agent.id, userId: run.user_id, agentName: agent.name, source: modelRef.source });
+  const store = new DbRunStore({ runId, sessionId: run.session_id, agentId: agent.id, userId: run.user_id, agentName: agent.name, source: modelRef.source, leaseId: lease });
   const tools = { ...DEFAULT_TOOLS, ...(agent.tools as Partial<AgentTools>) };
   const github = tools.github ? await connectionSecret(run.user_id, 'github') : null;
   const mcp = new Map<string, { url: string; token?: string; tools: McpToolInfo[] }>();
@@ -111,6 +118,7 @@ export async function runTick(runId: string): Promise<string> {
     });
   } catch (e) {
     const err = e as Error & { status?: number; code?: string };
+    if (e instanceof LeaseLostError) return 'lease-lost';
     if (err.status && err.status < 500) {
       outcome = { kind: 'failed', error: err.message, code: err.code, steps: run.step };
     } else {
@@ -125,15 +133,15 @@ export async function runTick(runId: string): Promise<string> {
     }
   }
 
-  await sql`update public.runs set step = ${outcome.steps} where id = ${runId}`;
   if (outcome.kind === 'yield') {
+    // A clean hand-off: progress was made, so earlier timeouts no longer count.
     const wakeMs = outcome.wakeInMs ?? 0;
-    await sql`update public.runs set lease_id = null, lease_until = null,
-      wake_at = ${wakeMs ? new Date(Date.now() + wakeMs) : null} where id = ${runId} and lease_id = ${lease}`;
-    if (!wakeMs) await kickTick(runId);
+    const handed = await sql`update public.runs set step = ${outcome.steps}, lease_id = null, lease_until = null, crash_count = 0,
+      wake_at = ${wakeMs ? new Date(Date.now() + wakeMs) : null} where id = ${runId} and lease_id = ${lease} returning id`;
+    if (handed.length && !wakeMs) await kickTick(runId);
     return 'yield';
   }
-  await finishRun(runId, outcome);
+  await finishRun(runId, outcome, lease);
   if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') {
     const others = await sql`select 1 from public.runs where agent_id = ${agent.id} and runtime = 'cloud' and status in ('queued', 'running') and id <> ${runId} limit 1`;
     if (!others.length) await host.stop();

@@ -43,6 +43,7 @@ export interface ChatGPTStatus {
 }
 
 const SECRET = 'chatgpt.bin';
+const HINT_SECRET = 'chatgpt-hint.bin';
 
 /** Stable, opaque host id for this installation (persisted before first sign-in). */
 export function hostId(): string {
@@ -53,9 +54,20 @@ export function hostId(): string {
   return id;
 }
 
-/** Saved client id + login hint survive sign-out so re-auth reuses the registration. */
+/** Saved client id + login hints survive sign-out so re-auth reuses the registration. */
 function savedClient(): { client_id?: string; email?: string; id_token?: string } {
-  return readJson('chatgpt-client.json', {});
+  const c = readJson<{ client_id?: string; email?: string; id_token?: string }>('chatgpt-client.json', {});
+  if (c.id_token) {
+    // Older versions kept the id token in plain JSON: move it to encrypted storage.
+    try {
+      writeSecret(HINT_SECRET, { id_token: c.id_token });
+      writeJson('chatgpt-client.json', { client_id: c.client_id, email: c.email });
+    } catch {
+      /* keychain unavailable: leave as is */
+    }
+  }
+  const hint = readSecret<{ id_token?: string }>(HINT_SECRET);
+  return { client_id: c.client_id, email: c.email, id_token: hint?.id_token ?? c.id_token };
 }
 
 const b64url = (b: Buffer) => b.toString('base64url');
@@ -170,8 +182,11 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
       scopes,
       saved_at: new Date().toISOString(),
     };
+    authGeneration++;
     writeSecret(SECRET, reg);
-    writeJson('chatgpt-client.json', { client_id: clientId, email: reg.email, id_token: reg.id_token });
+    // Kept for the next sign-in's hints; the id token goes in encrypted storage only.
+    writeJson('chatgpt-client.json', { client_id: clientId, email: reg.email });
+    writeSecret(HINT_SECRET, { id_token: reg.id_token });
     return status();
   } finally {
     server.close();
@@ -191,15 +206,19 @@ async function tokenRequest(form: Record<string, string>) {
 }
 
 let refreshing: Promise<string> | null = null;
+/** Bumped by sign-in and sign-out, so a refresh that started earlier can't save stale tokens. */
+let authGeneration = 0;
 
 /** A valid access token, refreshed (serialised) when close to expiry. */
 export async function accessToken(): Promise<string> {
   const r = load();
   if (!r?.refresh_token) throw new Error('Not signed in with ChatGPT on this computer.');
   if (r.expires_at - Date.now() > 120_000) return r.access_token;
+  const generation = authGeneration;
   refreshing ??= (async () => {
     try {
       const tok = await tokenRequest({ grant_type: 'refresh_token', client_id: r.client_id, refresh_token: r.refresh_token, resource: RESOURCE });
+      if (generation !== authGeneration) throw new Error('Signed out of ChatGPT on this computer.');
       const next: Registration = {
         ...r,
         access_token: tok.access_token,
@@ -214,7 +233,7 @@ export async function accessToken(): Promise<string> {
     } catch (e) {
       const code = (e as { code?: string }).code ?? '';
       if (/invalid_grant|invalid_refresh_token|token_expired|refresh_token_(expired|invalidated|reused)/.test(code)) {
-        writeSecret(SECRET, { ...r, access_token: '', refresh_token: '' });
+        if (generation === authGeneration) writeSecret(SECRET, { ...r, access_token: '', refresh_token: '' });
         throw new Error('Your ChatGPT sign-in expired or was disconnected. Sign in with ChatGPT again in Settings.');
       }
       throw e;
@@ -226,6 +245,7 @@ export async function accessToken(): Promise<string> {
 }
 
 export async function signOut(): Promise<{ revoked: boolean }> {
+  authGeneration++;
   const r = load();
   let revoked = false;
   if (r?.refresh_token) {

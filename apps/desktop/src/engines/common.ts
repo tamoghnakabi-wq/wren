@@ -22,6 +22,8 @@ export interface EngineRun {
   prompt: string;
   cwd: string;
   folders: string[];
+  /** This computer's switches (Settings → This computer); engines must respect them too. */
+  allow: { shell: boolean; browser: boolean; screen: boolean };
   resumeId?: string;
   signal: AbortSignal;
   /** Remembered engine session id for follow-ups in the same Wren task. */
@@ -130,7 +132,11 @@ export async function decide(
   inFolders: (p: string) => boolean,
 ): Promise<{ allow: boolean; message?: string }> {
   for (const p of call.paths ?? []) if (!inFolders(p)) return { allow: false, message: `Blocked by Wren: ${p} is outside the folders allowed on this computer.` };
-  const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: process.platform === 'win32' });
+  if (call.name === 'computer.shell' && !run.allow.shell) return { allow: false, message: 'Blocked by Wren: terminal access is turned off on this computer (Wren → Settings → This computer).' };
+  if (call.name.startsWith('browser.') && !run.allow.browser) return { allow: false, message: 'Blocked by Wren: browser use is turned off on this computer.' };
+  if (call.name.startsWith('screen.') && !run.allow.screen) return { allow: false, message: 'Blocked by Wren: screen capture is turned off on this computer.' };
+  // The engine runs commands itself, outside Wren's sandbox, on every platform.
+  const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: true });
   if (a.blocked) return { allow: false, message: a.blocked };
   if (!needsApproval(a.risk as Risk, run.autonomy)) return { allow: true };
   let t = writer.tools.get(call.callId);

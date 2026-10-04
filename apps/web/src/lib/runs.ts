@@ -139,21 +139,40 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
   failed: 'failed',
 };
 
-/** Persist a terminal or waiting outcome for a run (cloud or desktop). */
-export async function finishRun(runId: string, outcome: LoopOutcome): Promise<void> {
+/**
+ * Persist a terminal or waiting outcome for a run (cloud or desktop). With a
+ * lease id, only the worker that still holds the lease can finish the run.
+ */
+export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string): Promise<void> {
   const sql = db();
   const [run] = await sql`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId}`;
   if (!run) return;
-  const runStatus =
+  // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
+  if (run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(outcome.kind)) {
+    outcome = { kind: 'cancelled', steps: outcome.steps };
+    await sql`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
+    await sql`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
+  }
+  let runStatus =
     outcome.kind === 'waiting_approval' || outcome.kind === 'waiting_input' ? 'waiting' : outcome.kind === 'yield' ? 'running' : outcome.kind;
+  // The user may have answered the approval while the worker was still stopping: don't strand the run.
+  let decidedEarly = false;
+  if (outcome.kind === 'waiting_approval') {
+    const [a] = await sql`select status from public.approvals where id = ${outcome.approvalId} and run_id = ${runId}`;
+    decidedEarly = !!a && ['approved', 'denied', 'expired'].includes(a.status);
+    if (decidedEarly) runStatus = 'queued';
+  }
   const terminal = ['completed', 'failed', 'cancelled'].includes(runStatus);
-  await sql`
+  const updated = await sql`
     update public.runs set status = ${runStatus}, step = greatest(step, ${outcome.steps}), lease_id = null, lease_until = null,
       error = ${outcome.kind === 'failed' ? outcome.error : null},
       result = ${outcome.kind === 'completed' ? outcome.result.slice(0, 20000) : run.result},
       ended_at = ${terminal ? new Date() : null}
-    where id = ${runId}`;
-  await sql`update public.sessions set status = ${SESSION_STATUS[outcome.kind]}, last_event_at = now() where id = ${run.session_id}`;
+    where id = ${runId} and (${leaseId ?? null}::uuid is null or lease_id = ${leaseId ?? null}::uuid)
+    returning id`;
+  if (!updated.length) return; // another worker owns the run now
+  await sql`update public.sessions set status = ${decidedEarly ? 'queued' : SESSION_STATUS[outcome.kind]}, last_event_at = now() where id = ${run.session_id}`;
+  if (decidedEarly) await kickRun(runId);
   if (terminal) await sql`delete from public.run_live where run_id = ${runId}`;
 
   const url = `/app/s/${run.session_id}`;

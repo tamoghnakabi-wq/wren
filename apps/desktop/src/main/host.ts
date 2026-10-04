@@ -1,14 +1,15 @@
 import { desktopCapturer, screen } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { fetchReadable } from '@wren/core/net';
 import { BrowserController } from '@wren/core/browser/controller';
 import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
+import { allowedRoots, confinePath } from './paths';
+import { seatbeltProfile } from './sandbox';
 
 // Tool host for runs on this computer. Everything is confined to the folders
 // the user allowed in this app's Settings (a policy the server can't change).
@@ -40,42 +41,32 @@ export class LocalHost implements ToolHost {
   // -------------------------------------------------------- paths
 
   private roots(): string[] {
-    return this.policy.folders.map((f) => {
-      try {
-        return realpathSync(f);
-      } catch {
-        return resolve(f);
-      }
-    });
+    return allowedRoots(this.policy.folders);
   }
 
-  /** Resolve a path and require it to be inside an allowed folder (no symlink escapes). */
+  /** Resolve a path and require its real target to be inside an allowed folder (symlinks included). */
   resolvePath(p: string): string {
-    const roots = this.roots();
-    if (!roots.length) throw new Error('No folders are allowed on this computer. Add one in Wren → Settings → This computer.');
-    const expanded = p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
-    const abs = isAbsolute(expanded) ? resolve(expanded) : resolve(roots[0], expanded || '.');
-    // Resolve the deepest existing ancestor to catch symlinks.
-    let probe = abs;
-    while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
-    let real = probe;
+    return confinePath(p, this.roots());
+  }
+
+  /** Write without following a symlink at the final path component (closes a check-then-swap race). */
+  private writeConfined(p: string, content: string) {
+    const fd = openSync(p, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o644);
     try {
-      real = realpathSync(probe);
-    } catch {
-      /* keep */
+      writeSync(fd, content);
+    } finally {
+      closeSync(fd);
     }
-    const full = resolve(real, relative(probe, abs));
-    const inside = roots.some((r) => full === r || full.startsWith(r.endsWith(sep) ? r : r + sep));
-    if (!inside) throw new Error(`"${p}" is outside the folders you allowed (${roots.join(', ')}).`);
-    return full;
   }
 
   async riskContext(name: string, args: Record<string, unknown>) {
     const unsandboxed = process.platform === 'win32' || (process.platform === 'darwin' && !existsSync('/usr/bin/sandbox-exec'));
     if (name === 'computer.shell') return { unsandboxed };
-    if ((name === 'browser.click' || name === 'browser.type' || name === 'browser.press') && browserCtl && typeof args.ref === 'string') {
-      const r = await browserCtl.controller.act({ action: 'describe', ref: args.ref });
-      if (r.target) return { browserTarget: r.target };
+    if ((name === 'browser.click' || name === 'browser.type' || name === 'browser.press') && browserCtl) {
+      // A key press acts on whatever has focus, so describe that element.
+      const ref = name === 'browser.press' ? '@focused' : typeof args.ref === 'string' ? args.ref : '';
+      const r = ref ? await browserCtl.controller.act({ action: 'describe', ref }) : null;
+      if (r?.target) return { browserTarget: r.target };
     }
     if (name === 'computer.write_file' && typeof args.path === 'string') {
       try {
@@ -119,7 +110,8 @@ export class LocalHost implements ToolHost {
       case 'computer.write_file': {
         const p = this.resolvePath(s('path'));
         mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, s('content'));
+        this.resolvePath(p); // re-check after creating directories
+        this.writeConfined(p, s('content'));
         return { output: `Wrote ${Buffer.byteLength(s('content'))} bytes to ${p}.` };
       }
       case 'computer.edit_file': {
@@ -129,7 +121,7 @@ export class LocalHost implements ToolHost {
         const count = text.split(s('old_text')).length - 1;
         if (!s('old_text') || count === 0) return { output: 'old_text was not found in the file.', isError: true };
         if (count > 1) return { output: `old_text appears ${count} times; include more context so it is unique.`, isError: true };
-        writeFileSync(p, text.replace(s('old_text'), () => s('new_text')));
+        this.writeConfined(p, text.replace(s('old_text'), () => s('new_text')));
         return { output: `Edited ${p}.` };
       }
       case 'computer.list_files': {
@@ -143,11 +135,11 @@ export class LocalHost implements ToolHost {
             const full = join(d, name);
             let st;
             try {
-              st = statSync(full);
+              st = lstatSync(full); // never follow links out of the folder
             } catch {
               continue;
             }
-            out.push(`${st.isDirectory() ? 'd' : 'f'} ${st.size} ${full}`);
+            out.push(`${st.isSymbolicLink() ? 'l' : st.isDirectory() ? 'd' : 'f'} ${st.size} ${full}`);
             if (st.isDirectory() && level < depth) walk(full, level + 1);
           }
         };
@@ -174,17 +166,7 @@ export class LocalHost implements ToolHost {
   // -------------------------------------------------------- shell
 
   private sandboxProfile(): string {
-    const home = homedir();
-    const q = (p: string) => JSON.stringify(p);
-    const writable = [...this.roots(), realpathSync(tmpdir()), '/private/tmp', '/private/var/folders', join(home, '.npm'), join(home, '.cache'), join(home, 'Library/Caches'), join(home, '.cargo/registry'), join(home, '.bun/install')];
-    const secret = [join(home, '.ssh'), join(home, '.aws'), join(home, '.gnupg'), join(home, '.config/gh'), join(home, 'Library/Keychains'), join(home, 'Library/Cookies'), join(home, 'Library/Messages'), join(home, 'Library/Mail'), join(home, 'Library/Application Support/Google/Chrome'), join(home, 'Library/Application Support/Firefox'), join(home, 'Library/Safari'), join(home, '.codex'), join(home, '.claude'), join(home, '.grok'), dataDir()];
-    return [
-      '(version 1)',
-      '(allow default)',
-      '(deny file-write*)',
-      `(allow file-write* ${writable.map((p) => `(subpath ${q(p)})`).join(' ')} (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty") (regex #"^/dev/fd/") (regex #"^/dev/ttys"))`,
-      `(deny file-read* ${secret.map((p) => `(subpath ${q(p)})`).join(' ')})`,
-    ].join('\n');
+    return seatbeltProfile(this.roots(), dataDir());
   }
 
   private spawnShell(command: string, cwd: string): ChildProcess {

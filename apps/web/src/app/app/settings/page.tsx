@@ -251,7 +251,11 @@ function ThisComputer({ d }: { d: WrenDesktop }) {
       </Row>
       <div className="px-4 py-3.5">
         <p className="text-sm font-medium">Folders agents may use</p>
-        <p className="text-[12.5px] text-muted">Agents can read and write only inside these folders. Everything else is off-limits.</p>
+        <p className="text-[12.5px] text-muted">
+          {status?.platform === 'win32'
+            ? 'Agents’ file tools work only inside these folders. Windows has no sandbox for terminal commands: anything that can change files asks you first, but read-only commands can still see other files.'
+            : 'Agents’ file tools work only inside these folders. Terminal commands run in a macOS sandbox: they can’t change anything outside these folders or read the rest of your home folder (developer tool settings and caches excepted).'}
+        </p>
         <ul className="mt-2 space-y-1">
           {policy.folders.map((f) => (
             <li key={f} className="flex items-center gap-2 rounded-lg bg-bg-subtle px-3 py-1.5 font-mono text-[12.5px]">

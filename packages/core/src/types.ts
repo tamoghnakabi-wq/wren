@@ -103,6 +103,8 @@ export interface MessageData {
   raw?: RawTurn;
   model?: string;
   source?: string;
+  /** Tool calls parsed from this turn, so a crash before they were saved can be repaired. */
+  calls?: { callId: string; namespace: string; name: string; args: Record<string, unknown>; argsError?: string }[];
 }
 
 export interface ToolCallData {

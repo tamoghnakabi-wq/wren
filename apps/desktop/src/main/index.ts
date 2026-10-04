@@ -3,7 +3,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { publicJson } from './api';
+import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, APP_URL, loadDevice, loadPolicy, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
 import { closeBrowser, killAllJobs } from './host';
@@ -312,6 +312,29 @@ function registerIpc() {
   handle('openEngineLogin', (engine) => openEngineLogin(engine === 'grok-build' ? 'grok-build' : 'claude-code'));
   handle('checkUpdate', () => updater.check());
   handle('installUpdate', () => installUpdate());
+  // Remote approvals off: the web page can only *open* this native prompt; the user answers it here.
+  handle('decideApproval', async (runId, approvalId) => {
+    const id = /^[0-9a-f-]{36}$/i;
+    if (typeof runId !== 'string' || typeof approvalId !== 'string' || !id.test(runId) || !id.test(approvalId)) return { error: 'Invalid approval.' };
+    try {
+      const a = await deviceJson<{ title: string; status: string; reason: string | null; args: Record<string, unknown>; agentName: string }>(`/api/device/runs/${runId}/approval-info`, { id: approvalId });
+      if (a.status !== 'pending') return { error: `This request was already ${a.status}.` };
+      const opts: Electron.MessageBoxOptions = {
+        type: 'warning',
+        title: 'Wren approval',
+        message: `${a.agentName} wants to: ${a.title}`,
+        detail: `${a.reason ? `This ${a.reason}.\n\n` : ''}${typeof a.args.command === 'string' ? a.args.command : JSON.stringify(a.args, null, 2).slice(0, 800)}`,
+        buttons: ['Deny', 'Approve'],
+        defaultId: 0,
+        cancelId: 0,
+      };
+      const r = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+      await deviceJson(`/api/device/runs/${runId}/decide`, { id: approvalId, approve: r.response === 1 });
+      return { decided: true };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  });
   handle('openExternal', (url) => {
     if (typeof url === 'string' && /^https:\/\//.test(url)) void shell.openExternal(url);
   });

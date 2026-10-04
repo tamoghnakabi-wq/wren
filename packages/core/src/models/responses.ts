@@ -261,7 +261,9 @@ export class ResponsesClient implements ModelClient {
         const ns = (item.namespace as string | undefined) ?? undefined;
         const { namespace, name } = this.cfg.namespaces && ns ? { namespace: ResponsesClient.ownNamespace(ns), name: String(item.name) } : unflatName(String(item.name));
         const parsed = parseArgs(item.arguments as string);
-        toolCalls.push({ callId: String(item.call_id), namespace, name, args: parsed.args, argsError: parsed.error });
+        // A call from an incomplete response (or one not marked completed) is recorded, never run.
+        const unfinished = stop === 'max_tokens' || (item.status !== undefined && item.status !== 'completed');
+        toolCalls.push({ callId: String(item.call_id), namespace, name, args: parsed.args, argsError: unfinished ? 'Not run: the reply was cut off before this call was complete.' : parsed.error });
       }
     }
     if (toolCalls.length && stop === 'end') stop = 'tool_calls';

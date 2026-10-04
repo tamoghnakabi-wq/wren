@@ -12,6 +12,14 @@ export interface RunRefs {
   userId: string;
   agentName: string;
   source: string;
+  /** When set, every write first checks this worker still holds the run's lease. */
+  leaseId?: string;
+}
+
+export class LeaseLostError extends Error {
+  constructor() {
+    super('Another worker took over this run.');
+  }
 }
 
 type Row = { id: string; seq: string | number; run_id: string | null; type: string; status: string | null; data: unknown; created_at: Date };
@@ -43,6 +51,12 @@ export function stripInline(data: unknown): unknown {
 export class DbRunStore implements RunStore {
   constructor(private readonly r: RunRefs) {}
 
+  private async fence() {
+    if (!this.r.leaseId) return;
+    const [row] = await db()`select 1 from public.runs where id = ${this.r.runId} and lease_id = ${this.r.leaseId}`;
+    if (!row) throw new LeaseLostError();
+  }
+
   async events(): Promise<SessionEvent[]> {
     const rows = await db()<Row[]>`
       select id, seq, run_id, type, status, data, created_at from public.events
@@ -51,6 +65,7 @@ export class DbRunStore implements RunStore {
   }
 
   async append<T>(type: SessionEvent['type'], data: T, status?: string): Promise<SessionEvent<T>> {
+    await this.fence();
     const sql = db();
     const [row] = await sql<Row[]>`
       insert into public.events (user_id, session_id, run_id, type, status, data)
@@ -60,14 +75,16 @@ export class DbRunStore implements RunStore {
     return toEvent(row) as SessionEvent<T>;
   }
 
+  /** Only this run's own events can be changed. */
   async update(id: string, patch: { data?: unknown; status?: string }): Promise<void> {
+    await this.fence();
     const sql = db();
     if (patch.data !== undefined && patch.status !== undefined) {
-      await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)}, status = ${patch.status} where id = ${id} and session_id = ${this.r.sessionId}`;
+      await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)}, status = ${patch.status} where id = ${id} and run_id = ${this.r.runId}`;
     } else if (patch.data !== undefined) {
-      await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)} where id = ${id} and session_id = ${this.r.sessionId}`;
+      await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)} where id = ${id} and run_id = ${this.r.runId}`;
     } else if (patch.status !== undefined) {
-      await sql`update public.events set status = ${patch.status} where id = ${id} and session_id = ${this.r.sessionId}`;
+      await sql`update public.events set status = ${patch.status} where id = ${id} and run_id = ${this.r.runId}`;
     }
   }
 
@@ -76,12 +93,16 @@ export class DbRunStore implements RunStore {
     return { cancel: !!r?.cancel_requested, pause: !!r?.pause_requested };
   }
 
-  async createApproval(req: ApprovalRequest): Promise<string> {
+  async createApproval(req: ApprovalRequest, opts: { localOnly?: boolean } = {}): Promise<string> {
+    await this.fence();
     const sql = db();
+    // The approval must belong to one of this run's events.
+    const [ev] = await sql`select 1 from public.events where id = ${req.eventId} and run_id = ${this.r.runId}`;
+    if (!ev) throw new Error('Approval event does not belong to this run.');
     const [row] = await sql`
       insert into public.approvals (user_id, agent_id, session_id, run_id, event_id, tool, title, detail, risk)
       values (${this.r.userId}, ${this.r.agentId}, ${this.r.sessionId}, ${this.r.runId}, ${req.eventId}, ${req.tool}, ${req.title.slice(0, 300)},
-              ${sql.json({ args: req.args as Json, reason: req.reason ?? null })}, ${req.risk})
+              ${sql.json({ args: req.args as Json, reason: req.reason ?? null, ...(opts.localOnly ? { localOnly: true } : {}) })}, ${req.risk})
       returning id`;
     await notifyUser({
       userId: this.r.userId,
@@ -95,14 +116,16 @@ export class DbRunStore implements RunStore {
     return row.id;
   }
 
+  /** State of one of this run's approvals (anything else reads as denied). */
   async approvalState(id: string): Promise<ApprovalState> {
     const sql = db();
-    await sql`update public.approvals set status = 'expired' where id = ${id} and status = 'pending' and expires_at < now()`;
-    const [r] = await sql`select status from public.approvals where id = ${id}`;
+    await sql`update public.approvals set status = 'expired' where id = ${id} and run_id = ${this.r.runId} and status = 'pending' and expires_at < now()`;
+    const [r] = await sql`select status from public.approvals where id = ${id} and run_id = ${this.r.runId} and user_id = ${this.r.userId}`;
     return (r?.status ?? 'denied') as ApprovalState;
   }
 
   async recordUsage(u: ModelUsage, model: string): Promise<void> {
+    await this.fence();
     const sql = db();
     await sql`
       insert into public.usage_records (user_id, agent_id, run_id, source, model, input_tokens, output_tokens, cached_tokens)

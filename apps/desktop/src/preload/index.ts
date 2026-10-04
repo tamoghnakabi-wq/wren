@@ -20,6 +20,7 @@ if (origin && location.origin === origin) {
     checkUpdate: () => invoke('checkUpdate'),
     installUpdate: () => invoke('installUpdate'),
     openExternal: (url: string) => invoke('openExternal', url),
+    decideApproval: (runId: string, approvalId: string) => invoke('decideApproval', runId, approvalId),
     onStatus: (cb: (s: unknown) => void) => {
       const listener = (_e: unknown, s: unknown) => cb(s);
       ipcRenderer.on('wren:status', listener);

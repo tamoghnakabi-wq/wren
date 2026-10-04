@@ -43,6 +43,8 @@ export interface WrenDesktop {
   checkUpdate(): Promise<DesktopStatus['update']>;
   installUpdate(): Promise<void>;
   openExternal(url: string): Promise<void>;
+  /** Show this computer's native approval prompt for one of its runs (remote approvals off). Added in 0.1.3. */
+  decideApproval?(runId: string, approvalId: string): Promise<{ decided?: boolean; error?: string }>;
   onStatus(cb: (s: DesktopStatus) => void): () => void;
 }
 

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '@/lib/client/api';
+import { desktop } from '@/lib/client/desktop';
 import type { Approval } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { Button, cx, timeAgo, useToast } from '../ui';
@@ -40,6 +41,18 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
       setBusy(null);
     }
   };
+  // Remote approvals are off on the computer running this: only a native prompt there counts.
+  const localOnly = !!approval.detail?.localOnly;
+  const bridge = desktop();
+  const answerHere = async () => {
+    setBusy('approve');
+    try {
+      const r = await bridge!.decideApproval!(approval.run_id, approval.id);
+      if (r.error) toast(r.error, 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
   const body = preview(approval.detail?.args);
   return (
     <div className={cx('rounded-2xl border bg-surface p-4 shadow-card', approval.risk === 'critical' ? 'border-danger/40' : 'border-warning/40')}>
@@ -56,12 +69,22 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
           {approval.detail?.reason && <p className="mt-0.5 text-[13px] text-muted">This {approval.detail.reason}.</p>}
           {body && !compact && <pre className="mt-2.5 max-h-48 overflow-auto rounded-xl border border-border bg-bg-subtle p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{body}</pre>}
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Button size="sm" onClick={() => decide(true)} loading={busy === 'approve'} disabled={!!busy}>
-              <ShieldCheck className="h-4 w-4" /> Approve
-            </Button>
-            <Button size="sm" variant="secondary" onClick={() => decide(false)} loading={busy === 'deny'} disabled={!!busy}>
-              Deny
-            </Button>
+            {localOnly && bridge?.decideApproval ? (
+              <Button size="sm" onClick={answerHere} loading={busy === 'approve'} disabled={!!busy}>
+                <ShieldCheck className="h-4 w-4" /> Answer on this computer
+              </Button>
+            ) : localOnly ? (
+              <p className="text-[13px] text-muted">Remote approvals are off for that computer — answer in the Wren app on it.</p>
+            ) : (
+              <>
+                <Button size="sm" onClick={() => decide(true)} loading={busy === 'approve'} disabled={!!busy}>
+                  <ShieldCheck className="h-4 w-4" /> Approve
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => decide(false)} loading={busy === 'deny'} disabled={!!busy}>
+                  Deny
+                </Button>
+              </>
+            )}
             {showAgent && (
               <Link href={`/app/s/${approval.session_id}`} className="ml-auto text-[13px] text-muted hover:text-text">
                 Open task →

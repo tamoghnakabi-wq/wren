@@ -41,10 +41,11 @@ export function writeJson(name: string, value: unknown) {
 export function readSecret<T>(name: string): T | null {
   const p = file(name);
   if (!existsSync(p)) return null;
+  if (!safeStorage.isEncryptionAvailable()) return null;
   try {
     const buf = readFileSync(p);
-    const text = safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf8');
-    return JSON.parse(text) as T;
+    if (!buf.length) return null;
+    return JSON.parse(safeStorage.decryptString(buf)) as T;
   } catch {
     return null;
   }
@@ -60,8 +61,9 @@ export function writeSecret(name: string, value: unknown | null) {
     }
     return;
   }
-  const text = JSON.stringify(value);
-  writeAtomic(p, safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text) : Buffer.from(text));
+  // Never fall back to plaintext: without the OS keychain, secrets aren't stored at all.
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage (the system keychain) is unavailable, so Wren can’t save sign-in details on this computer.');
+  writeAtomic(p, safeStorage.encryptString(JSON.stringify(value)));
 }
 
 // ------------------------------------------------------------------ policy

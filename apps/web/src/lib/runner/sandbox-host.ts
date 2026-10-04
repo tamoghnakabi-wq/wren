@@ -1,5 +1,5 @@
 import { Sandbox } from '@vercel/sandbox';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { BROWSER_DAEMON_TS } from '@wren/core/browser/daemon-source';
 import { fetchReadable } from '@wren/core/net';
@@ -15,6 +15,10 @@ import { env } from '../env';
 
 export const WORKSPACE = '/vercel/sandbox';
 const JOB_DIR = '$HOME/.wren/jobs';
+
+/** Changes whenever the daemon code does, so a stale daemon in a persistent VM gets replaced. */
+const DAEMON_VERSION = createHash('sha256').update(BROWSER_DAEMON_TS).digest('hex').slice(0, 16);
+const HEALTH = `[ "$(cat "$HOME/.wren/browser.version" 2>/dev/null)" = "${DAEMON_VERSION}" ] && curl -s -m 2 http://127.0.0.1:9333/health`;
 
 const RUN_SH = `#!/bin/bash
 # usage: run.sh <id> <cwd> <command>
@@ -103,9 +107,18 @@ export class SandboxHost implements ToolHost {
       const t = this.o.mcp?.get(ns)?.tools.find((x) => x.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) === tool);
       return { mcpReadOnly: !!t?.readOnly };
     }
-    if ((name === 'browser.click' || name === 'browser.type' || name === 'browser.press') && this.browserReady && typeof args.ref === 'string') {
-      const r = await this.browserAct({ action: 'describe', ref: args.ref }).catch(() => null);
-      if (r?.target) return { browserTarget: { label: r.target.label, role: r.target.role, inputType: r.target.inputType, autocomplete: r.target.autocomplete } };
+    if (name === 'browser.click' || name === 'browser.type' || name === 'browser.press') {
+      // A fresh tick doesn't know yet whether the browser from an earlier tick is still up.
+      if (!this.browserReady) {
+        const sb = await this.computer();
+        const health = await sb.runCommand({ cmd: 'bash', args: ['-lc', HEALTH] });
+        this.browserReady = (await health.stdout()).trim() === 'ok';
+      }
+      const ref = name === 'browser.press' ? '@focused' : typeof args.ref === 'string' ? args.ref : '';
+      if (this.browserReady && ref) {
+        const r = await this.browserAct({ action: 'describe', ref }).catch(() => null);
+        if (r?.target) return { browserTarget: { label: r.target.label, role: r.target.role, inputType: r.target.inputType, autocomplete: r.target.autocomplete } };
+      }
     }
     if (name === 'computer.write_file' && typeof args.path === 'string') {
       const sb = await this.computer();
@@ -193,9 +206,9 @@ export class SandboxHost implements ToolHost {
     if (!id) {
       if (!command.trim()) return { output: 'Empty command.', isError: true };
       id = randomUUID().slice(0, 8);
-      const env: Record<string, string> = {};
-      if (this.o.githubToken) env.GH_TOKEN = this.o.githubToken;
-      await sb.runCommand({ cmd: 'bash', args: ['-lc', `nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} >/dev/null 2>&1 &`], env });
+      // No credentials go into the VM: GitHub access is only through the github.request tool,
+      // which is risk-assessed and runs here.
+      await sb.runCommand({ cmd: 'bash', args: ['-lc', `nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} >/dev/null 2>&1 &`] });
       if (background) return { output: `Started background job ${id}. Check it with computer.shell_status.`, meta: { job: id } };
       await ctx.checkpoint({ kind: 'job', handle: id, startedAt: started });
     }
@@ -254,18 +267,23 @@ export class SandboxHost implements ToolHost {
   private async ensureBrowser() {
     if (this.browserReady) return;
     const sb = await this.computer();
-    const health = await sb.runCommand({ cmd: 'bash', args: ['-lc', 'curl -s -m 2 http://127.0.0.1:9333/health'] });
+    const health = await sb.runCommand({ cmd: 'bash', args: ['-lc', HEALTH] });
     if ((await health.stdout()).trim() === 'ok') {
       this.browserReady = true;
       return;
     }
+    // Not running, or an older daemon: (re)start the current one.
+    await sb.runCommand({ cmd: 'bash', args: ['-lc', 'pkill -f "node browser.ts" 2>/dev/null; sleep 0.5; true'] });
     const setup = await sb.runCommand({ cmd: 'bash', args: ['-lc', BROWSER_SETUP] });
     if (setup.exitCode !== 0) throw new Error(`Could not set up the browser: ${(await setup.output('both')).slice(-800)}`);
-    await sb.writeFiles([{ path: `${this.home}/.wren/browser.ts`, content: Buffer.from(BROWSER_DAEMON_TS) }]);
+    await sb.writeFiles([
+      { path: `${this.home}/.wren/browser.ts`, content: Buffer.from(BROWSER_DAEMON_TS) },
+      { path: `${this.home}/.wren/browser.version`, content: Buffer.from(DAEMON_VERSION) },
+    ]);
     await sb.runCommand({ cmd: 'bash', args: ['-lc', 'cd "$HOME/.wren" && nohup node browser.ts > browser.log 2>&1 &'] });
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 500));
-      const h = await sb.runCommand({ cmd: 'bash', args: ['-lc', 'curl -s -m 2 http://127.0.0.1:9333/health'] });
+      const h = await sb.runCommand({ cmd: 'bash', args: ['-lc', HEALTH] });
       if ((await h.stdout()).trim() === 'ok') {
         this.browserReady = true;
         return;

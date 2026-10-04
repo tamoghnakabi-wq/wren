@@ -52,3 +52,20 @@ describe('ResponsesClient namespaces', () => {
     expect(turn.toolCalls[0]).toMatchObject({ namespace: 'computer', name: 'shell' });
   });
 });
+
+describe('unfinished output', () => {
+  it('records calls from an incomplete response without running them', async () => {
+    const bodies: unknown[] = [];
+    const f = (async (_u: string, init: RequestInit) => {
+      bodies.push(init.body);
+      const ev = { type: 'response.incomplete', response: { output: [{ type: 'function_call', status: 'incomplete', call_id: 'c1', namespace: 'wren_computer', name: 'shell', arguments: '{"command":"rm -rf bu' }], usage: {} } };
+      const sse = `data: ${JSON.stringify(ev)}\n\n`;
+      return new Response(new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(sse)), c.close()) }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new ResponsesClient({ origin: 'openai', baseUrl: 'https://example.test/v1', headers: () => ({}), namespaces: true, fetch: f });
+    const turn = await client.stream({ model: 'm', instructions: 'x', events: [ev(1, 'message', { role: 'user', text: 'hi' })], tools, hosted: [] }, () => {});
+    expect(turn.stopReason).toBe('max_tokens');
+    expect(turn.toolCalls[0].argsError).toMatch(/Not run/);
+  });
+});
+

@@ -39,7 +39,9 @@ const READ_ONLY = new Set([
 const VERSION_ONLY = /^(node|npm|npx|pnpm|yarn|bun|python3?|pip3?|go|cargo|rustc|java|ruby|git|gh|docker|deno)\s+(-v|--version|version)\s*$/i;
 
 const GIT_READ = /^git\s+(status|log|diff|show|branch(\s+(-a|-r|--list|-v+))?\s*$|remote(\s+-v)?\s*$|rev-parse|ls-files|blame|describe|tag(\s+-l)?\s*$|config\s+--get|shortlog|reflog\s*$|stash\s+list)/i;
-const GH_READ = /^gh\s+(pr|issue|repo|run|release|workflow)\s+(list|view|status|diff|checks)\b|^gh\s+(auth\s+status|api\s+(?!.*(-X|--method)\s*(POST|PUT|PATCH|DELETE)))/i;
+const GH_READ = /^gh\s+(pr|issue|repo|run|release|workflow)\s+(list|view|status|diff|checks)\b|^gh\s+(auth\s+status|api\s+(?!.*((-X|--method)\s*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))))/i;
+/** Read commands that can still write a file through an option. */
+const WRITE_OPTION = /\s(--output(=|\s)|-o\s|--output-directory)/;
 
 /** Matches at a command position: start, after a control operator, or after sudo/xargs/env. */
 const CMD = String.raw`(?:^|[;&|(\x60]\s*|\$\(\s*|\b(?:sudo|xargs|env|exec|nohup|time)\s+)`;
@@ -64,9 +66,9 @@ const RULES: Rule[] = [
   { re: /\b(csrutil|spctl\s+--master-disable|nvram|bcdedit|reg\s+(delete|add)|Set-ExecutionPolicy|defaults\s+write\s+\/Library)\b/i, risk: 'critical', reason: 'changes system security settings' },
   { re: /\bchmod\s+-R\s+[0-7]*7[0-7]*\s+\/(\s|$)|\bchown\s+-R\s+\S+\s+\/(\s|$)/i, risk: 'critical', reason: 'changes permissions on the whole system' },
   // high: destructive or externally visible
-  { re: /\brm\s|\brmdir\b|\bunlink\b|Remove-Item|\bdel\s|\berase\s|\bshred\b|\btruncate\s/i, risk: 'high', reason: 'deletes files' },
+  { re: /\brm\s|\brmdir\b|\bunlink\b|Remove-Item|\bdel\s|\berase\s|\bshred\b|\btruncate\s|\bfind\b[^|;&]*\s-delete\b/i, risk: 'high', reason: 'deletes files' },
   { re: /\bgit\s+(push|reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s|branch\s+-D|rebase|filter-branch|filter-repo|update-ref\s+-d)/i, risk: 'high', reason: 'rewrites or publishes git history' },
-  { re: /\bgh\s+(pr\s+(create|merge|close|comment|review|edit)|issue\s+(create|close|comment|edit|delete)|repo\s+(create|delete|archive|edit|rename)|release\s+(create|delete|upload)|api\s+.*(-X|--method)\s*(POST|PUT|PATCH|DELETE)|secret|workflow\s+run)/i, risk: 'high', reason: 'changes things on GitHub' },
+  { re: /\bgh\s+(pr\s+(create|merge|close|comment|review|edit)|issue\s+(create|close|comment|edit|delete)|repo\s+(create|delete|archive|edit|rename)|release\s+(create|delete|upload)|api\s+.*((-X|--method)\s*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))|secret|workflow\s+run)/i, risk: 'high', reason: 'changes things on GitHub' },
   { re: /\b(npm|pnpm|yarn)\s+publish|\bcargo\s+publish|\btwine\s+upload|\bgem\s+push|\bvercel\s+(deploy\s+.*--prod|--prod|promote|remove|rm)|\bnetlify\s+deploy\s+--prod|\bfly\s+deploy|\bterraform\s+(apply|destroy)|\bkubectl\s+(apply|delete)|\bheroku\b/i, risk: 'high', reason: 'publishes or deploys' },
   { re: /\b(curl|wget|http|Invoke-WebRequest|Invoke-RestMethod)\b[^|]*(-X\s*(POST|PUT|PATCH|DELETE)|--data|-d\s|--upload-file|-F\s|-T\s|-Method\s+(Post|Put|Patch|Delete))/i, risk: 'high', reason: 'sends data to a server' },
   { re: new RegExp(`${CMD}(ssh|scp|rsync|sftp|ftp|telnet|nc|ncat|socat)\\s`), risk: 'high', reason: 'connects to another machine' },
@@ -85,12 +87,26 @@ function segments(command: string): string[] {
     .filter(Boolean);
 }
 
+/** True when an output redirection targets a real file (not /dev/null or another descriptor). */
+function writesThroughRedirect(seg: string): boolean {
+  for (const m of seg.matchAll(/(?:&>>?|\d?>>?)\s*([^\s;|&]*)(&?\d*)/g)) {
+    const target = m[1] || m[2];
+    if (!target) continue;
+    if (/^&\d+$|^&$/.test(target) || /^&?\d+$/.test(m[2]) && !m[1]) continue;
+    if (target === '/dev/null' || target === '/dev/stdout' || target === '/dev/stderr') continue;
+    return true;
+  }
+  return false;
+}
+
 function segmentIsReadOnly(seg: string): boolean {
-  if (VERSION_ONLY.test(seg) || GIT_READ.test(seg) || GH_READ.test(seg)) return true;
-  if (/(^|\s)(>|>>)\s*\S/.test(seg)) return false; // redirection writes a file
+  if (writesThroughRedirect(seg)) return false;
+  if (VERSION_ONLY.test(seg) || GH_READ.test(seg)) return true;
+  if (GIT_READ.test(seg)) return !WRITE_OPTION.test(seg);
   const first = seg.split(/\s+/)[0].toLowerCase().replace(/^.*[\\/]/, '');
   if (!READ_ONLY.has(first)) return false;
-  if (first === 'find' && /\s-(delete|exec|execdir|ok|fprint)/.test(seg)) return false;
+  if (first === 'find' && /\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\b/.test(seg)) return false;
+  if ((first === 'sort' || first === 'uniq' || first === 'tree') && WRITE_OPTION.test(seg)) return false;
   return true;
 }
 
@@ -204,10 +220,14 @@ export function assessCall(
     case 'browser.type':
     case 'browser.press': {
       const action = name.split('.')[1];
-      const target = action === 'press' && !/^enter$/i.test(s('key')) ? undefined : context.browserTarget;
-      if (action === 'press' && !/^enter$/i.test(s('key'))) return { risk: 'low' };
+      // press acts on the focused element; only keys that can activate or submit it matter.
+      if (action === 'press' && !isActivatingKey(s('key'))) return { risk: 'low' };
+      const target = context.browserTarget;
       const a = assessBrowser(action, target, runtime);
-      if (action === 'type' && args.submit === true && !a.blocked) return { risk: maxRisk(a.risk, runtime === 'desktop' ? 'high' : 'medium'), reason: 'types and submits a form' };
+      if (a.blocked) return a;
+      // Without knowing what the element is, never treat the action as routine.
+      if (!target) return { risk: maxRisk(a.risk, 'high'), reason: 'acts on a page element Wren could not inspect' };
+      if (action === 'type' && args.submit === true) return { risk: maxRisk(a.risk, runtime === 'desktop' ? 'high' : 'medium'), reason: 'types and submits a form' };
       return a;
     }
     case 'browser.navigate': {
@@ -235,11 +255,16 @@ export function assessCall(
     case 'browser.back':
       return { risk: 'low' };
     default:
-      if (name.startsWith('mcp_')) {
-        return context.mcpReadOnly ? { risk: 'low' } : { risk: 'high', reason: 'calls a connected service' };
-      }
+      // A server's readOnlyHint is its own claim, so it never lowers the risk.
+      if (name.startsWith('mcp_')) return { risk: 'high', reason: context.mcpReadOnly ? 'calls a connected service (the service says this is read-only)' : 'calls a connected service' };
       return { risk: 'medium', reason: 'unrecognised tool' };
   }
+}
+
+/** Keys that can click, submit or toggle the focused element (alone or with modifiers). */
+export function isActivatingKey(key: string): boolean {
+  const last = key.split('+').pop()!.trim();
+  return key === '' || /^(enter|return|numpadenter| |space|spacebar)$/i.test(last) || /^(enter|return)$/i.test(key);
 }
 
 export { bump as bumpRisk };

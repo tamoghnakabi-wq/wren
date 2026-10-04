@@ -5,7 +5,8 @@ import { decideApproval } from '@/lib/runs';
 
 export const maxDuration = 30;
 
-const Schema = z.object({ approve: z.boolean(), note: z.string().max(500).optional(), via: z.enum(['web', 'mobile', 'desktop', 'push']).default('web') });
+// "desktop" decisions only come through the device API (with the device's own credential).
+const Schema = z.object({ approve: z.boolean(), note: z.string().max(500).optional(), via: z.enum(['web', 'mobile', 'push']).default('web') });
 
 export const POST = route<{ params: Promise<{ id: string }> }>(async (req, ctx) => {
   const user = await requireUser(req);

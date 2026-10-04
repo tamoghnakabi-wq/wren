@@ -31,6 +31,18 @@ export async function notifyUser(n: NotifyInput): Promise<void> {
   await sendPush(n).catch((e) => console.warn('push failed', e?.message));
 }
 
+/** Only the browsers' own push services: the server makes requests to these URLs. */
+export function isPushServiceEndpoint(endpoint: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:' || (u.port && u.port !== '443') || u.username || u.password) return false;
+  return /^(fcm\.googleapis\.com|android\.googleapis\.com|updates\.push\.services\.mozilla\.com|([a-z0-9-]+\.)*push\.apple\.com|[a-z0-9-]+\.notify\.windows\.com)$/i.test(u.hostname);
+}
+
 export async function sendPush(n: NotifyInput): Promise<number> {
   if (!vapid()) return 0;
   const sql = db();
@@ -39,8 +51,9 @@ export async function sendPush(n: NotifyInput): Promise<number> {
   let sent = 0;
   await Promise.all(
     subs.map(async (s) => {
+      if (!isPushServiceEndpoint(s.endpoint)) return;
       try {
-        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 3600, urgency: n.kind === 'approval' ? 'high' : 'normal' });
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 3600, urgency: n.kind === 'approval' ? 'high' : 'normal', timeout: 8000 });
         sent++;
         await sql`update public.push_subscriptions set last_used_at = now() where id = ${s.id}`;
       } catch (e) {

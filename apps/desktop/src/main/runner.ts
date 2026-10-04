@@ -1,7 +1,5 @@
 import { app, dialog, Notification } from 'electron';
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
-import { realpathSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
 import {
   createModelClient,
   resolveOpenAIRoute,
@@ -10,6 +8,7 @@ import {
   toolCatalog,
   type AgentTools,
   type ApprovalRequest,
+  type ImageRef,
   type LoopOutcome,
   type MessageData,
   type ModelClient,
@@ -24,6 +23,7 @@ import { detect, type Capabilities } from './capabilities';
 import * as chatgpt from './chatgpt';
 import { loadDevice, loadPolicy, type Policy } from './config';
 import { LocalHost } from './host';
+import { allowedRoots, isConfined } from './paths';
 import { ProxyModelClient, RemoteStore } from './remote';
 
 // Executes the user's runs that target this computer. Work arrives as a
@@ -150,12 +150,21 @@ export class DeviceRunner {
     this.onChange();
     let outcome: LoopOutcome = { kind: 'failed', error: 'The run could not start on this computer.', steps: 0 };
     let lease = '';
+    let keepalive: ReturnType<typeof setInterval> | undefined;
     try {
       const c = await deviceJson<Claim>(`/api/device/runs/${runId}/claim`, {});
       if (!c.claimed) return;
       lease = c.leaseId;
       const policy = loadPolicy();
       const store = new RemoteStore(runId, lease);
+      // Keep the lease while long actions run (shell commands, model calls) and
+      // notice Stop/lease loss promptly; the loop also checks between actions.
+      keepalive = setInterval(() => {
+        store
+          .control()
+          .then((ctl) => ctl.cancel && abort.abort())
+          .catch((e: { status?: number }) => e?.status === 409 && abort.abort());
+      }, 45_000);
       store.localOnlyApprovals = !policy.remoteApprovals;
       store.onApproval = (id, req) => this.approvalPrompt(id, req, c, policy, abort.signal);
       const model = c.run.model;
@@ -168,6 +177,7 @@ export class DeviceRunner {
       log(`run ${runId.slice(0, 8)} crashed: ${(e as Error).stack ?? e}`);
       outcome = { kind: 'failed', error: (e as Error).message, steps: 0 };
     } finally {
+      if (keepalive) clearInterval(keepalive);
       log(`run ${runId.slice(0, 8)} -> ${outcome.kind}`);
       if (lease) await deviceJson(`/api/device/runs/${runId}/finish`, outcome, { lease }).catch(() => {});
       this.active.delete(runId);
@@ -177,17 +187,8 @@ export class DeviceRunner {
   }
 
   private inFolders(policy: Policy) {
-    const roots = policy.folders.map((f) => {
-      try {
-        return realpathSync(f);
-      } catch {
-        return resolve(f);
-      }
-    });
-    return (p: string) => {
-      const abs = resolve(roots[0] ?? '/', p);
-      return roots.some((r) => abs === r || abs.startsWith(r.endsWith(sep) ? r : r + sep));
-    };
+    const roots = allowedRoots(policy.folders);
+    return (p: string) => isConfined(p, roots);
   }
 
   private async runEngine(c: Claim, store: RemoteStore, policy: Policy, signal: AbortSignal): Promise<LoopOutcome> {
@@ -207,6 +208,7 @@ export class DeviceRunner {
       prompt,
       cwd: policy.folders[0],
       folders: policy.folders,
+      allow: { shell: policy.shell, browser: policy.browser, screen: policy.screen },
       resumeId: resume?.data.resumeId,
       signal,
       saveResumeId: async (id: string) => {
@@ -222,6 +224,20 @@ export class DeviceRunner {
     const ref = c.run.model;
     let model: ModelClient;
     let source = ref.source as string;
+    const host = new LocalHost(policy, c.run.id, store.lease);
+    // Models called directly from here need image bytes: screenshots from this run are cached,
+    // anything else (uploads, earlier turns) comes from the server for this run's account.
+    const loadImage = async (img: ImageRef) => {
+      if (img.data) return { mime: img.mime, data: img.data };
+      if (!img.artifactId) return null;
+      const cached = host.imageCache.get(img.artifactId);
+      if (cached) return cached;
+      const r = await deviceJson<{ found: boolean; mime?: string; data?: string }>(`/api/device/runs/${c.run.id}/artifact`, { id: img.artifactId }, { lease: store.lease }).catch(() => null);
+      if (!r?.found || !r.mime || !r.data) return null;
+      const v = { mime: r.mime, data: r.data };
+      host.imageCache.set(img.artifactId, v);
+      return v;
+    };
     if (source === 'openai' || source === 'chatgpt') {
       const st = chatgpt.status();
       const route = resolveOpenAIRoute({
@@ -233,7 +249,7 @@ export class DeviceRunner {
       });
       if ('error' in route) return { kind: 'failed', error: route.error, code: 'no_credentials', steps: c.run.step };
       if (route.via === 'chatgpt') {
-        model = createModelClient({ source: 'chatgpt', credential: () => chatgpt.accessToken() });
+        model = createModelClient({ source: 'chatgpt', credential: () => chatgpt.accessToken(), loadImage });
         source = 'chatgpt';
       } else {
         model = new ProxyModelClient(c.run.id, store.lease, 'openai', ref.connectionId);
@@ -241,7 +257,7 @@ export class DeviceRunner {
       }
       if (route.note) await store.append('status', { text: route.note, level: 'info' }, 'done');
     } else if (source === 'local') {
-      model = createModelClient({ source: 'local', baseUrl: policy.localModelUrl });
+      model = createModelClient({ source: 'local', baseUrl: policy.localModelUrl, loadImage });
     } else if (source === 'test') {
       model = new ScriptedModel();
     } else {
@@ -249,7 +265,6 @@ export class DeviceRunner {
     }
     store.usageSource = source;
 
-    const host = new LocalHost(policy, c.run.id, store.lease);
     const tools = toolCatalog({ runtime: 'desktop', tools: c.agent.tools, githubConnected: c.githubConnected, extra: c.mcpTools }).filter((t) => {
       if (t.namespace === 'browser') return policy.browser;
       if (t.namespace === 'screen') return policy.screen;

@@ -21,7 +21,10 @@ export default function SessionPage() {
   const toast = useToast();
   const { agentById, approvals, devices } = useApp();
   const session = useLive<Session>({ table: 'sessions', eq: { id }, realtimeFilter: { column: 'id', value: id } });
-  const events = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: true }, realtimeFilter: { column: 'session_id', value: id } });
+  // Newest events first so long sessions load their recent activity (the API returns at most 1000 rows),
+  // then shown oldest-first.
+  const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: 1000, realtimeFilter: { column: 'session_id', value: id } });
+  const events = useMemo(() => ({ ...eventsLive, rows: [...eventsLive.rows].sort((a, b) => a.seq - b.seq) }), [eventsLive]);
   const runs = useLive<Run>({ table: 'runs', eq: { session_id: id }, order: { column: 'created_at' }, limit: 20, realtimeFilter: { column: 'session_id', value: id } });
   const live = useLive<RunLive>({ table: 'run_live', eq: { session_id: id }, pk: 'run_id', realtimeFilter: { column: 'session_id', value: id } });
   const files = useLive<Artifact>({ table: 'artifacts', eq: { session_id: id }, order: { column: 'created_at' }, realtimeFilter: { column: 'session_id', value: id } });

@@ -116,13 +116,37 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
     if (Date.now() >= o.deadline) return { kind: 'yield', steps };
 
     const events = await o.store.events();
+    if (await saveMissingCalls(o, events)) continue;
     const open = events.filter((e) => e.type === 'tool' && e.runId === o.runId && OPEN_STATUSES.has(String(e.status)));
 
     // ---------------------------------------------------------- pending tool calls
     if (open.length) {
-      for (const ev of open) {
+      for (const [i, ev] of open.entries()) {
         const d = ev.data as ToolCallData;
         if (Date.now() >= o.deadline) return { kind: 'yield', steps };
+        // Stop between actions too, not only between model turns.
+        if (o.signal?.aborted) {
+          await closeOpenCalls(o, 'cancelled');
+          return { kind: 'cancelled', steps };
+        }
+        if (i > 0) {
+          const c = await o.store.control();
+          if (c.cancel) {
+            await closeOpenCalls(o, 'cancelled');
+            return { kind: 'cancelled', steps };
+          }
+          if (c.pause) return { kind: 'paused', steps };
+        }
+
+        // Found already running with no resumable handle: the worker died mid-action. Re-running
+        // anything beyond a read could repeat a side effect, so report it and let the agent check.
+        if (ev.status === 'running' && !d.background && d.risk && d.risk !== 'low' && !isBuiltin(d.name)) {
+          await finish(o, ev, d, {
+            output: 'Wren was interrupted while this action was running, so it may or may not have completed. Check the current state before trying it again.',
+            isError: true,
+          });
+          continue;
+        }
 
         if (ev.status === 'awaiting_input') {
           const answer = events.find((e) => e.type === 'message' && (e.seq ?? 0) > (ev.seq ?? 0) && (e.data as MessageData).role === 'user');
@@ -196,6 +220,28 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
     }
   }
   return { kind: 'yield', steps };
+}
+
+/** Re-create tool events for calls a crash left unsaved after their model turn was stored. */
+async function saveMissingCalls(o: LoopOptions, events: SessionEvent[]): Promise<boolean> {
+  const turn = [...events].reverse().find((e) => e.type === 'message' && e.runId === o.runId && e.status === 'done' && (e.data as MessageData).role === 'assistant');
+  const calls = (turn?.data as MessageData | undefined)?.calls;
+  if (!turn || !calls?.length) return false;
+  const saved = new Set(events.filter((e) => e.type === 'tool' && (e.data as ToolCallData).turnId === turn.id).map((e) => (e.data as ToolCallData).callId));
+  const missing = calls.filter((c) => !saved.has(c.callId));
+  for (const c of missing) await appendCall(o, turn.id, c);
+  return missing.length > 0;
+}
+
+async function appendCall(o: LoopOptions, turnId: string, c: NonNullable<MessageData['calls']>[number]) {
+  const qualifiedName = `${c.namespace}.${c.name}`;
+  const known = o.tools.some((t) => t.namespace === c.namespace && t.name === c.name);
+  const data: ToolCallData = { callId: c.callId, name: qualifiedName, args: c.args, title: describeCall(qualifiedName, c.args), risk: 'low', turnId };
+  if (c.argsError || !known) {
+    await o.store.append<ToolCallData>('tool', { ...data, endedAt: Date.now(), result: { output: c.argsError ?? `Unknown tool "${qualifiedName}".`, isError: true } }, 'error');
+  } else {
+    await o.store.append<ToolCallData>('tool', data, 'pending');
+  }
 }
 
 function isBuiltin(name: string) {
@@ -342,29 +388,10 @@ async function modelTurn(
         source: o.source,
         ...(turn.stopReason === 'other' ? { paused: true } : {}),
         ...(turn.webSearches ? { webSearches: turn.webSearches } : {}),
+        ...(turn.toolCalls.length ? { calls: turn.toolCalls.map((c) => ({ callId: c.callId, namespace: c.namespace, name: c.name, args: c.args, ...(c.argsError ? { argsError: c.argsError } : {}) })) } : {}),
       };
       await o.store.update(msg.id, { status: 'done', data: finalData });
-      for (const c of turn.toolCalls) {
-        const qualifiedName = `${c.namespace}.${c.name}`;
-        const known = o.tools.some((t) => t.namespace === c.namespace && t.name === c.name);
-        const data: ToolCallData = {
-          callId: c.callId,
-          name: qualifiedName,
-          args: c.args,
-          title: describeCall(qualifiedName, c.args),
-          risk: 'low',
-          turnId: msg.id,
-        };
-        if (c.argsError || !known) {
-          await o.store.append<ToolCallData>(
-            'tool',
-            { ...data, endedAt: Date.now(), result: { output: c.argsError ?? `Unknown tool "${qualifiedName}".`, isError: true } },
-            'error',
-          );
-        } else {
-          await o.store.append<ToolCallData>('tool', data, 'pending');
-        }
-      }
+      for (const c of turn.toolCalls) await appendCall(o, msg.id, c);
       return { text: turn.text, calls: turn.toolCalls.length, stop: turn.stopReason };
     } catch (e) {
       const err = e as ModelError;

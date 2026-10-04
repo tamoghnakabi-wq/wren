@@ -193,6 +193,50 @@ describe('agent loop', () => {
     expect(out2).toMatchObject({ kind: 'completed', result: 'Fetched.' });
   });
 
+  it('does not repeat an action that was running when the worker died', async () => {
+    const store = new MemStore();
+    await store.userSays('push');
+    const turn = await store.append('message', { role: 'assistant', text: '', raw: { format: 'responses', items: [] } }, 'done');
+    // An approved push that crashed mid-flight, and a read that did the same.
+    await store.append('tool', { callId: 'a', name: 'computer.shell', args: { command: 'git push' }, title: 'push', risk: 'high', turnId: turn.id, startedAt: 1 }, 'running');
+    await store.append('tool', { callId: 'b', name: 'computer.read_file', args: { path: 'x' }, title: 'read', risk: 'low', turnId: turn.id, startedAt: 1 }, 'running');
+    const model = new ScriptModel([{ text: 'Checked.' }]);
+    const host = new FakeHost();
+    const out = await base(store, model, host);
+    expect(out.kind).toBe('completed');
+    expect(host.ran).toEqual(['computer.read_file:{"path":"x"}']); // only the read is retried
+    const push = store.events_.find((e) => (e.data as ToolCallData).callId === 'a')!;
+    expect(push.status).toBe('error');
+    expect((push.data as ToolCallData).result?.output).toMatch(/interrupted/);
+  });
+
+  it('re-creates tool calls a crash left unsaved', async () => {
+    const store = new MemStore();
+    await store.userSays('list');
+    // The turn was stored with its calls, but the process died before the tool events were written.
+    await store.append('message', { role: 'assistant', text: '', raw: { format: 'responses', items: [] }, calls: [{ callId: 'x1', namespace: 'computer', name: 'list_files', args: { path: '.' } }] }, 'done');
+    const model = new ScriptModel([{ text: 'Listed.' }]);
+    const host = new FakeHost();
+    const out = await base(store, model, host);
+    expect(out).toMatchObject({ kind: 'completed', result: 'Listed.' });
+    expect(host.ran).toEqual(['computer.list_files:{"path":"."}']);
+  });
+
+  it('stops between actions of one turn when cancelled', async () => {
+    const store = new MemStore();
+    await store.userSays('two things');
+    const model = new ScriptModel([{ calls: [{ name: 'web.fetch', args: { url: 'https://a.example' } }, { name: 'web.fetch', args: { url: 'https://b.example' } }] }]);
+    const host = new FakeHost();
+    host.execute = async (name, args) => {
+      host.ran.push(`${name}:${JSON.stringify(args)}`);
+      store.cancel = true; // the user presses Stop during the first action
+      return { output: 'ok' };
+    };
+    const out = await base(store, model, host);
+    expect(out.kind).toBe('cancelled');
+    expect(host.ran).toHaveLength(1);
+  });
+
   it('cancels open calls', async () => {
     const store = new MemStore();
     await store.userSays('push');

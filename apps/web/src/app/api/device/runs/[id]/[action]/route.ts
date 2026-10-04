@@ -25,6 +25,16 @@ async function loadRun(device: AuthDevice, runId: string) {
   return run;
 }
 
+/**
+ * Everything except claiming and deciding needs the lease this device got when it
+ * claimed the run; once someone else holds it (or the run was finished), writes stop.
+ */
+function requireLease(run: Record<string, unknown>, lease: string | null) {
+  if (!lease || !uuid.safeParse(lease).success || run.lease_id !== lease) {
+    throw new HttpError(409, 'This computer no longer holds this run.', 'lease_lost');
+  }
+}
+
 function storeFor(run: Record<string, unknown>, source?: string) {
   return new DbRunStore({ runId: run.id as string, sessionId: run.session_id as string, agentId: run.agent_id as string, userId: run.user_id as string, agentName: run.agent_name as string, source: source ?? (run.model as ModelRef).source });
 }
@@ -42,6 +52,7 @@ export const POST = route<Ctx>(async (req, ctx) => {
   const sql = db();
   const lease = req.headers.get('x-wren-lease');
   const raw = p.action === 'model' || p.action === 'claim' ? undefined : await req.json().catch(() => ({}));
+  if (p.action !== 'claim' && p.action !== 'decide' && p.action !== 'approval-info') requireLease(run, lease);
 
   switch (p.action) {
     case 'claim': {
@@ -91,8 +102,7 @@ export const POST = route<Ctx>(async (req, ctx) => {
     }
     case 'approval': {
       const b = z.object({ eventId: z.string().uuid(), tool: z.string(), title: z.string(), risk: z.enum(['low', 'medium', 'high', 'critical']), reason: z.string().optional(), args: z.record(z.string(), z.unknown()), localOnly: z.boolean().optional() }).parse(raw);
-      const id = await storeFor(run).createApproval(b);
-      if (b.localOnly) await sql`update public.approvals set detail = detail || '{"localOnly": true}'::jsonb where id = ${id}`;
+      const id = await storeFor(run).createApproval(b, { localOnly: b.localOnly });
       return json({ id });
     }
     case 'decide': {
@@ -100,6 +110,13 @@ export const POST = route<Ctx>(async (req, ctx) => {
       const [a] = await sql`select id from public.approvals where id = ${b.id} and run_id = ${runId}`;
       if (!a) throw new HttpError(404, 'Approval not found for this run.', 'not_found');
       return json(await decideApproval(run.user_id as string, b.id, b.approve, 'desktop'));
+    }
+    case 'approval-info': {
+      // For the desktop's native prompt: what one of this run's approvals asks for.
+      const b = z.object({ id: z.string().uuid() }).parse(raw);
+      const [a] = await sql`select id, title, risk, status, detail from public.approvals where id = ${b.id} and run_id = ${runId}`;
+      if (!a) throw new HttpError(404, 'Approval not found for this run.', 'not_found');
+      return json({ id: a.id, title: a.title, risk: a.risk, status: a.status, reason: a.detail?.reason ?? null, args: a.detail?.args ?? {}, agentName: run.agent_name });
     }
     case 'approval-state': {
       const b = z.object({ id: z.string().uuid() }).parse(raw);
@@ -120,6 +137,14 @@ export const POST = route<Ctx>(async (req, ctx) => {
       const b = z.object({ op: z.enum(['add', 'remove']), value: z.string().max(600) }).parse(raw);
       const s = storeFor(run);
       return json(b.op === 'add' ? { id: await s.memory.add(b.value) } : { ok: await s.memory.remove(b.value) });
+    }
+    case 'artifact': {
+      // Image bytes for model input (e.g. an uploaded screenshot), scoped to this run's user.
+      const b = z.object({ id: z.string().uuid() }).parse(raw);
+      const [a] = await sql`select blob_path, mime, size from public.artifacts where id = ${b.id} and user_id = ${run.user_id}`;
+      if (!a || !String(a.mime).startsWith('image/') || Number(a.size) > 20 * 1024 * 1024) return json({ found: false });
+      const bytes = await readArtifactBytes(a.blob_path);
+      return json(bytes ? { found: true, mime: a.mime, data: bytes.toString('base64') } : { found: false });
     }
     case 'live': {
       const b = z.object({ image: z.string().max(400_000), url: z.string().max(2000).optional(), title: z.string().max(300).optional() }).parse(raw);
@@ -155,9 +180,9 @@ export const POST = route<Ctx>(async (req, ctx) => {
       const outcome = raw as LoopOutcome;
       if (!outcome || typeof outcome.kind !== 'string') throw new HttpError(400, 'Invalid outcome', 'invalid');
       if (outcome.kind === 'yield') {
-        await sql`update public.runs set lease_id = null, lease_until = null, step = greatest(step, ${outcome.steps}) where id = ${runId}`;
+        await sql`update public.runs set lease_id = null, lease_until = null, step = greatest(step, ${outcome.steps}) where id = ${runId} and lease_id = ${lease}`;
       } else {
-        await finishRun(runId, outcome);
+        await finishRun(runId, outcome, lease!);
       }
       return json({ ok: true });
     }

@@ -80,7 +80,7 @@ export interface Approval {
   event_id: string | null;
   tool: string;
   title: string;
-  detail: { args?: Record<string, unknown>; reason?: string | null };
+  detail: { args?: Record<string, unknown>; reason?: string | null; localOnly?: boolean };
   risk: Risk;
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';
   created_at: string;
