@@ -1,0 +1,116 @@
+import { app, safeStorage } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+// Local state for the desktop app. Secrets (device token, ChatGPT tokens) are
+// encrypted with the OS keychain via safeStorage and written owner-only.
+
+export const APP_URL = (process.env.WREN_URL ?? 'https://wren-agents.vercel.app').replace(/\/$/, '');
+export const APP_ORIGIN = new URL(APP_URL).origin;
+
+export function dataDir(): string {
+  const d = process.env.WREN_DATA_DIR ?? app.getPath('userData');
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+function file(name: string) {
+  return join(dataDir(), name);
+}
+
+function writeAtomic(path: string, data: string | Buffer) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, data, { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
+export function readJson<T>(name: string, fallback: T): T {
+  try {
+    return JSON.parse(readFileSync(file(name), 'utf8')) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeJson(name: string, value: unknown) {
+  writeAtomic(file(name), JSON.stringify(value, null, 2));
+}
+
+export function readSecret<T>(name: string): T | null {
+  const p = file(name);
+  if (!existsSync(p)) return null;
+  try {
+    const buf = readFileSync(p);
+    const text = safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf8');
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSecret(name: string, value: unknown | null) {
+  const p = file(name);
+  if (value === null) {
+    try {
+      writeAtomic(p, '');
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  const text = JSON.stringify(value);
+  writeAtomic(p, safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text) : Buffer.from(text));
+}
+
+// ------------------------------------------------------------------ policy
+
+export interface Policy {
+  folders: string[];
+  shell: boolean;
+  browser: boolean;
+  screen: boolean;
+  remoteApprovals: boolean;
+  localModelUrl: string;
+  launchAtLogin: boolean;
+}
+
+export function defaultPolicy(): Policy {
+  const workspace = join(homedir(), 'Wren');
+  mkdirSync(workspace, { recursive: true });
+  return { folders: [workspace], shell: true, browser: true, screen: false, remoteApprovals: true, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false };
+}
+
+export function loadPolicy(): Policy {
+  const p = { ...defaultPolicy(), ...readJson<Partial<Policy>>('policy.json', {}) };
+  if (!p.folders.length) p.folders = defaultPolicy().folders;
+  return p;
+}
+
+export function savePolicy(p: Policy) {
+  writeJson('policy.json', p);
+}
+
+// ------------------------------------------------------------------ device
+
+export interface DeviceCredentials {
+  deviceId: string;
+  token: string;
+  channel: string;
+  account?: { email?: string; name?: string };
+  supabase: { url: string; key: string };
+  appUrl: string;
+}
+
+export const loadDevice = () => readSecret<DeviceCredentials>('device.bin');
+export const saveDevice = (d: DeviceCredentials | null) => writeSecret('device.bin', d);
+
+/** A stable opaque id for this installation (also the ChatGPT host id). */
+export function installId(): string {
+  const s = readJson<{ id?: string }>('install.json', {});
+  if (s.id) return s.id;
+  const id = randomUUID();
+  writeJson('install.json', { id });
+  return id;
+}

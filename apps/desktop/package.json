@@ -1,0 +1,32 @@
+{
+  "name": "wren-desktop",
+  "productName": "Wren",
+  "version": "0.1.0",
+  "description": "Wren desktop: personal AI agents on your own computer",
+  "author": "Tamoghna Kabi",
+  "license": "MIT",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "homepage": "https://github.com/tamoghnakabi-wq/wren",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs && WREN_URL=http://localhost:5310 electron .",
+    "typecheck": "tsc --noEmit -p .",
+    "dist:mac": "node scripts/build.mjs && electron-builder --mac --publish never",
+    "dist:win": "node scripts/build.mjs && electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  },
+  "devDependencies": {
+    "@wren/core": "*",
+    "@supabase/supabase-js": "^2.117.2",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "jose": "^6.2.12",
+    "electron": "44.5.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "typescript": "^5",
+    "@types/node": "^22"
+  }
+}

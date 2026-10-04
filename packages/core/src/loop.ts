@@ -63,7 +63,7 @@ export interface ToolContext {
 export interface ToolHost {
   readonly runtime: Runtime;
   /** Extra information the policy needs (element behind a browser ref, whether a file exists). */
-  riskContext?(name: string, args: Record<string, unknown>): Promise<{ browserTarget?: BrowserTarget; fileExists?: boolean; mcpReadOnly?: boolean }>;
+  riskContext?(name: string, args: Record<string, unknown>): Promise<{ browserTarget?: BrowserTarget; fileExists?: boolean; mcpReadOnly?: boolean; unsandboxed?: boolean }>;
   execute(name: string, args: Record<string, unknown>, ctx: ToolContext, resume?: ToolCallData['background']): Promise<ToolResult | { yield: true }>;
 }
 

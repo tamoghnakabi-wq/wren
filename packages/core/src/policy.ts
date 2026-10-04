@@ -175,12 +175,16 @@ export function assessCall(
   name: string,
   args: Record<string, unknown>,
   runtime: Runtime,
-  context: { browserTarget?: BrowserTarget; fileExists?: boolean; mcpReadOnly?: boolean } = {},
+  context: { browserTarget?: BrowserTarget; fileExists?: boolean; mcpReadOnly?: boolean; unsandboxed?: boolean } = {},
 ): Assessment {
   const s = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : '');
   switch (name) {
-    case 'computer.shell':
-      return assessShell(s('command'), runtime);
+    case 'computer.shell': {
+      const a = assessShell(s('command'), runtime);
+      // Without an OS sandbox (Windows) anything that can change files asks in balanced mode.
+      if (context.unsandboxed && a.risk === 'medium') return { risk: 'high', reason: 'runs a program on your computer (not sandboxed on Windows)' };
+      return a;
+    }
     case 'computer.write_file':
     case 'computer.edit_file':
       return assessFileWrite(s('path'), runtime, context.fileExists ?? name === 'computer.edit_file');
