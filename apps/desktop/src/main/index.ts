@@ -107,7 +107,28 @@ function showWindow(path?: string) {
     if (path) void win.loadURL(`${APP_URL}${path}`);
     win.show();
     win.focus();
+    // Come back the way it was closed.
+    if (restoreFullScreen) {
+      restoreFullScreen = false;
+      win.setFullScreen(true);
+    }
   }
+}
+
+/**
+ * Close-to-tray. On macOS, hiding a full-screen window leaves its Space black
+ * with the app still frontmost, so leave full screen first and hide after.
+ */
+let restoreFullScreen = false;
+function hideWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isFullScreen()) {
+    restoreFullScreen = true;
+    win.once('leave-full-screen', () => win?.hide());
+    win.setFullScreen(false);
+    return;
+  }
+  win.hide();
 }
 
 function createWindow(path = '/app') {
@@ -150,7 +171,7 @@ function createWindow(path = '/app') {
   win.on('close', (e) => {
     if (!quitting) {
       e.preventDefault();
-      win?.hide();
+      hideWindow();
       if (process.platform === 'win32' && Notification.isSupported() && !trayHintShown) {
         trayHintShown = true;
         new Notification({ title: 'Wren is still running', body: 'Agents keep working in the background. Use the tray icon to open or quit Wren.' }).show();
@@ -191,19 +212,22 @@ function updateTray() {
 }
 
 function quit() {
+  app.quit(); // cleanup happens in before-quit, which every way of quitting goes through
+}
+
+/** Stop everything this app started, once, however Wren is quit (⌘Q, menu, tray, update). */
+let cleanedUp = false;
+function shutdown() {
   quitting = true;
+  if (cleanedUp) return;
+  cleanedUp = true;
   runner.abortAll();
   killAllJobs();
   void closeBrowser();
-  app.quit();
 }
 
 function installUpdate() {
-  updater.install(() => {
-    quitting = true;
-    runner.abortAll();
-    killAllJobs();
-  });
+  updater.install(() => shutdown());
 }
 
 // ------------------------------------------------------------------ pairing
@@ -380,9 +404,7 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(() => {
 });
 
 app.on('activate', () => showWindow());
-app.on('before-quit', () => {
-  quitting = true;
-});
+app.on('before-quit', () => shutdown());
 app.on('window-all-closed', () => {
   // Keep running in the background (tray / menu bar) so agents can keep working.
 });
