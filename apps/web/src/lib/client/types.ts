@@ -5,7 +5,7 @@ export interface Profile {
   display_name: string | null;
   email: string | null;
   timezone: string;
-  settings: { openaiAccess?: 'chatgpt' | 'api'; openaiAllowFallback?: boolean; chatgptWelcomed?: boolean; notifyOnComplete?: boolean; notifyOnApproval?: boolean };
+  settings: { openaiAccess?: "chatgpt" | "api"; openaiAllowFallback?: boolean; chatgptWelcomed?: boolean; tzChecked?: boolean; notifyOnComplete?: boolean; notifyOnApproval?: boolean };
   onboarded_at: string | null;
 }
 

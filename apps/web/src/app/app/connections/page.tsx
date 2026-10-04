@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { useApp } from '@/components/app/provider';
 import { Badge, Button, Card, cx, Dialog, Input, Label, PageHeader, Spinner, timeAgo, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
-import { desktop } from '@/lib/client/desktop';
+import { useDesktop } from '@/lib/client/desktop';
 import { useLive } from '@/lib/client/live';
 import { isLiveDevice, type Connection, type Device } from '@/lib/client/types';
 
@@ -222,7 +222,7 @@ function ServiceCard({ icon, title, body, items, onAdd, reload, multi }: { icon:
 }
 
 function ChatGPTAction() {
-  const d = desktop();
+  const d = useDesktop();
   const { desktop: status } = useApp();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -251,7 +251,7 @@ function ChatGPTAction() {
 }
 
 function EngineAction({ engine, install }: { engine: 'claude-code' | 'grok-build'; install: string }) {
-  const d = desktop();
+  const d = useDesktop();
   const { desktop: status } = useApp();
   if (!d)
     return (
@@ -275,7 +275,7 @@ function EngineAction({ engine, install }: { engine: 'claude-code' | 'grok-build
 
 function Devices() {
   const { devices } = useApp();
-  const d = desktop();
+  const d = useDesktop();
   const toast = useToast();
   return (
     <div className="space-y-3">

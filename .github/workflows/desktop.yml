@@ -35,6 +35,9 @@ jobs:
       - run: npm ci
       - run: node scripts/package.mjs mac
         working-directory: apps/desktop
+      - name: Self-test the packaged app
+        run: |
+          ./apps/desktop/release/mac-arm64/Wren.app/Contents/MacOS/Wren --selftest
       - uses: actions/upload-artifact@v4
         with:
           name: mac
@@ -58,9 +61,12 @@ jobs:
         run: |
           $exe = Get-ChildItem apps/desktop/release/*-setup.exe | Select-Object -First 1
           Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait
-          $app = Join-Path $env:LOCALAPPDATA 'Programs\Wren\Wren.exe'
-          if (!(Test-Path $app)) { throw "Wren.exe was not installed at $app" }
-          (Get-Item $app).VersionInfo | Format-List ProductVersion, FileDescription
+          $app = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs') -Recurse -Filter Wren.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (!$app) { throw "Wren.exe was not installed under $env:LOCALAPPDATA\Programs" }
+          Write-Host "Installed at $($app.FullName)"
+          $out = & $app.FullName --selftest | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "Self-test failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows

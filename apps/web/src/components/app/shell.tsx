@@ -12,6 +12,7 @@ import { supabase } from '@/lib/client/supabase';
 import { isLiveDevice } from '@/lib/client/types';
 import { PushPrompt } from './push';
 import { DesktopLinkBanner } from './desktop-link';
+import { ChatGPTWelcome } from './chatgpt-ui';
 
 const NAV = [
   { href: '/app', label: 'Home', icon: Home, exact: true },
@@ -64,6 +65,7 @@ export function Shell({ children }: { children: ReactNode }) {
         {!fullBleed && <MobileTabBar />}
       </div>
       <PushPrompt />
+      <ChatGPTWelcome />
     </div>
   );
 }

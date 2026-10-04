@@ -13,6 +13,35 @@ import { approveScriptPath } from '../engines/claude-code';
 
 const DIST = __dirname;
 setApproveScript(approveScriptPath(DIST));
+
+// `Wren --selftest`: boot, check the packaged pieces, print JSON, exit (used by CI on each OS).
+if (process.argv.includes('--selftest')) {
+  app.whenReady().then(async () => {
+    const { existsSync } = await import('node:fs');
+    const { safeStorage } = await import('electron');
+    let playwright = false;
+    try {
+      await import('playwright-core');
+      playwright = true;
+    } catch {
+      playwright = false;
+    }
+    const approve = approveScriptPath(DIST);
+    const result = {
+      version: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      appUrl: APP_URL,
+      safeStorage: safeStorage.isEncryptionAvailable(),
+      playwright,
+      approveHelper: existsSync(approve),
+      grokHook: existsSync(approve.replace(/mcp-approve\.mjs$/, 'grok-hook.mjs')),
+      preload: existsSync(join(DIST, 'preload.js')),
+    };
+    process.stdout.write(JSON.stringify(result) + '\n');
+    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload ? 0 : 1);
+  });
+}
 app.setName('Wren');
 if (process.env.WREN_DATA_DIR) app.setPath('userData', process.env.WREN_DATA_DIR);
 
@@ -27,7 +56,7 @@ const runner = new DeviceRunner(
 );
 const updater = new Updater(() => pushStatus());
 
-if (!app.requestSingleInstanceLock()) {
+if (!process.argv.includes('--selftest') && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => showWindow());
@@ -301,7 +330,7 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
 
 // ------------------------------------------------------------------ lifecycle
 
-app.whenReady().then(() => {
+if (!process.argv.includes('--selftest')) app.whenReady().then(() => {
   session.fromPartition('persist:wren').setPermissionRequestHandler((wc, permission, cb) => {
     const ok = permission === 'notifications' || permission === 'clipboard-sanitized-write';
     cb(ok && new URL(wc.getURL()).origin === APP_ORIGIN);

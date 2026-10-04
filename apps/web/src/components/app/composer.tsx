@@ -8,6 +8,7 @@ import { isLiveDevice, type Agent } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { cx, formatBytes, useToast } from '../ui';
 import { useApp } from './provider';
+import { ChatGPTPlanBadge, useUsesChatGPTPlan } from './chatgpt-ui';
 
 interface Attachment {
   artifactId: string;
@@ -60,6 +61,7 @@ export function Composer({
   const effectiveRuntime = desktopOnly ? 'desktop' : runtime ?? agent?.runtime ?? 'cloud';
   const device = devices.find((d) => d.id === agent?.device_id) ?? devices[0];
   const deviceOnline = device ? isLiveDevice(device) : false;
+  const usesPlan = useUsesChatGPTPlan(agent, effectiveRuntime);
 
   async function upload(list: FileList | null) {
     if (!list) return;
@@ -136,9 +138,9 @@ export function Composer({
       <div className="mt-1 flex items-center gap-1.5">
         {!sessionId && onAgentChange && (
           <div className="relative">
-            <button onClick={() => setPickAgent((v) => !v)} className="flex h-8 items-center gap-1.5 rounded-full border border-border px-1.5 pr-2.5 text-[13px] font-medium hover:bg-bg-subtle" disabled={!agents.length}>
+            <button onClick={() => setPickAgent((v) => !v)} className="flex h-8 items-center gap-1.5 rounded-full border border-border px-1.5 pr-2.5 text-[13px] font-medium whitespace-nowrap hover:bg-bg-subtle" disabled={!agents.length}>
               {agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={20} /> : null}
-              <span className="max-w-[120px] truncate">{agent?.name ?? 'Choose agent'}</span>
+              <span className="max-w-[90px] truncate sm:max-w-[140px]">{agent?.name ?? 'Choose agent'}</span>
               <ChevronDown className="h-3.5 w-3.5 text-faint" />
             </button>
             {pickAgent && (
@@ -167,11 +169,11 @@ export function Composer({
           <button
             onClick={() => !desktopOnly && setRuntime(effectiveRuntime === 'cloud' ? 'desktop' : 'cloud')}
             title={desktopOnly ? 'This model only runs on your computer' : 'Where this task runs'}
-            className="flex h-8 items-center gap-1.5 rounded-full border border-border px-2.5 text-[13px] text-muted hover:bg-bg-subtle"
+            className="flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-[13px] whitespace-nowrap text-muted hover:bg-bg-subtle"
           >
-            {effectiveRuntime === 'cloud' ? <Cloud className="h-3.5 w-3.5" /> : <Laptop className="h-3.5 w-3.5" />}
-            {effectiveRuntime === 'cloud' ? 'Cloud' : device?.name ?? 'Computer'}
-            {effectiveRuntime === 'desktop' && <span className={cx('h-1.5 w-1.5 rounded-full', deviceOnline ? 'bg-success' : 'bg-border-strong')} />}
+            {effectiveRuntime === 'cloud' ? <Cloud className="h-3.5 w-3.5 shrink-0" /> : <Laptop className="h-3.5 w-3.5 shrink-0" />}
+            <span className="max-w-[110px] truncate sm:max-w-[180px]">{effectiveRuntime === 'cloud' ? 'Cloud' : device?.name ?? 'Computer'}</span>
+            {effectiveRuntime === 'desktop' && <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', deviceOnline ? 'bg-success' : 'bg-border-strong')} />}
           </button>
         )}
         <button onClick={() => fileInput.current?.click()} className="flex h-8 w-8 items-center justify-center rounded-full text-faint hover:bg-bg-subtle hover:text-text" aria-label="Attach files" title="Attach files">
@@ -188,6 +190,7 @@ export function Composer({
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4.5 w-4.5" strokeWidth={2.4} />}
         </button>
       </div>
+      {usesPlan && <ChatGPTPlanBadge />}
       {!sessionId && agent && effectiveRuntime === 'desktop' && !deviceOnline && (
         <p className="mt-2 px-2 text-[12.5px] text-warning">{device ? `${device.name} is offline — the task will start when it comes online.` : 'No computer is linked yet — install the desktop app to run tasks locally.'}</p>
       )}

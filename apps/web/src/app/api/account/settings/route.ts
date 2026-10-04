@@ -15,6 +15,7 @@ const Schema = z.object({
       openaiAccess: z.enum(['chatgpt', 'api']),
       openaiAllowFallback: z.boolean(),
       chatgptWelcomed: z.boolean(),
+      tzChecked: z.boolean(),
       notifyOnComplete: z.boolean(),
       notifyOnApproval: z.boolean(),
     })

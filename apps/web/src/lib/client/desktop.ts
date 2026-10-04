@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+
 // Bridge exposed by the Wren desktop app's preload script. Everything here is
 // optional: the same web app runs in browsers, where `window.wren` is absent.
 
@@ -51,3 +53,10 @@ declare global {
 }
 
 export const desktop = (): WrenDesktop | undefined => (typeof window !== 'undefined' ? window.wren : undefined);
+
+/** The desktop bridge, available only after mount (keeps server and client renders identical). */
+export function useDesktop(): WrenDesktop | undefined {
+  const [d, setD] = useState<WrenDesktop | undefined>(undefined);
+  useEffect(() => setD(window.wren), []);
+  return d;
+}

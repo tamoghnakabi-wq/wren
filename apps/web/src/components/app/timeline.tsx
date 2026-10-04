@@ -277,7 +277,17 @@ function StatusLine({ ev }: { ev: EventRow }) {
   return (
     <div className={cx('mx-auto flex max-w-xl items-start justify-center gap-2 rounded-xl px-3 py-2 text-center text-[13px]', level === 'error' ? 'bg-danger-soft text-danger' : level === 'warn' ? 'bg-warning-soft text-warning' : 'text-muted')}>
       <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <span>{String(ev.data.text ?? '')}</span>
+      <span>
+        {String(ev.data.text ?? '')}
+        {/^subscription_sharing_/.test(String(ev.data.code ?? '')) && (
+          <>
+            {' '}
+            <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer" className="font-medium underline">
+              Manage usage
+            </a>
+          </>
+        )}
+      </span>
     </div>
   );
 }

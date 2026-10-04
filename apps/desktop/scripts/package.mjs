@@ -14,7 +14,7 @@ cpSync('dist-electron', 'app/dist-electron', { recursive: true });
 for (const f of ['tray.png', 'trayTemplate.png', 'trayTemplate@2x.png']) cpSync(`build/${f}`, `app/build/${f}`);
 writeFileSync(
   'app/package.json',
-  JSON.stringify({ name: 'wren-desktop', productName: 'Wren', version: pkg.version, description: pkg.description, author: pkg.author, license: pkg.license, main: 'dist-electron/main.js', dependencies: pkg.dependencies }, null, 2),
+  JSON.stringify({ name: 'wren', productName: 'Wren', version: pkg.version, description: pkg.description, author: pkg.author, license: pkg.license, main: 'dist-electron/main.js', dependencies: pkg.dependencies }, null, 2),
 );
 execSync('npm install --omit=dev --no-audit --no-fund --no-package-lock', { cwd: 'app', stdio: 'inherit' });
 const extra = process.argv.slice(3).join(' ');

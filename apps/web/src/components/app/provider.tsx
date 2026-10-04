@@ -53,6 +53,14 @@ export function AppProvider({ userId, email, children }: { userId: string; email
       .catch(() => {});
   }, []);
 
+  // First visit: adopt the browser's time zone instead of the UTC default.
+  const prof = profile.rows[0];
+  useEffect(() => {
+    if (!prof || prof.timezone !== 'UTC' || prof.settings?.tzChecked) return;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    fetch('/api/account/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tz && tz !== 'UTC' ? { timezone: tz, settings: { tzChecked: true } } : { settings: { tzChecked: true } }) }).catch(() => {});
+  }, [prof]);
+
   useEffect(() => {
     const d = desktop();
     if (!d) return;

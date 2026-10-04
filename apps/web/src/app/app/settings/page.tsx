@@ -7,10 +7,11 @@ import { enablePush, pushState, type PushState } from '@/components/app/push';
 import { useApp } from '@/components/app/provider';
 import { Badge, Button, Card, cx, Input, Label, PageHeader, Select, Switch, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
-import { desktop, type DesktopPolicy } from '@/lib/client/desktop';
+import { useDesktop, type DesktopPolicy, type WrenDesktop } from '@/lib/client/desktop';
 import { supabase } from '@/lib/client/supabase';
 
 export default function SettingsPage() {
+  const d = useDesktop();
   return (
     <div className="mx-auto max-w-2xl">
       <PageHeader title="Settings" />
@@ -18,7 +19,7 @@ export default function SettingsPage() {
         <Profile />
         <ModelAccess />
         <Notifications />
-        {desktop() && <ThisComputer />}
+        {d && <ThisComputer d={d} />}
         <Appearance />
         <Account />
       </div>
@@ -57,7 +58,7 @@ function Profile() {
     setName(profile?.display_name ?? '');
     setTz(profile?.timezone ?? 'UTC');
   }, [profile?.display_name, profile?.timezone]);
-  const zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [tz];
+  const zones = [...new Set([tz, 'UTC', ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [])])];
   const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const save = async (body: object) => {
     try {
@@ -110,7 +111,7 @@ function ModelAccess() {
   const access = profile?.settings?.openaiAccess ?? 'chatgpt';
   const fallback = profile?.settings?.openaiAllowFallback !== false;
   const signedInSomewhere = devices.some((d) => d.capabilities?.chatgpt?.signedIn);
-  const d = desktop();
+  const d = useDesktop();
   const [busy, setBusy] = useState(false);
   const save = async (settings: object) => {
     try {
@@ -191,6 +192,7 @@ function ModelAccess() {
 
 function Notifications() {
   const toast = useToast();
+  const d = useDesktop();
   const [state, setState] = useState<PushState>('unsupported');
   useEffect(() => setState(pushState()), []);
   return (
@@ -205,7 +207,7 @@ function Notifications() {
               : state === 'needs-install'
                 ? 'On iPhone and iPad: tap Share → Add to Home Screen, open Wren from the Home Screen, then turn this on.'
                 : state === 'unsupported'
-                  ? desktop()
+                  ? d
                     ? 'The desktop app shows native notifications.'
                     : 'This browser does not support push notifications.'
                   : 'Off'
@@ -233,8 +235,7 @@ function Notifications() {
   );
 }
 
-function ThisComputer() {
-  const d = desktop()!;
+function ThisComputer({ d }: { d: WrenDesktop }) {
   const { desktop: status } = useApp();
   const toast = useToast();
   const [policy, setPolicy] = useState<DesktopPolicy | null>(null);
