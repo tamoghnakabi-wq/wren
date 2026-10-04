@@ -22,6 +22,13 @@ describe('shell risk', () => {
     expect(desk('ls && git push').risk).toBe('high');
     expect(assessShell('git push', 'cloud').risk).toBe('high');
   });
+  it('only flags network/process commands in command position', () => {
+    expect(desk('echo READ-SSH || echo ssh-blocked').risk).toBe('low');
+    expect(desk('ls && ssh host uptime').risk).toBe('high');
+    expect(desk('echo "kill switch"').risk).toBe('low');
+    expect(desk('pkill node').risk).toBe('high');
+    expect(desk('ps aux | xargs kill').risk).toBe('high');
+  });
   it('marks privileged and credential access critical', () => {
     expect(desk('sudo apt install x').risk).toBe('critical');
     expect(desk('security find-generic-password -s foo').risk).toBe('critical');

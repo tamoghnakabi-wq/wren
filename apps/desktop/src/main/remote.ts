@@ -11,9 +11,12 @@ export class RemoteStore implements RunStore {
   /** Called when an approval is created (desktop may show a native prompt). */
   onApproval?: (id: string, req: ApprovalRequest) => void;
 
+  /** With remote approvals off, only a decision made on this computer counts. */
+  localOnlyApprovals = false;
+
   constructor(
     private readonly runId: string,
-    private readonly lease: string,
+    readonly lease: string,
   ) {}
 
   private call<T>(action: string, body?: unknown) {
@@ -33,7 +36,7 @@ export class RemoteStore implements RunStore {
     return this.call<{ cancel: boolean; pause: boolean }>('control');
   }
   async createApproval(req: ApprovalRequest): Promise<string> {
-    const { id } = await this.call<{ id: string }>('approval', req);
+    const { id } = await this.call<{ id: string }>('approval', { ...req, localOnly: this.localOnlyApprovals });
     this.onApproval?.(id, req);
     return id;
   }

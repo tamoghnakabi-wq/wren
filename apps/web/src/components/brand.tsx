@@ -5,11 +5,13 @@ export function WrenMark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" className={cx('h-7 w-7', className)} aria-hidden>
       <rect width="32" height="32" rx="9" fill="var(--brand)" />
+      <g transform="translate(-1.6 -1.5)">
       <path
         d="M8.5 19.2c0-4.6 3.6-8.3 8.1-8.3 2.2 0 4 .8 5.3 2.2l3.7-1.6-1.9 3.4c.4 1 .6 2.1.6 3.3 0 .5 0 .9-.1 1.4l2 2.6-3.2-.6c-1.5 2.1-3.9 3.4-6.6 3.4H8.5l2.6-2.4c-1.6-.9-2.6-2-2.6-3.4Z"
         fill="#fff"
       />
       <circle cx="20.2" cy="15.6" r="1.25" fill="var(--brand)" />
+      </g>
     </svg>
   );
 }

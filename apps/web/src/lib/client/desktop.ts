@@ -16,6 +16,7 @@ export interface DesktopStatus {
   version: string;
   platform: 'darwin' | 'win32' | 'linux';
   linked: boolean;
+  lastError?: string;
   deviceId?: string;
   deviceName?: string;
   account?: { email?: string };
@@ -30,7 +31,6 @@ export interface DesktopStatus {
 export interface WrenDesktop {
   status(): Promise<DesktopStatus>;
   link(): Promise<{ userCode: string; pairId: string }>;
-  approveLink(userCode: string): Promise<void>;
   unlink(): Promise<void>;
   getPolicy(): Promise<DesktopPolicy>;
   setPolicy(p: Partial<DesktopPolicy>): Promise<DesktopPolicy>;

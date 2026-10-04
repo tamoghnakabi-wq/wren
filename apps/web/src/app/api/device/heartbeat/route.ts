@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { requireDevice } from '@/lib/auth';
 import { db, type Json } from '@/lib/db';
 import { body, json, route } from '@/lib/http';
-import { userSettings } from '@/lib/models';
+import { connectionSecret, userSettings } from '@/lib/models';
 
 // Desktop heartbeat: reports what the device can do and returns its work.
 const Schema = z.object({
@@ -25,7 +25,7 @@ export const POST = route(async (req) => {
     select id, status, cancel_requested, pause_requested, lease_until from public.runs
     where device_id = ${device.id} and runtime = 'desktop' and status in ('queued', 'running')
     order by created_at limit 20`;
-  const settings = await userSettings(device.userId);
+  const settings = { ...(await userSettings(device.userId)), openaiKey: !!(await connectionSecret(device.userId, 'openai')) };
   const [profile] = await sql`select email, display_name from public.profiles where id = ${device.userId}`;
   return json({
     device: { id: device.id, name: device.name },

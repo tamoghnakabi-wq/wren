@@ -171,6 +171,10 @@ export async function finishRun(runId: string, outcome: LoopOutcome): Promise<vo
 /** Approve or deny a pending approval; resumes the run. */
 export async function decideApproval(userId: string, approvalId: string, approve: boolean, via: string, note?: string): Promise<{ runId: string; status: string }> {
   const sql = db();
+  const [pre] = await sql`select detail from public.approvals where id = ${approvalId} and user_id = ${userId}`;
+  if (pre?.detail?.localOnly && via !== 'desktop') {
+    throw new HttpError(403, 'This computer only accepts approvals made on it (remote approvals are turned off in its Wren settings).', 'local_only');
+  }
   const rows = await sql`
     update public.approvals set status = ${approve ? 'approved' : 'denied'}, decided_at = now(), decided_via = ${via}, note = ${note ?? null}
     where id = ${approvalId} and user_id = ${userId} and status = 'pending' and expires_at > now()

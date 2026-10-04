@@ -12,7 +12,7 @@ export const metadata: Metadata = {
   description: 'Personal AI agents that work on their own computer in the cloud or on your Mac and PC. Start tasks from your phone, approve what matters, get results while you are away.',
   applicationName: 'Wren',
   appleWebApp: { capable: true, title: 'Wren', statusBarStyle: 'default' },
-  icons: { icon: '/icon.svg', apple: '/apple-icon.png' },
+  
 };
 
 export const viewport: Viewport = {

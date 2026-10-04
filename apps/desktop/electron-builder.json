@@ -1,0 +1,42 @@
+{
+  "appId": "app.wren.desktop",
+  "productName": "Wren",
+  "copyright": "Copyright © 2026 Tamoghna Kabi",
+  "electronVersion": "44.5.1",
+  "directories": { "app": "app", "output": "release", "buildResources": "build" },
+  "files": ["dist-electron/**", "build/**", "package.json", "node_modules/**"],
+  "asar": true,
+  "asarUnpack": ["dist-electron/mcp-approve.mjs", "dist-electron/grok-hook.mjs", "node_modules/playwright-core/**"],
+  "mac": {
+    "icon": "build/icon.png",
+    "category": "public.app-category.productivity",
+    "identity": "-",
+    "hardenedRuntime": false,
+    "gatekeeperAssess": false,
+    "target": [
+      { "target": "dmg", "arch": ["arm64", "x64"] },
+      { "target": "zip", "arch": ["arm64", "x64"] }
+    ],
+    "artifactName": "Wren-${version}-mac-${arch}.${ext}",
+    "extendInfo": {
+      "NSScreenCaptureUsageDescription": "Wren agents can capture your screen only when you allow it for a task.",
+      "LSUIElement": false
+    }
+  },
+  "dmg": { "artifactName": "Wren-${version}-mac-${arch}.${ext}", "title": "Wren ${version}" },
+  "win": {
+    "icon": "build/icon.png",
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "artifactName": "Wren-${version}-win-x64-setup.${ext}"
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": false,
+    "allowElevation": false,
+    "runAfterFinish": true,
+    "deleteAppDataOnUninstall": false,
+    "shortcutName": "Wren",
+    "artifactName": "Wren-${version}-win-x64-setup.${ext}"
+  },
+  "publish": null
+}

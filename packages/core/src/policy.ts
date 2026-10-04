@@ -41,6 +41,9 @@ const VERSION_ONLY = /^(node|npm|npx|pnpm|yarn|bun|python3?|pip3?|go|cargo|rustc
 const GIT_READ = /^git\s+(status|log|diff|show|branch(\s+(-a|-r|--list|-v+))?\s*$|remote(\s+-v)?\s*$|rev-parse|ls-files|blame|describe|tag(\s+-l)?\s*$|config\s+--get|shortlog|reflog\s*$|stash\s+list)/i;
 const GH_READ = /^gh\s+(pr|issue|repo|run|release|workflow)\s+(list|view|status|diff|checks)\b|^gh\s+(auth\s+status|api\s+(?!.*(-X|--method)\s*(POST|PUT|PATCH|DELETE)))/i;
 
+/** Matches at a command position: start, after a control operator, or after sudo/xargs/env. */
+const CMD = String.raw`(?:^|[;&|(\x60]\s*|\$\(\s*|\b(?:sudo|xargs|env|exec|nohup|time)\s+)`;
+
 interface Rule {
   re: RegExp;
   risk: Risk;
@@ -66,9 +69,9 @@ const RULES: Rule[] = [
   { re: /\bgh\s+(pr\s+(create|merge|close|comment|review|edit)|issue\s+(create|close|comment|edit|delete)|repo\s+(create|delete|archive|edit|rename)|release\s+(create|delete|upload)|api\s+.*(-X|--method)\s*(POST|PUT|PATCH|DELETE)|secret|workflow\s+run)/i, risk: 'high', reason: 'changes things on GitHub' },
   { re: /\b(npm|pnpm|yarn)\s+publish|\bcargo\s+publish|\btwine\s+upload|\bgem\s+push|\bvercel\s+(deploy\s+.*--prod|--prod|promote|remove|rm)|\bnetlify\s+deploy\s+--prod|\bfly\s+deploy|\bterraform\s+(apply|destroy)|\bkubectl\s+(apply|delete)|\bheroku\b/i, risk: 'high', reason: 'publishes or deploys' },
   { re: /\b(curl|wget|http|Invoke-WebRequest|Invoke-RestMethod)\b[^|]*(-X\s*(POST|PUT|PATCH|DELETE)|--data|-d\s|--upload-file|-F\s|-T\s|-Method\s+(Post|Put|Patch|Delete))/i, risk: 'high', reason: 'sends data to a server' },
-  { re: /\b(ssh|scp|rsync|sftp|ftp|telnet|nc|ncat|socat)\s/i, risk: 'high', reason: 'connects to another machine' },
-  { re: /\b(kill|killall|pkill|taskkill|Stop-Process)\b/i, risk: 'high', reason: 'stops processes' },
-  { re: /\b(sendmail|mail|mutt|osascript)\b/i, risk: 'high', reason: 'automates apps or sends mail' },
+  { re: new RegExp(`${CMD}(ssh|scp|rsync|sftp|ftp|telnet|nc|ncat|socat)\\s`), risk: 'high', reason: 'connects to another machine' },
+  { re: new RegExp(`${CMD}(kill|killall|pkill|taskkill|Stop-Process)\\b`, 'i'), risk: 'high', reason: 'stops processes' },
+  { re: new RegExp(`${CMD}(sendmail|mail|mutt|osascript)\\b`), risk: 'high', reason: 'automates apps or sends mail' },
   { re: /(>|>>)\s*~?\/?(\.\w*rc|\.profile|\.bash_profile|\.zprofile|\.gitconfig|\/etc\/)/i, risk: 'high', reason: 'modifies shell or system configuration' },
   { re: /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|python3?|node)\b|iex\s*\(|Invoke-Expression/i, risk: 'high', reason: 'pipes a downloaded script into a shell' },
   { re: /\b(brew|apt|apt-get|dnf|yum|pacman|choco|winget|scoop|port)\s+(install|remove|uninstall|upgrade|purge)/i, risk: 'medium', reason: 'installs or removes system packages' },

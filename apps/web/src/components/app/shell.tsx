@@ -11,6 +11,7 @@ import { useApp } from './provider';
 import { supabase } from '@/lib/client/supabase';
 import { isLiveDevice } from '@/lib/client/types';
 import { PushPrompt } from './push';
+import { DesktopLinkBanner } from './desktop-link';
 
 const NAV = [
   { href: '/app', label: 'Home', icon: Home, exact: true },
@@ -55,7 +56,10 @@ export function Shell({ children }: { children: ReactNode }) {
       <div className="flex min-w-0 flex-1 flex-col">
         {!fullBleed && <MobileTopBar onMenu={() => setDrawer(true)} />}
         <main className={cx('flex-1', fullBleed ? '' : 'px-4 pt-4 pb-28 sm:px-6 lg:px-10 lg:pt-10 lg:pb-12')}>
-          <div className={cx(fullBleed ? '' : 'mx-auto w-full max-w-5xl')}>{children}</div>
+          <div className={cx(fullBleed ? '' : 'mx-auto w-full max-w-5xl')}>
+            {!fullBleed && <DesktopLinkBanner />}
+            {children}
+          </div>
         </main>
         {!fullBleed && <MobileTabBar />}
       </div>

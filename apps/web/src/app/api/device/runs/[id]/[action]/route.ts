@@ -7,7 +7,7 @@ import { db, type Json } from '@/lib/db';
 import { body, json, route, uuid } from '@/lib/http';
 import { callMcp, mcpNamespace, mcpToolSpecs, type McpToolInfo } from '@/lib/mcp';
 import { canUsePlatform, connectionSecret } from '@/lib/models';
-import { finishRun } from '@/lib/runs';
+import { decideApproval, finishRun } from '@/lib/runs';
 import { DbRunStore } from '@/lib/runner/store';
 import { getVercelOidcToken } from '@vercel/oidc';
 
@@ -25,8 +25,8 @@ async function loadRun(device: AuthDevice, runId: string) {
   return run;
 }
 
-function storeFor(run: Record<string, unknown>) {
-  return new DbRunStore({ runId: run.id as string, sessionId: run.session_id as string, agentId: run.agent_id as string, userId: run.user_id as string, agentName: run.agent_name as string, source: (run.model as ModelRef).source });
+function storeFor(run: Record<string, unknown>, source?: string) {
+  return new DbRunStore({ runId: run.id as string, sessionId: run.session_id as string, agentId: run.agent_id as string, userId: run.user_id as string, agentName: run.agent_name as string, source: source ?? (run.model as ModelRef).source });
 }
 
 async function renew(runId: string, leaseId: string | null) {
@@ -90,16 +90,25 @@ export const POST = route<Ctx>(async (req, ctx) => {
       return json(await storeFor(run).control());
     }
     case 'approval': {
-      const b = z.object({ eventId: z.string().uuid(), tool: z.string(), title: z.string(), risk: z.enum(['low', 'medium', 'high', 'critical']), reason: z.string().optional(), args: z.record(z.string(), z.unknown()) }).parse(raw);
-      return json({ id: await storeFor(run).createApproval(b) });
+      const b = z.object({ eventId: z.string().uuid(), tool: z.string(), title: z.string(), risk: z.enum(['low', 'medium', 'high', 'critical']), reason: z.string().optional(), args: z.record(z.string(), z.unknown()), localOnly: z.boolean().optional() }).parse(raw);
+      const id = await storeFor(run).createApproval(b);
+      if (b.localOnly) await sql`update public.approvals set detail = detail || '{"localOnly": true}'::jsonb where id = ${id}`;
+      return json({ id });
+    }
+    case 'decide': {
+      const b = z.object({ id: z.string().uuid(), approve: z.boolean() }).parse(raw);
+      const [a] = await sql`select id from public.approvals where id = ${b.id} and run_id = ${runId}`;
+      if (!a) throw new HttpError(404, 'Approval not found for this run.', 'not_found');
+      return json(await decideApproval(run.user_id as string, b.id, b.approve, 'desktop'));
     }
     case 'approval-state': {
       const b = z.object({ id: z.string().uuid() }).parse(raw);
       return json({ state: await storeFor(run).approvalState(b.id) });
     }
     case 'usage': {
-      const b = z.object({ model: z.string(), inputTokens: z.number(), outputTokens: z.number(), cachedTokens: z.number() }).parse(raw);
-      await storeFor(run).recordUsage(b, b.model);
+      const b = z.object({ model: z.string(), inputTokens: z.number(), outputTokens: z.number(), cachedTokens: z.number(), source: z.string().max(30).optional() }).parse(raw);
+      const s = storeFor(run, b.source);
+      await s.recordUsage(b, b.model);
       return json({ ok: true });
     }
     case 'notify': {

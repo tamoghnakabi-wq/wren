@@ -12,8 +12,8 @@
     "build": "node scripts/build.mjs",
     "dev": "node scripts/build.mjs && WREN_URL=http://localhost:5310 electron .",
     "typecheck": "tsc --noEmit -p .",
-    "dist:mac": "node scripts/build.mjs && electron-builder --mac --publish never",
-    "dist:win": "node scripts/build.mjs && electron-builder --win --publish never"
+    "dist:mac": "node scripts/package.mjs mac",
+    "dist:win": "node scripts/package.mjs win"
   },
   "dependencies": {
     "playwright-core": "1.63.0"
@@ -27,6 +27,7 @@
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "typescript": "^5",
-    "@types/node": "^22"
+    "@types/node": "^22",
+    "zod": "^4.6.5"
   }
 }
