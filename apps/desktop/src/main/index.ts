@@ -227,7 +227,12 @@ function shutdown() {
 }
 
 function installUpdate() {
-  updater.install(() => shutdown());
+  // Agents stop before the update is staged; the rest of the cleanup runs when the app quits.
+  updater.install(() => {
+    runner.abortAll();
+    killAllJobs();
+    void closeBrowser();
+  });
 }
 
 // ------------------------------------------------------------------ pairing

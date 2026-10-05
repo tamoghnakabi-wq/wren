@@ -1,4 +1,4 @@
-import { assessCall, assessShell, needsApproval, type BrowserTarget } from './policy';
+import { assessCall, isReadOnlyCommand, needsApproval, type BrowserTarget } from './policy';
 import { describeCall } from './tools';
 import { clipMiddle } from './transcript';
 import type {
@@ -100,7 +100,8 @@ export interface LoopOptions {
 export const MAX_MODEL_RETRIES = 6;
 
 export type LoopOutcome =
-  | { kind: 'completed'; result: string; steps: number }
+  /** `seenSeq`: the newest event the final answer was based on; a user message after it still needs a reply. */
+  | { kind: 'completed'; result: string; steps: number; seenSeq?: number }
   | { kind: 'waiting_approval'; approvalId: string; steps: number }
   | { kind: 'waiting_input'; question: string; steps: number }
   /** `retries`: set when yielding to retry a failing model provider (the new consecutive count). */
@@ -126,6 +127,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
     if (Date.now() >= o.deadline) return { kind: 'yield', steps };
 
     const events = await o.store.events();
+    const seenSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
     if (await saveMissingCalls(o, events)) continue;
     const open = events.filter((e) => e.type === 'tool' && e.runId === o.runId && OPEN_STATUSES.has(String(e.status)));
 
@@ -178,10 +180,10 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
             });
             continue;
           }
-          // Approved: make sure it still acts on the element the user saw.
-          if (BROWSER_TARGETED.has(d.name) && d.target) {
+          // Approved: make sure it still acts on the very element (and page) the user saw.
+          if (BROWSER_TARGETED.has(d.name)) {
             const now = (await o.host.riskContext?.(d.name, d.args).catch(() => undefined))?.browserTarget;
-            if (!sameTarget(d.target, now)) {
+            if (!d.target?.elementId || !sameTarget(d.target, now)) {
               await finish(o, ev, d, { output: 'The page changed after this was approved, so the action was not taken. Take a new snapshot and try again.', isError: true });
               continue;
             }
@@ -192,11 +194,16 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
           const ctx = (await o.host.riskContext?.(d.name, d.args).catch(() => undefined)) ?? {};
           if (BROWSER_TARGETED.has(d.name) && ctx.browserTarget) {
             const t = ctx.browserTarget;
-            d.target = { label: t.label, role: t.role, inputType: t.inputType, autocomplete: t.autocomplete };
+            d.target = { label: t.label, role: t.role, inputType: t.inputType, autocomplete: t.autocomplete, elementId: t.elementId, url: t.url, href: t.href };
           }
           const a = assessCall(d.name, d.args, o.host.runtime, ctx);
           if (a.blocked) {
             await o.store.update(ev.id, { status: 'error', data: { ...d, risk: a.risk, endedAt: Date.now(), result: { output: a.blocked, isError: true } } });
+            continue;
+          }
+          if (needsApproval(a.risk, o.autonomy) && !isBuiltin(d.name) && BROWSER_TARGETED.has(d.name) && !d.target?.elementId) {
+            // An approval has to name the exact element it allows; without one there is nothing to bind it to.
+            await finish(o, ev, d, { output: "Couldn't identify that element on the current page, so the action can't be offered for approval. Take a new snapshot and use a current ref.", isError: true });
             continue;
           }
           if (needsApproval(a.risk, o.autonomy) && !isBuiltin(d.name)) {
@@ -219,11 +226,11 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
     const lastIsFinalAnswer =
       last && (last.data as MessageData).role === 'assistant' && last.runId === o.runId && !events.some((e) => e.type === 'tool' && (e.data as ToolCallData).turnId === last.id);
     if (lastIsFinalAnswer && (last!.data as MessageData).raw?.items !== undefined && !(last!.data as { paused?: boolean }).paused) {
-      return { kind: 'completed', result: (last!.data as MessageData).text, steps };
+      return { kind: 'completed', result: (last!.data as MessageData).text, steps, seenSeq };
     }
     if (steps >= o.maxSteps) {
       await o.store.append<StatusData>('status', { text: `Stopped after ${o.maxSteps} steps. Send a message to let the agent continue.`, level: 'warn', code: 'max_steps' }, 'done');
-      return { kind: 'completed', result: 'Stopped at the step limit.', steps };
+      return { kind: 'completed', result: 'Stopped at the step limit.', steps, seenSeq };
     }
     if (Date.now() >= (o.modelDeadline ?? o.deadline)) return { kind: 'yield', steps };
 
@@ -245,10 +252,10 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
     steps++;
     if (turn.stop === 'refusal') {
       await o.store.append<StatusData>('status', { text: 'The model declined to continue this task.', level: 'warn', code: 'refusal' }, 'done');
-      return { kind: 'completed', result: turn.text || 'The model declined to continue.', steps };
+      return { kind: 'completed', result: turn.text || 'The model declined to continue.', steps, seenSeq };
     }
     if (!turn.calls && turn.stop !== 'other') {
-      return { kind: 'completed', result: turn.text, steps };
+      return { kind: 'completed', result: turn.text, steps, seenSeq };
     }
   }
   return { kind: 'yield', steps };
@@ -278,8 +285,10 @@ async function appendCall(o: LoopOptions, turnId: string, c: NonNullable<Message
 
 const BROWSER_TARGETED = new Set(['browser.click', 'browser.type', 'browser.press']);
 
-function sameTarget(a: ToolCallData['target'], b: { label?: string; role?: string; inputType?: string } | undefined) {
-  return !!b && (a?.label ?? '') === (b.label ?? '') && (a?.role ?? '') === (b.role ?? '') && (a?.inputType ?? '') === (b.inputType ?? '');
+/** Same element, same page: identity, location and what the user was shown must all match. */
+function sameTarget(a: ToolCallData['target'], b: BrowserTarget | undefined) {
+  if (!a || !b) return false;
+  return (['label', 'role', 'inputType', 'elementId', 'url', 'href'] as const).every((k) => (a[k] ?? '') === (b[k] ?? ''));
 }
 
 /** Calls that only read, so repeating one after a crash can't change anything. */
@@ -295,8 +304,8 @@ function replaySafe(d: ToolCallData): boolean {
     case 'github.request':
       return String(d.args.method ?? 'GET').toUpperCase() === 'GET';
     case 'computer.shell':
-      // Judged as on a real computer: the cloud's "it's the agent's own VM" discount doesn't make a write repeatable.
-      return assessShell(String(d.args.command ?? ''), 'desktop').risk === 'low';
+      // Only commands that are read-only with fully known arguments (no $-expansions) can repeat.
+      return isReadOnlyCommand(String(d.args.command ?? ''));
     default:
       return false;
   }

@@ -4,13 +4,14 @@ import { db } from '@/lib/db';
 import { env } from '@/lib/env';
 import { json, route } from '@/lib/http';
 import { notifyUser } from '@/lib/notify';
-import { kickRun, kickTick, startTask } from '@/lib/runs';
+import { cleanUpCloudRun, kickRun, kickTick, startTask } from '@/lib/runs';
 import { nextRun } from '@/lib/schedules';
 
 // Called every minute by pg_cron (Supabase) with the cron secret:
 //  1. re-kick cloud runs whose tick died (lease expired) or whose retry is due
 //  2. start due scheduled tasks
 //  3. expire stale approvals and tell the user
+//  4. finish cleaning up ended cloud runs whose commands weren't confirmed stopped
 export const maxDuration = 60;
 
 function authorized(req: Request) {
@@ -21,7 +22,7 @@ function authorized(req: Request) {
 export const POST = route(async (req) => {
   if (!authorized(req)) throw new HttpError(401, 'Forbidden', 'forbidden');
   const sql = db();
-  const report = { kicked: 0, scheduled: 0, expired: 0, errors: [] as string[] };
+  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, errors: [] as string[] };
 
   const stale = await sql`
     select id from public.runs
@@ -33,6 +34,13 @@ export const POST = route(async (req) => {
   // A run that was just created is kicked by the API; only old ones need help.
   await Promise.allSettled(stale.map((r) => kickTick(r.id)));
   report.kicked = stale.length;
+
+  const unclean = await sql`
+    select id, agent_id from public.runs
+    where cleanup_pending and runtime = 'cloud' and ended_at < now() - interval '30 seconds'
+    order by ended_at limit 10`;
+  const cleaned = await Promise.allSettled(unclean.map((r) => cleanUpCloudRun(r.agent_id, r.id)));
+  report.cleaned = cleaned.filter((c) => c.status === 'fulfilled' && c.value).length;
 
   // Claim due schedules by moving them to their next occurrence first, so an
   // interrupted invocation can at worst skip one occurrence, never stall a schedule.

@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,6 +33,9 @@ const CACHES = [
   '.npm', '.cache', '.bun/install', '.yarn/berry', '.cargo/registry', '.cargo/git', '.nuget/packages', 'Library/pnpm',
   ...['pip', 'Homebrew', 'Yarn', 'node-gyp', 'ms-playwright', 'pnpm', 'go-build', 'electron', 'electron-builder', 'typescript', 'deno', 'bun', 'pypoetry', 'uv'].map((c) => `Library/Caches/${c}`),
 ];
+/** What the small file helpers (cat, sh, find, stat) need to load; everything else is unreadable to them. */
+const SYSTEM_RUNTIME = ['/usr', '/bin', '/sbin', '/System', '/private/var/db/dyld', '/private/var/db/timezone', '/dev', '/Library/Apple'];
+
 /** Never readable: credential stores, other apps' private data, registry/cloud tokens. */
 const SECRETS = [
   '.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azure', '.terraform.d', '.vercel', '.huggingface', '.netrc', '.git-credentials',
@@ -42,13 +45,33 @@ const SECRETS = [
   'Library/Keychains', 'Library/Cookies', 'Library/Messages', 'Library/Mail', 'Library/Safari', 'Library/Application Support/Google/Chrome',
   'Library/Application Support/Firefox', 'Library/Application Support/com.vercel.cli',
 ];
-/** The CLIs' own state (sign-in, sessions, updates): theirs to use while they run. */
-const ENGINE_STATE: Record<Engine, { dirs: string[]; prefixes: string[] }> = {
-  // Claude Code keeps its sign-in in the login Keychain (the keychain files are encrypted; items stay
-  // behind their own access rules).
-  'claude-code': { dirs: ['.claude', '.local/share/claude', '.local/state/claude', '.cache/claude', 'Library/Caches/claude-cli-nodejs', 'Library/Keychains'], prefixes: ['.claude.json'] },
-  'grok-build': { dirs: ['.grok'], prefixes: [] },
+/**
+ * The CLIs' own state. Every other profile denies it. Grok Build runs inside its profile and may
+ * use its state, except what would let a command change how Grok behaves later (hooks, settings,
+ * trust, plugins, its own binaries), mirroring Grok's own sandbox profiles. Claude Code isn't run
+ * under a profile: it runs in --restricted mode and sandboxes each command it starts instead
+ * (engines/common.ts), so its Keychain sign-in and settings stay out of agent commands' reach.
+ */
+const ENGINE_STATE: Record<Engine, { dirs: string[]; prefixes: string[]; protect: string[] }> = {
+  'claude-code': { dirs: ['.claude', '.local/share/claude', '.local/state/claude', '.cache/claude', 'Library/Caches/claude-cli-nodejs'], prefixes: ['.claude.json'], protect: [] },
+  'grok-build': {
+    dirs: ['.grok'],
+    prefixes: [],
+    protect: ['.grok/hooks', '.grok/hooks-paths', '.grok/config.toml', '.grok/trusted_folders.toml', '.grok/managed_config.toml', '.grok/requirements.toml', '.grok/sandbox.toml', '.grok/bin', '.grok/bundled', '.grok/installed-plugins', '.grok/skills', '.grok/vendor', '.grok/marketplace-cache'],
+  },
 };
+
+/** Absolute hook targets Grok loads from ~/.grok/hooks-paths (they must not be writable either). */
+function grokHookTargets(home: string): string[] {
+  try {
+    return readFileSync(join(home, '.grok', 'hooks-paths'), 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('/'));
+  } catch {
+    return [];
+  }
+}
 
 interface Spec {
   roots: string[];
@@ -65,7 +88,8 @@ function build(s: Spec): string {
   const home = s.home ?? homedir();
   const h = (p: string) => join(home, p);
   const caches = s.tools ? CACHES.map(h) : [];
-  const engine = s.engine ? ENGINE_STATE[s.engine] : { dirs: [], prefixes: [] };
+  const engine = s.engine ? ENGINE_STATE[s.engine] : { dirs: [], prefixes: [], protect: [] };
+  const protect = [...engine.protect.map(h), ...(s.engine === 'grok-build' ? grokHookTargets(home) : [])];
   const engineDirs = engine.dirs.map(h);
   const enginePrefixes = engine.prefixes.map((p) => prefix(h(p))).join(' ');
   const temp = s.tools ? [realpathSync(tmpdir()), '/private/tmp', '/private/var/folders'] : [];
@@ -82,15 +106,18 @@ function build(s: Spec): string {
     '(allow default)',
     '(deny file-write*)',
     `(allow file-write* ${sub(writable)} ${enginePrefixes} (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty") (regex #"^/dev/fd/") (regex #"^/dev/ttys"))`,
-    `(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath ${q(home)}))`,
-    `(allow file-read-data ${sub(readable)} ${enginePrefixes} ${s.tools ? lit(HOME_FILES.map(h)) : ''})`,
+    // Commands may read system locations (toolchains live there); Wren's file helpers only the
+    // allowed folders and the system runtime.
+    s.tools ? `(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath ${q(home)}))` : '(deny file-read-data (subpath "/"))',
+    `(allow file-read-data ${sub(readable)} ${enginePrefixes} ${s.tools ? lit(HOME_FILES.map(h)) : `${sub(SYSTEM_RUNTIME)} (literal "/")`})`,
+    ...(protect.length ? [`(deny file-write* ${sub(protect)} ${lit(protect)})`] : []),
     `(deny file-read* file-write* ${sub(secrets)} ${secretPrefixes})`,
   ].join('\n');
 }
 
-/** Agent shell commands. */
-export function seatbeltProfile(roots: string[], dataDir: string, home = homedir()): string {
-  return build({ roots, dataDir, home, tools: true });
+/** Agent shell commands (`readOnly`: extra paths they may read, e.g. this app for its helpers). */
+export function seatbeltProfile(roots: string[], dataDir: string, home = homedir(), readOnly: string[] = []): string {
+  return build({ roots, dataDir, home, tools: true, readOnly });
 }
 
 /** Wren's own file reads/writes for the agent: the allowed folders and nothing else. */

@@ -69,6 +69,7 @@ export async function runTick(runId: string): Promise<string> {
     userId: run.user_id,
     sessionId: run.session_id,
     runId,
+    leaseId: lease,
     githubToken: github?.secret,
     mcp,
     onLiveView: (p) => store.live({ image: p.data, url: p.url, title: p.title }),

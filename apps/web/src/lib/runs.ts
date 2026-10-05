@@ -1,4 +1,5 @@
 import { DESKTOP_ONLY_SOURCES, runContext, type LoopOutcome, type MessageData, type ModelRef, type Runtime, type StatusData } from '@wren/core';
+import type { TransactionSql } from 'postgres';
 import { db, type Json } from './db';
 import { env, selfUrl } from './env';
 import { HttpError } from './auth';
@@ -75,10 +76,10 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   const msg: MessageData & { context: string } = { ...(userMessage as MessageData), context };
 
   // Session (if new), run, first message and session state are created together.
-  const created = await sql.begin(async (tx) => {
+  const created = await taskTx(async (tx) => {
     let sessionId = i.sessionId;
     if (sessionId) {
-      const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${i.userId} for update`;
+      const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${i.userId} for no key update`;
       if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
       // Someone else started a run while we were preparing: join it instead.
       const [active] = await tx`select id from public.runs where session_id = ${sessionId} and status in ('queued', 'running', 'waiting', 'paused') limit 1`;
@@ -110,10 +111,10 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
 
 /** Add a user message to the session's active run, resuming it if it was paused or waiting for this answer. */
 async function continueActiveRun(sessionId: string, userId: string, message: Record<string, unknown>): Promise<{ runId: string; kick: boolean } | null> {
-  return db().begin(async (tx) => {
-    const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${userId} for update`;
+  return taskTx(async (tx) => {
+    const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${userId} for no key update`;
     if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
-    const [active] = await tx`select id, status from public.runs where session_id = ${sessionId} and status in ('queued', 'running', 'waiting', 'paused') order by created_at desc limit 1 for update`;
+    const [active] = await tx`select id, status from public.runs where session_id = ${sessionId} and status in ('queued', 'running', 'waiting', 'paused') order by created_at desc limit 1 for no key update`;
     if (!active) return null;
     await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
       values (${userId}, ${sessionId}, ${active.id}, 'message', 'done', ${tx.json(message as unknown as Json)})`;
@@ -160,6 +161,27 @@ function bypassHeader(): Record<string, string> {
   return b ? { 'x-vercel-protection-bypass': b } : {};
 }
 
+/**
+ * A transaction over a task's rows. Every one locks the session row first, then the run row
+ * (FOR NO KEY UPDATE: it doesn't block a worker's event inserts), so two of them can't wait on
+ * each other. A deadlock or serialization abort, which the database resolves by cancelling one
+ * side, is retried.
+ */
+async function taskTx<T>(fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return (await db().begin(fn)) as T;
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if ((code === '40P01' || code === '40001') && attempt < 4) {
+        await new Promise((r) => setTimeout(r, 30 * attempt + Math.random() * 50));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 const terminalKind = (k: LoopOutcome['kind']) => k === 'completed' || k === 'failed' || k === 'cancelled';
 
 const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
@@ -182,8 +204,11 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
  */
 export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string): Promise<void> {
   const sql = db();
-  const done = await sql.begin(async (tx) => {
-    const [run] = await tx`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for update of r`;
+  const [ref] = await sql`select session_id from public.runs where id = ${runId}`;
+  if (!ref) return;
+  const done = await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    const [run] = await tx`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for no key update of r`;
     if (!run) return null;
     if (leaseId && run.lease_id !== leaseId) return null; // another worker owns the run now
     let o = outcome;
@@ -201,6 +226,11 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
           and m.seq > (select coalesce(max(seq), 0) from public.events where run_id = ${runId} and type = 'tool' and status = 'awaiting_input')
         limit 1`;
       resume = !!answered;
+    } else if (o.kind === 'completed' && typeof o.seenSeq === 'number') {
+      // A message the final answer never saw (sent while it was being written): keep going.
+      const [late] = await tx`
+        select 1 from public.events where run_id = ${runId} and type = 'message' and data->>'role' = 'user' and seq > ${o.seenSeq} limit 1`;
+      resume = !!late;
     }
     if (resume) runStatus = 'queued';
     const terminal = ['completed', 'failed', 'cancelled'].includes(runStatus);
@@ -209,7 +239,8 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
         retry_count = case when ${o.steps} > step then 0 else retry_count end,
         error = ${o.kind === 'failed' ? o.error : null},
         result = ${o.kind === 'completed' ? o.result.slice(0, 20000) : run.result},
-        ended_at = ${terminal ? new Date() : null}
+        ended_at = ${terminal ? new Date() : null},
+        cleanup_pending = cleanup_pending or ${terminal && run.runtime === 'cloud'}
       where id = ${runId}`;
     if (cancelledLate) {
       await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
@@ -226,8 +257,9 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
   if (!done) return;
   const { run, o, resume } = done;
   if (resume) await kickRun(runId);
-  // A finished run's shell jobs (background ones included) end with it.
-  if (terminalKind(o.kind) && run.runtime === 'cloud') await SandboxHost.stopRunJobs(run.agent_id, runId);
+  // A finished run's shell jobs (background ones included) and browser tab end with it. The
+  // flag set above stays until the VM confirms it, and the cron retries until then.
+  if (terminalKind(o.kind) && !resume && run.runtime === 'cloud') await cleanUpCloudRun(run.agent_id, runId);
 
   const url = `/app/s/${run.session_id}`;
   if (o.kind === 'failed') {
@@ -238,6 +270,13 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
   // waiting_input: the question notification is sent by the loop's ask_user handler
 }
 
+/** Stop a finished cloud run's commands and close its browser tab; clears the pending flag once confirmed. */
+export async function cleanUpCloudRun(agentId: string, runId: string): Promise<boolean> {
+  const ok = await SandboxHost.endRun(agentId, runId);
+  if (ok) await db()`update public.runs set cleanup_pending = false where id = ${runId}`;
+  return ok;
+}
+
 /** Approve or deny a pending approval; resumes the run. */
 export async function decideApproval(userId: string, approvalId: string, approve: boolean, via: string, note?: string): Promise<{ runId: string; status: string }> {
   const sql = db();
@@ -245,24 +284,28 @@ export async function decideApproval(userId: string, approvalId: string, approve
   if (pre?.detail?.localOnly && via !== 'desktop') {
     throw new HttpError(403, 'This computer only accepts approvals made on it (remote approvals are turned off in its Wren settings).', 'local_only');
   }
-  const rows = await sql`
-    update public.approvals set status = ${approve ? 'approved' : 'denied'}, decided_at = now(), decided_via = ${via}, note = ${note ?? null}
-    where id = ${approvalId} and user_id = ${userId} and status = 'pending' and expires_at > now()
-    returning run_id, session_id`;
-  if (!rows.length) {
-    const [a] = await sql`select status, run_id from public.approvals where id = ${approvalId} and user_id = ${userId}`;
-    if (!a) throw new HttpError(404, 'Approval not found.', 'not_found');
-    return { runId: a.run_id, status: a.status };
-  }
-  const { run_id: runId, session_id: sessionId } = rows[0];
-  // If the worker is still switching the run to "waiting", this waits for its lock and then
-  // sees "waiting"; if it hasn't started yet, finishRun will see the decision instead.
-  const [run] = await sql`update public.runs set status = 'queued' where id = ${runId} and status = 'waiting' returning id`;
-  if (run) {
-    await sql`update public.sessions set status = 'queued' where id = ${sessionId}`;
-    await kickRun(runId);
-  }
-  return { runId, status: approve ? 'approved' : 'denied' };
+  const [a] = await sql`select run_id, session_id from public.approvals where id = ${approvalId} and user_id = ${userId}`;
+  if (!a) throw new HttpError(404, 'Approval not found.', 'not_found');
+  // Same lock order as finishRun: if the worker is switching the run to "waiting", this waits
+  // and then sees "waiting"; if it hasn't started yet, finishRun sees the decision instead.
+  const r = await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${a.session_id} for no key update`;
+    await tx`select id from public.runs where id = ${a.run_id} for no key update`;
+    const rows = await tx`
+      update public.approvals set status = ${approve ? 'approved' : 'denied'}, decided_at = now(), decided_via = ${via}, note = ${note ?? null}
+      where id = ${approvalId} and user_id = ${userId} and status = 'pending' and expires_at > now() and not (coalesce(detail->>'localOnly', 'false') = 'true' and ${via} <> 'desktop')
+      returning id`;
+    if (!rows.length) {
+      const [now] = await tx`select status, detail from public.approvals where id = ${approvalId}`;
+      if (now?.status === 'pending' && now.detail?.localOnly && via !== 'desktop') throw new HttpError(403, 'This computer only accepts approvals made on it (remote approvals are turned off in its Wren settings).', 'local_only');
+      return { status: now?.status as string, kick: false };
+    }
+    const [run] = await tx`update public.runs set status = 'queued' where id = ${a.run_id} and status = 'waiting' returning id`;
+    if (run) await tx`update public.sessions set status = 'queued' where id = ${a.session_id}`;
+    return { status: approve ? 'approved' : 'denied', kick: !!run };
+  });
+  if (r.kick) await kickRun(a.run_id);
+  return { runId: a.run_id, status: r.status };
 }
 
 export async function cancelRun(userId: string, runId: string) {
@@ -277,7 +320,7 @@ export async function cancelRun(userId: string, runId: string) {
   } else if (run.runtime === 'cloud') {
     // A tick is mid-step: end the run's commands now so it notices Stop without waiting them out.
     const [r] = await sql`select agent_id from public.runs where id = ${runId}`;
-    if (r) await SandboxHost.stopRunJobs(r.agent_id, runId);
+    if (r) await SandboxHost.endRun(r.agent_id, runId);
   }
   if (run.runtime === 'desktop') await kickRun(runId);
 }

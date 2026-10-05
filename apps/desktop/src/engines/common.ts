@@ -1,15 +1,15 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcome, type MessageData, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
-import { engineProfile, hasSeatbelt, type Engine } from '../main/sandbox';
+import { engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
 import { toolEnv } from '../main/shellenv';
 
 // Shared plumbing for external agent engines (Claude Code, Grok Build): they
@@ -67,9 +67,69 @@ export async function spawnEngine(engine: Engine, cli: string, args: string[], r
   const env = { ...engineEnv(), ...extraEnv };
   if (!hasSeatbelt()) return spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   Object.assign(env, await toolEnv());
-  const appBundle = process.platform === 'darwin' ? resolve(process.execPath, '..', '..', '..') : dirname(process.execPath);
-  const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), [appBundle, dirname(helper)]);
+  const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), appPaths(helper));
   return spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...args], { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+}
+
+/** Paths commands need to read to start this app's helpers (e.g. the approval MCP server). */
+function appPaths(helper: string): string[] {
+  const appBundle = process.platform === 'darwin' ? resolve(process.execPath, '..', '..', '..') : dirname(process.execPath);
+  return [appBundle, dirname(helper)];
+}
+
+// Claude Code's documented CLAUDE_CODE_SHELL_PREFIX runs `<prefix> "<command>"` for every shell
+// command (and MCP server) it starts. Wren's prefix runs that command inside the shell sandbox.
+// It lives in Wren's data folder, which sandboxed commands can neither read nor change.
+const SHELL_PREFIX = `#!/bin/sh
+# Written by Wren: runs one command from Claude Code inside Wren's sandbox.
+p="$WREN_SHELL_SB"
+unset WREN_SHELL_SB
+[ -n "$p" ] || { echo "Wren: sandbox profile missing, so the command was not run." >&2; exit 126; }
+case "$SHELL" in /bin/zsh|/bin/bash) sh="$SHELL" ;; *) sh=/bin/zsh ;; esac
+exec /usr/bin/sandbox-exec -p "$p" "$sh" -c "$1"
+`;
+
+function shellPrefix(): string {
+  const dir = join(dataDir(), 'bin');
+  const file = join(dir, 'wren-shell.sh');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  let current = '';
+  try {
+    current = readFileSync(file, 'utf8');
+  } catch {
+    /* first run */
+  }
+  if (current !== SHELL_PREFIX) writeFileSync(file, SHELL_PREFIX, { mode: 0o700 });
+  chmodSync(file, 0o700);
+  return file;
+}
+
+let restrictedSupport: { cli: string; ok: boolean } | null = null;
+/** Claude Code's --restricted mode (2.1.2xx+): no settings files, file tools confined to the working folders. */
+export function claudeSupportsRestricted(cli: string): boolean {
+  if (restrictedSupport?.cli !== cli) {
+    const help = spawnSync(cli, ['--help'], { encoding: 'utf8', env: engineEnv(), timeout: 20_000 });
+    restrictedSupport = { cli, ok: /--restricted\b/.test(`${help.stdout}${help.stderr}`) };
+  }
+  return restrictedSupport.ok;
+}
+
+/**
+ * Start Claude Code. It runs as the user's own `claude` (its sign-in stays in the user's
+ * Keychain, untouched by agent commands) in --restricted mode, and on macOS every command or MCP
+ * server it starts goes through Wren's shell sandbox via CLAUDE_CODE_SHELL_PREFIX: commands reach
+ * the allowed folders and toolchains only, never the Keychain or Claude's own settings.
+ */
+export async function spawnClaude(cli: string, args: string[], run: EngineRun, helper: string): Promise<ChildProcessWithoutNullStreams> {
+  const env: NodeJS.ProcessEnv = { ...engineEnv() };
+  if (hasSeatbelt()) {
+    Object.assign(env, await toolEnv(), {
+      SHELL: /^\/bin\/(zsh|bash)$/.test(process.env.SHELL ?? '') ? process.env.SHELL : '/bin/zsh',
+      CLAUDE_CODE_SHELL_PREFIX: shellPrefix(),
+      WREN_SHELL_SB: seatbeltProfile(allowedRoots(run.folders), dataDir(), undefined, appPaths(helper)),
+    });
+  }
+  return spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 export class TimelineWriter {

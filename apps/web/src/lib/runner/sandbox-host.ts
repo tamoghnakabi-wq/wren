@@ -77,6 +77,8 @@ export interface SandboxHostOptions {
   userId: string;
   sessionId: string;
   runId: string;
+  /** The tick's lease: files the run produces are recorded only while it holds the run. */
+  leaseId?: string;
   githubToken?: string;
   /** namespace -> connected MCP server */
   mcp?: Map<string, { url: string; token?: string; tools: McpToolInfo[] }>;
@@ -128,18 +130,35 @@ export class SandboxHost implements ToolHost {
     }
   }
 
-  /** Stop the shell jobs a run started (foreground or background), leaving other runs' jobs alone. */
-  static async stopRunJobs(agentId: string, runId: string) {
+  /**
+   * End what a run left on its VMs: its shell jobs (foreground or background; other runs' jobs
+   * keep going) and its browser tab. True once confirmed, or when there is nothing to clean (the
+   * VM is gone or stopped, so nothing runs); false on a transient failure, so the caller retries.
+   */
+  static async endRun(agentId: string, runId: string): Promise<boolean> {
+    const gone = (e: unknown) => (e as { response?: Response }).response?.status === 404;
     try {
       const sb = await Sandbox.get({ name: SandboxHost.sandboxName(agentId), resume: false });
-      if (sb.status !== 'running') return; // a stopped computer runs nothing
-      await sb.runCommand({
-        cmd: 'bash',
-        args: ['-lc', `${STOP_JOB}\nfor f in "$HOME"/.wren/jobs/*.run; do [ -f "$f" ] && [ "$(cat "$f")" = ${shq(runId)} ] && stopjob "$(basename "$f" .run)"; done; true`],
-      });
-    } catch {
-      /* never created, or gone */
+      if (sb.status === 'running') {
+        const r = await sb.runCommand({
+          cmd: 'bash',
+          args: ['-lc', `${STOP_JOB}\nfor f in "$HOME"/.wren/jobs/*.run; do [ -f "$f" ] && [ "$(cat "$f")" = ${shq(runId)} ] && stopjob "$(basename "$f" .run)"; done; true`],
+        });
+        if (r.exitCode !== 0) return false;
+      }
+    } catch (e) {
+      if (!gone(e)) return false;
     }
+    try {
+      const br = await Sandbox.get({ name: SandboxHost.browserName(agentId), resume: false });
+      if (br.status === 'running') {
+        const payload = Buffer.from(JSON.stringify({ action: 'close', tab: runId })).toString('base64');
+        await br.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | curl -s -m 10 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act >/dev/null; true`] });
+      }
+    } catch (e) {
+      if (!gone(e)) return false;
+    }
+    return true;
   }
 
   async computer(): Promise<Sandbox> {
@@ -192,8 +211,8 @@ export class SandboxHost implements ToolHost {
       }
       const ref = name === 'browser.press' ? '@focused' : typeof args.ref === 'string' ? args.ref : '';
       if (this.browserReady && ref) {
-        const r = await this.browserAct({ action: 'describe', ref }).catch(() => null);
-        if (r?.target) return { browserTarget: { label: r.target.label, role: r.target.role, inputType: r.target.inputType, autocomplete: r.target.autocomplete } };
+        const r = await this.browserAct({ action: 'describe', ref, tab: this.o.runId }).catch(() => null);
+        if (r?.target) return { browserTarget: r.target };
       }
     }
     if (name === 'computer.write_file' && typeof args.path === 'string') {
@@ -258,7 +277,7 @@ export class SandboxHost implements ToolHost {
         if (!buf) return { output: `File not found: ${path}`, isError: true };
         if (buf.byteLength > 200 * 1024 * 1024) return { output: 'File is larger than 200 MB.', isError: true };
         const name = s('name') || path.split('/').pop() || 'file';
-        const a = await saveArtifact({ userId: this.o.userId, agentId: this.o.agentId, sessionId: this.o.sessionId, runId: this.o.runId, name, mime: guessMime(name), data: buf, source: 'cloud' });
+        const a = await saveArtifact({ userId: this.o.userId, agentId: this.o.agentId, sessionId: this.o.sessionId, runId: this.o.runId, name, mime: guessMime(name), data: buf, source: 'cloud', leaseId: this.o.leaseId });
         return { output: `Shared "${a.name}" (${a.size} bytes) with the user.`, artifacts: [{ id: a.id, name: a.name }] };
       }
     }
@@ -399,7 +418,7 @@ export class SandboxHost implements ToolHost {
     throw new Error(`The browser did not start: ${await log.stdout()}`);
   }
 
-  private async browserAct(action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; snapshot?: string; image?: string; preview?: string; url?: string; title?: string; target?: { label: string; role: string; inputType?: string; autocomplete?: string } }> {
+  private async browserAct(action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; snapshot?: string; image?: string; preview?: string; url?: string; title?: string; target?: { label: string; role: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string } }> {
     const sb = await this.browserVm();
     const payload = Buffer.from(JSON.stringify(action)).toString('base64');
     const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | curl -s -m 60 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act`] });
@@ -421,11 +440,11 @@ export class SandboxHost implements ToolHost {
     }
     const expect = ctx.expect;
     // `expect` is the element the approval was given for; the controller refuses if the page changed.
-    const r = await this.browserAct({ ...args, action, ...(expect ? { expect } : {}) });
+    const r = await this.browserAct({ ...args, action, tab: this.o.runId, ...(expect ? { expect } : {}) });
     if (r.preview && this.o.onLiveView) await this.o.onLiveView({ data: r.preview, url: r.url, title: r.title }).catch(() => {});
     const images: ImageRef[] = [];
     if (r.image) {
-      const a = await saveArtifact({ userId: this.o.userId, agentId: this.o.agentId, sessionId: this.o.sessionId, runId: this.o.runId, name: `screenshot-${Date.now()}.jpg`, mime: 'image/jpeg', data: Buffer.from(r.image, 'base64'), kind: 'screenshot' });
+      const a = await saveArtifact({ userId: this.o.userId, agentId: this.o.agentId, sessionId: this.o.sessionId, runId: this.o.runId, name: `screenshot-${Date.now()}.jpg`, mime: 'image/jpeg', data: Buffer.from(r.image, 'base64'), kind: 'screenshot', leaseId: this.o.leaseId });
       this.imageCache.set(a.id, { mime: 'image/jpeg', data: r.image });
       images.push({ artifactId: a.id, mime: 'image/jpeg' });
     }

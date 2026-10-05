@@ -1,14 +1,14 @@
 import { desktopCapturer, screen } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { fetchReadable } from '@wren/core/net';
 import { BrowserController } from '@wren/core/browser/controller';
 import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
-import { readConfined, TooLarge, writeConfined } from './confined';
+import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
 import { hasSeatbelt, seatbeltProfile } from './sandbox';
 import { toolEnv } from './shellenv';
@@ -29,6 +29,8 @@ interface Job {
   started: number;
   /** The run that started it: its jobs (background ones included) end with it. */
   runId: string;
+  /** Being stopped; forgotten once it has exited. */
+  stopping?: boolean;
 }
 
 const jobs = new Map<string, Job>();
@@ -73,7 +75,7 @@ export class LocalHost implements ToolHost {
     if ((name === 'browser.click' || name === 'browser.type' || name === 'browser.press') && browserCtl) {
       // A key press acts on whatever has focus, so describe that element.
       const ref = name === 'browser.press' ? '@focused' : typeof args.ref === 'string' ? args.ref : '';
-      const r = ref ? await browserCtl.controller.act({ action: 'describe', ref }) : null;
+      const r = ref ? await browserCtl.controller.act({ action: 'describe', ref, tab: this.runId }) : null;
       if (r?.target) return { browserTarget: r.target };
     }
     if (name === 'computer.write_file' && typeof args.path === 'string') {
@@ -138,23 +140,7 @@ export class LocalHost implements ToolHost {
       case 'computer.list_files': {
         const root = this.resolvePath(s('path') || '.');
         const depth = Math.max(1, Math.min(3, Number(args.depth) || 1));
-        const out: string[] = [];
-        const walk = (d: string, level: number) => {
-          if (out.length > 500) return;
-          for (const name of readdirSync(d)) {
-            if (name === 'node_modules' || name === '.git') continue;
-            const full = join(d, name);
-            let st;
-            try {
-              st = lstatSync(full); // never follow links out of the folder
-            } catch {
-              continue;
-            }
-            out.push(`${st.isSymbolicLink() ? 'l' : st.isDirectory() ? 'd' : 'f'} ${st.size} ${full}`);
-            if (st.isDirectory() && level < depth) walk(full, level + 1);
-          }
-        };
-        walk(root, 1);
+        const out = await listConfined(root, depth, this.roots(), dataDir());
         return { output: out.join('\n') || '(empty)' };
       }
       case 'computer.share_file': {
@@ -217,7 +203,10 @@ export class LocalHost implements ToolHost {
       };
       proc.stdout?.on('data', add);
       proc.stderr?.on('data', add);
-      proc.on('close', (code) => (j.exit = code ?? 1));
+      proc.on('close', (code) => {
+        j.exit = code ?? 1;
+        if (j.stopping) jobs.delete(id);
+      });
       proc.on('error', (e) => {
         j.out += `\n${e.message}`;
         j.exit = 127;
@@ -285,7 +274,7 @@ export class LocalHost implements ToolHost {
   private async browser(action: string, args: Record<string, unknown>, expect?: ToolContext['expect']): Promise<ToolResult> {
     const ctl = await this.controller();
     // `expect` is the element an approval was given for; the controller refuses if the page changed.
-    const r = await ctl.act({ ...(args as object), action, ...(expect ? { expect } : {}) } as Parameters<BrowserController['act']>[0]);
+    const r = await ctl.act({ ...(args as object), action, tab: this.runId, ...(expect ? { expect } : {}) } as Parameters<BrowserController['act']>[0]);
     if (r.preview) {
       deviceJson(`/api/device/runs/${this.runId}/live`, { image: r.preview, url: r.url, title: r.title }, { lease: this.lease }).catch(() => {});
     }
@@ -330,13 +319,28 @@ function tail(s: string, n = 28_000) {
   return s.length > n ? '…' + s.slice(-n) : s;
 }
 
-function kill(p: ChildProcess) {
-  try {
-    if (process.platform !== 'win32' && p.pid) process.kill(-p.pid, 'SIGTERM');
+/**
+ * Stop a command and everything it started: its process group on macOS/Linux (it runs in its
+ * own), the process tree on Windows. A polite stop first, then a forced one after `graceMs`
+ * whether or not the first was obeyed (a command can ignore SIGTERM).
+ */
+function kill(p: ChildProcess, graceMs = 3000) {
+  if (process.platform === 'win32') {
+    if (p.pid) spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => p.kill());
     else p.kill();
-  } catch {
-    p.kill();
+    return;
   }
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      if (p.pid) process.kill(-p.pid, sig);
+      else p.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  };
+  if (graceMs <= 0) return signal('SIGKILL');
+  signal('SIGTERM');
+  setTimeout(() => signal('SIGKILL'), graceMs).unref();
 }
 
 export async function closeBrowser() {
@@ -344,8 +348,9 @@ export async function closeBrowser() {
   browserCtl = null;
 }
 
+/** Wren is quitting: end every command now. */
 export function killAllJobs() {
-  for (const j of jobs.values()) kill(j.proc);
+  for (const j of jobs.values()) kill(j.proc, 0);
   jobs.clear();
 }
 
@@ -353,7 +358,17 @@ export function killAllJobs() {
 export function killRunJobs(runId?: string) {
   for (const [id, j] of jobs) {
     if (runId && j.runId !== runId) continue;
-    if (j.exit === null) kill(j.proc);
-    jobs.delete(id);
+    if (j.exit !== null) {
+      jobs.delete(id);
+      continue;
+    }
+    // Still tracked until it has really exited (so quitting can still reach it).
+    j.stopping = true;
+    kill(j.proc);
   }
+}
+
+/** Close a finished run's browser tab (other runs keep theirs). */
+export async function closeRunTab(runId: string) {
+  if (browserCtl) await browserCtl.controller.act({ action: 'close', tab: runId }).catch(() => {});
 }

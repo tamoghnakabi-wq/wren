@@ -230,7 +230,7 @@ describe('agent loop', () => {
     const model = new ScriptModel([{ calls: [{ name: 'browser.click', args: { ref: 'e5' } }] }, { text: 'The page changed; stopping.' }]);
     let label = 'Send message';
     const host = new FakeHost();
-    host.riskContext = async () => ({ browserTarget: { label, role: 'button' } });
+    host.riskContext = async () => ({ browserTarget: { label, role: 'button', elementId: 'd1-5', url: 'https://mail.test/to/alice' } });
     const first = await base(store, model, host);
     expect(first.kind).toBe('waiting_approval');
     const tool = store.events_.find((e) => e.type === 'tool')!;
@@ -248,7 +248,7 @@ describe('agent loop', () => {
     await store.userSays('next page');
     const model = new ScriptModel([{ calls: [{ name: 'browser.click', args: { ref: 'e2' } }] }, { text: 'Done.' }]);
     const host = new FakeHost();
-    host.riskContext = async () => ({ browserTarget: { label: 'Next page', role: 'link' } });
+    host.riskContext = async () => ({ browserTarget: { label: 'Next page', role: 'link', elementId: 'd1-2', url: 'https://shop.test/p/1' } });
     let seen: unknown;
     host.execute = async (name, args, ctx) => {
       seen = ctx?.expect;
@@ -256,7 +256,38 @@ describe('agent loop', () => {
       return { output: 'ok' };
     };
     await base(store, model, host, { autonomy: 'autonomous' });
-    expect(seen).toMatchObject({ label: 'Next page', role: 'link' });
+    expect(seen).toMatchObject({ label: 'Next page', role: 'link', elementId: 'd1-2', url: 'https://shop.test/p/1' });
+  });
+
+  it('refuses an approved click on a same-labelled element elsewhere', async () => {
+    const changes: Record<string, string>[] = [{ elementId: 'd2-5' }, { url: 'https://mail.test/to/bob' }, { href: '/evil' }];
+    for (const changed of changes) {
+      const store = new MemStore();
+      await store.userSays('send it');
+      const model = new ScriptModel([{ calls: [{ name: 'browser.click', args: { ref: 'e5' } }] }, { text: 'Stopping.' }]);
+      let target: Record<string, string> = { label: 'Send', role: 'button', elementId: 'd1-5', url: 'https://mail.test/to/alice', href: '' };
+      const host = new FakeHost();
+      host.riskContext = async () => ({ browserTarget: target });
+      expect((await base(store, model, host)).kind).toBe('waiting_approval');
+      const tool = store.events_.find((e) => e.type === 'tool')!;
+      target = { ...target, ...changed }; // e.g. another task moved the page to Bob's thread
+      store.approvals.set((tool.data as ToolCallData).approvalId!, 'approved');
+      await base(store, model, host);
+      expect(host.ran, JSON.stringify(changed)).toEqual([]);
+    }
+  });
+
+  it('does not ask approval for an element it cannot identify', async () => {
+    const store = new MemStore();
+    await store.userSays('click it');
+    const model = new ScriptModel([{ calls: [{ name: 'browser.click', args: { ref: 'e9' } }] }, { text: 'I need a snapshot.' }]);
+    const host = new FakeHost();
+    host.riskContext = async () => ({});
+    const out = await base(store, model, host);
+    expect(out.kind).toBe('completed');
+    expect(store.approvals.size).toBe(0);
+    expect(host.ran).toEqual([]);
+    expect((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).result?.output).toMatch(/Couldn't identify/);
   });
 
   it('re-creates tool calls a crash left unsaved', async () => {

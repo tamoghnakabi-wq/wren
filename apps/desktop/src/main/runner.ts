@@ -22,7 +22,7 @@ import { deviceJson } from './api';
 import { detect, type Capabilities } from './capabilities';
 import * as chatgpt from './chatgpt';
 import { loadDevice, loadPolicy, type Policy } from './config';
-import { killRunJobs, LocalHost } from './host';
+import { closeRunTab, killRunJobs, LocalHost } from './host';
 import { allowedRoots, isConfined } from './paths';
 import { ProxyModelClient, RemoteStore } from './remote';
 
@@ -125,6 +125,9 @@ export class DeviceRunner {
       this.state.account = hb.account;
       this.state.deviceName = hb.device.name;
       this.state.lastError = undefined;
+      // With remote approvals off, approvals already waiting for this computer's runs become
+      // approvable here only (each heartbeat, so it also happens after a failed attempt).
+      if (!policy.remoteApprovals) await deviceJson('/api/device/approvals/local-only', {}).catch((e) => log(`local-only approvals: ${(e as Error).message}`));
       if (hb.work.length) log(`work: ${hb.work.map((w) => `${w.id.slice(0, 8)}:${w.status}${w.leased ? ':leased' : ''}`).join(', ')}`);
       for (const w of hb.work) {
         const running = this.active.get(w.id);
@@ -188,7 +191,10 @@ export class DeviceRunner {
       this.stopReasons.delete(runId);
       this.engineRuns.delete(runId);
       // A finished run's commands (background ones included) end with it.
-      if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') killRunJobs(runId);
+      if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') {
+        killRunJobs(runId);
+        void closeRunTab(runId);
+      }
       log(`run ${runId.slice(0, 8)} -> ${outcome.kind}`);
       if (lease) await deviceJson(`/api/device/runs/${runId}/finish`, outcome, { lease }).catch(() => {});
       this.active.delete(runId);
@@ -217,9 +223,14 @@ export class DeviceRunner {
 
   private async runEngine(c: Claim, store: RemoteStore, policy: Policy, signal: AbortSignal): Promise<LoopOutcome> {
     const events = await store.events();
-    const lastUser = [...events].reverse().find((e) => e.type === 'message' && (e.data as MessageData).role === 'user');
-    const d = (lastUser?.data ?? {}) as MessageData & { context?: string };
-    const prompt = `${d.context ? `${d.context}\n\n` : ''}${d.text ?? ''}`;
+    const seenSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+    // Everything the user said since the engine last answered (several messages can arrive while
+    // it works; finishRun queues another turn for any that come in after this point).
+    const lastAnswer = events.reduce((i, e, k) => (e.type === 'message' && (e.data as MessageData).role === 'assistant' && e.status === 'done' ? k : i), -1);
+    const asks = events.slice(lastAnswer + 1).filter((e) => e.type === 'message' && (e.data as MessageData).role === 'user');
+    const firstAsk = (asks[0]?.data ?? {}) as MessageData & { context?: string };
+    const text = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
+    const prompt = `${firstAsk.context ? `${firstAsk.context}\n\n` : ''}${text}`;
     const engine = c.run.model.source;
     const resume = [...events].reverse().find((e) => e.type === 'reasoning' && (e.data as { engine?: string }).engine === engine) as SessionEvent<{ resumeId?: string }> | undefined;
     const run = {
@@ -252,8 +263,8 @@ export class DeviceRunner {
     };
     if (!policy.folders.length) return { kind: 'failed', error: 'No folders are allowed on this computer. Add one in Wren → Settings → This computer.', code: 'no_folders', steps: 0 };
     const inFolders = this.inFolders();
-    if (engine === 'claude-code') return runClaudeCode(run, inFolders, approveScript());
-    return runGrokBuild(run, inFolders, approveScript().replace(/mcp-approve\.mjs$/, 'grok-hook.mjs'));
+    const out = engine === 'claude-code' ? await runClaudeCode(run, inFolders, approveScript()) : await runGrokBuild(run, inFolders, approveScript().replace(/mcp-approve\.mjs$/, 'grok-hook.mjs'));
+    return out.kind === 'completed' ? { ...out, seenSeq } : out;
   }
 
   private async runAgentLoop(c: Claim, store: RemoteStore, policy: Policy, settings: Heartbeat['settings'], signal: AbortSignal): Promise<LoopOutcome> {

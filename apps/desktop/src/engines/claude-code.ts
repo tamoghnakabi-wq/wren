@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type { LoopOutcome } from '@wren/core';
-import { decide, findCli, spawnEngine, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
+import { claudeSupportsRestricted, decide, findCli, spawnClaude, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
 // computer, signed in by the user through Anthropic's login. Wren never sees
@@ -19,6 +19,9 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
   WebFetch: (i) => ({ name: 'web.fetch', args: { url: String(i.url ?? '') }, paths: [] }),
   WebSearch: (i) => ({ name: 'web.fetch', args: { url: `search: ${String(i.query ?? '')}` }, paths: [] }),
 };
+
+/** Built-in tools a Wren agent gets in Claude Code (restricted mode removes Bash and WebFetch unless named). */
+const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,Task';
 
 function mapTool(name: string, input: Record<string, unknown>) {
   const m = TOOL_MAP[name];
@@ -64,6 +67,7 @@ function resultText(content: unknown): string {
 export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => boolean, approveScript: string): Promise<LoopOutcome> {
   const cli = findCli('claude');
   if (!cli) return { kind: 'failed', error: 'Claude Code isn’t installed on this computer. Install it (code.claude.com), run `claude` once and sign in with your Claude account, then try again.', code: 'engine_missing', steps: 0 };
+  if (!claudeSupportsRestricted(cli)) return { kind: 'failed', error: 'This version of Claude Code is too old for Wren. Update it (run `claude update` in Terminal), then try again.', code: 'engine_outdated', steps: 0 };
 
   const writer = new TimelineWriter(run.store, 'claude-code', run.model === 'default' ? 'Claude Code' : run.model);
   run.store.usageSource = 'claude-code';
@@ -93,6 +97,12 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     '--include-partial-messages',
     '--permission-prompt-tool',
     'mcp__wren__approve',
+    // Restricted: the user's own settings files (allow rules, hooks) don't apply and the file tools
+    // stay inside the working folders; only Wren's MCP server is loaded.
+    '--restricted',
+    '--tools',
+    CLAUDE_TOOLS,
+    '--strict-mcp-config',
     '--mcp-config',
     JSON.stringify(mcpConfig),
     '--append-system-prompt',
@@ -102,7 +112,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   for (const f of run.folders.slice(1)) args.push('--add-dir', f);
   if (run.resumeId) args.push('--resume', run.resumeId);
 
-  const proc = await spawnEngine('claude-code', cli, args, run, approveScript);
+  const proc = await spawnClaude(cli, args, run, approveScript);
   proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: run.prompt } }) + '\n');
   const onAbort = () => proc.kill('SIGTERM');
   run.signal.addEventListener('abort', onAbort, { once: true });

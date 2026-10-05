@@ -39,9 +39,8 @@ const READ_ONLY = new Set([
 const VERSION_ONLY = /^(node|npm|npx|pnpm|yarn|bun|python3?|pip3?|go|cargo|rustc|java|ruby|git|gh|docker|deno)\s+(-v|--version|version)\s*$/i;
 
 const GIT_READ = /^git\s+(status|log|diff|show|branch(\s+(-a|-r|--list|-v+))?\s*$|remote(\s+-v)?\s*$|rev-parse|ls-files|blame|describe|tag(\s+-l)?\s*$|config\s+--get|shortlog|reflog\s*$|stash\s+list)/i;
-const GH_READ = /^gh\s+(pr|issue|repo|run|release|workflow)\s+(list|view|status|diff|checks)\b|^gh\s+(auth\s+status|api\s+(?!.*((-X|--method)[\s=]*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))))/i;
-/** Read commands that can still write a file through an option. */
-const WRITE_OPTION = /\s(--output(=|\s)|-o\s|--output-directory)/;
+/** Read commands whose options can still write files or run programs: an unknown argument value makes them unsafe. */
+const OPTION_SENSITIVE = new Set(['sort', 'tree', 'uniq', 'xxd', 'yq', 'rg', 'fd', 'date', 'hostname', 'find', 'git', 'gh']);
 
 /** Matches at a command position: start, after a control operator, or after sudo/xargs/env. */
 const CMD = String.raw`(?:^|[;&|(\x60]\s*|\$\(\s*|\b(?:sudo|xargs|env|exec|nohup|time)\s+)`;
@@ -79,78 +78,270 @@ const RULES: Rule[] = [
   { re: /\b(brew|apt|apt-get|dnf|yum|pacman|choco|winget|scoop|port)\s+(install|remove|uninstall|upgrade|purge)/i, risk: 'medium', reason: 'installs or removes system packages' },
 ];
 
-/** Split a command line into rough segments on shell control operators. */
-function segments(command: string): string[] {
-  return command
-    .split(/\|\||&&|;|\||\n|`|\$\(/)
-    .map((s) => s.trim().replace(/^\(+|\)+$/g, '').trim())
-    .filter(Boolean);
+/** One simple command: its real argument vector (quotes removed), as the program receives it. */
+interface SimpleCommand {
+  words: string[];
+  /** Per word: contains a $-expansion or command substitution, so its value is unknown. */
+  dynamic: boolean[];
+  /** Output redirection targets. */
+  outputs: { target: string; dynamic: boolean }[];
 }
 
-/** True when an output redirection targets a real file (not /dev/null or another descriptor). */
-function writesThroughRedirect(seg: string): boolean {
-  for (const m of seg.matchAll(/(?:&>>?|\d?>>?)\s*([^\s;|&]*)(&?\d*)/g)) {
-    const target = m[1] || m[2];
-    if (!target) continue;
-    if (/^&\d+$|^&$/.test(target) || /^&?\d+$/.test(m[2]) && !m[1]) continue;
-    if (target === '/dev/null' || target === '/dev/stdout' || target === '/dev/stderr') continue;
-    return true;
+/**
+ * A small shell lexer: splits on control operators outside quotes, removes quotes and
+ * backslash escapes, records redirections, and treats $(...) / backticks as separate
+ * commands. `normalized` is the command with quoting removed, for the pattern rules.
+ */
+export function parseShell(command: string): { commands: SimpleCommand[]; normalized: string } {
+  const commands: SimpleCommand[] = [];
+  let cur: SimpleCommand = { words: [], dynamic: [], outputs: [] };
+  let word = '';
+  let inWord = false;
+  let dyn = false;
+  let pending: 'out' | 'in' | null = null;
+  let norm = '';
+  const nested: SimpleCommand[] = [];
+  const endWord = () => {
+    if (!inWord) return;
+    if (pending === 'out') cur.outputs.push({ target: word, dynamic: dyn });
+    else if (pending !== 'in') {
+      cur.words.push(word);
+      cur.dynamic.push(dyn);
+    }
+    pending = null;
+    word = '';
+    inWord = false;
+    dyn = false;
+  };
+  const endCommand = () => {
+    endWord();
+    pending = null;
+    if (cur.words.length || cur.outputs.length) commands.push(cur);
+    cur = { words: [], dynamic: [], outputs: [] };
+  };
+  const n = command.length;
+  for (let i = 0; i < n; i++) {
+    const c = command[i];
+    if (c === "'") {
+      const j = command.indexOf("'", i + 1);
+      const end = j < 0 ? n : j;
+      word += command.slice(i + 1, end);
+      norm += command.slice(i + 1, end);
+      inWord = true;
+      i = end;
+      continue;
+    }
+    if (c === '"') {
+      inWord = true;
+      let j = i + 1;
+      for (; j < n && command[j] !== '"'; j++) {
+        if (command[j] === '\\' && j + 1 < n && '"\\$`'.includes(command[j + 1])) {
+          j++;
+          word += command[j];
+          norm += command[j];
+          continue;
+        }
+        if (command[j] === '$' || command[j] === '`') dyn = true;
+        word += command[j];
+        norm += command[j];
+      }
+      i = j;
+      continue;
+    }
+    if (c === '\\') {
+      if (i + 1 < n && command[i + 1] !== '\n') {
+        word += command[i + 1];
+        norm += command[i + 1];
+        inWord = true;
+      }
+      i++;
+      continue;
+    }
+    if ((c === '$' || c === '<' || c === '>') && command[i + 1] === '(' && !(c === '$' && command[i + 2] === '(')) {
+      // $(...) / <(...) / >(...): the inner commands are checked on their own; this word's value is unknown
+      const j = closingParen(command, i + 2);
+      const inner = parseShell(command.slice(i + 2, j));
+      nested.push(...inner.commands);
+      if (c !== '$') endWord();
+      word += '$(…)';
+      dyn = true;
+      inWord = true;
+      norm += `${c}(${inner.normalized})`;
+      i = j;
+      continue;
+    }
+    if (c === '`') {
+      let j = i + 1;
+      while (j < n && command[j] !== '`') j += command[j] === '\\' ? 2 : 1;
+      const inner = parseShell(command.slice(i + 1, j));
+      nested.push(...inner.commands);
+      word += '$(…)';
+      dyn = true;
+      inWord = true;
+      norm += `\`${inner.normalized}\``;
+      i = j;
+      continue;
+    }
+    if (c === '$') {
+      dyn = true;
+      inWord = true;
+      word += c;
+      norm += c;
+      continue;
+    }
+    if (c === ' ' || c === '\t') {
+      endWord();
+      norm += ' ';
+      continue;
+    }
+    if (c === '\n') {
+      endCommand();
+      norm += '\n';
+      continue;
+    }
+    if (c === '>' || (c === '&' && command[i + 1] === '>')) {
+      // an fd number right before ">" (2>file) is not an argument
+      if (inWord && /^\d+$/.test(word) && !dyn) {
+        word = '';
+        inWord = false;
+      } else endWord();
+      let op = c;
+      if (c === '&') op += command[++i];
+      while (command[i + 1] === '>' || command[i + 1] === '|') op += command[++i];
+      norm += op;
+      if (command[i + 1] === '&') {
+        // >&2, 2>&1, >&-: duplicates a descriptor, no file
+        let k = i + 2;
+        while (k < n && /[0-9-]/.test(command[k])) k++;
+        if (k > i + 2) {
+          norm += command.slice(i + 1, k);
+          i = k - 1;
+          continue;
+        }
+      }
+      pending = 'out';
+      continue;
+    }
+    if (c === '<') {
+      endWord();
+      let op = c;
+      while (command[i + 1] === '<') op += command[++i];
+      norm += op;
+      pending = 'in';
+      continue;
+    }
+    if (c === ';' || c === '|' || c === '&' || c === '(' || c === ')') {
+      endCommand();
+      norm += c;
+      continue;
+    }
+    word += c;
+    norm += c;
+    inWord = true;
   }
-  return false;
+  endCommand();
+  return { commands: [...commands, ...nested], normalized: norm };
 }
 
-/** Rough shell words (quotes kept together), without the command itself. */
-function argWords(seg: string): string[] {
-  return (seg.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).slice(1);
+/** Index of the ")" closing a "(" whose contents start at `from` (quotes respected). */
+function closingParen(s: string, from: number): number {
+  let depth = 1;
+  for (let i = from; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\') i++;
+    else if (c === "'") i = s.indexOf("'", i + 1) < 0 ? s.length : s.indexOf("'", i + 1);
+    else if (c === '"') {
+      for (i++; i < s.length && s[i] !== '"'; i++) if (s[i] === '\\') i++;
+    } else if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return i;
+  }
+  return s.length;
 }
+
+const SAFE_OUTPUTS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
 
 /**
  * Commands on the read-only list that still have writing or executing forms:
  * output files given as options or extra positional arguments, in-place edits,
- * and options that run other programs.
+ * and options that run other programs. `args` are the real (unquoted) arguments.
  */
-function readOnlyForm(cmd: string, seg: string): boolean {
-  const words = argWords(seg);
-  const positional = words.filter((w) => !w.startsWith('-'));
+function readOnlyForm(cmd: string, args: string[]): boolean {
+  const positional = args.filter((w) => !w.startsWith('-'));
   switch (cmd) {
     case 'sort':
     case 'tree':
-      return !words.some((w) => /^-o|^--output/.test(w) || (cmd === 'sort' && /^-[a-zA-Z]*o/.test(w)));
+      return !args.some((w) => /^-o|^--output/.test(w) || (cmd === 'sort' && /^-[a-zA-Z]*o/.test(w)));
     case 'uniq':
       return positional.length <= 1; // uniq IN OUT writes OUT
     case 'xxd':
-      return !words.some((w) => /^-r|^-revert/.test(w)) && positional.length <= 1;
+      return !args.some((w) => /^-r|^-revert/.test(w)) && positional.length <= 1;
     case 'yq':
-      return !words.some((w) => /^-[a-zA-Z]*i|^--inplace/.test(w));
+      return !args.some((w) => /^-[a-zA-Z]*i|^--inplace/.test(w));
     case 'rg':
-      return !words.some((w) => /^--pre(=|$)/.test(w));
+      return !args.some((w) => /^--pre(=|$)/.test(w));
     case 'fd':
-      return !words.some((w) => /^-[a-zA-Z]*[xX]|^--exec/.test(w));
+      return !args.some((w) => /^-[a-zA-Z]*[xX]|^--exec/.test(w));
     case 'date':
-      return positional.every((w) => w.startsWith('+')) && !words.some((w) => /^-[a-zA-Z]*s|^--set/.test(w));
+      return positional.every((w) => w.startsWith('+')) && !args.some((w) => /^-[a-zA-Z]*s|^--set/.test(w));
     case 'hostname':
       return positional.length === 0;
+    case 'find':
+      return !args.some((w) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(w));
     default:
       return true;
   }
 }
 
-function segmentIsReadOnly(seg: string): boolean {
-  if (writesThroughRedirect(seg)) return false;
-  if (VERSION_ONLY.test(seg) || GH_READ.test(seg)) return true;
-  if (GIT_READ.test(seg)) return !WRITE_OPTION.test(seg);
-  const first = seg.split(/\s+/)[0].toLowerCase().replace(/^.*[\\/]/, '');
-  if (!READ_ONLY.has(first)) return false;
-  if (first === 'find' && /\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\b/.test(seg)) return false;
-  if (!readOnlyForm(first, seg)) return false;
-  return true;
+/** `gh` subcommands that only read: list/view commands, and `gh api` with GET and no fields. */
+function ghReadOnly(args: string[]): boolean {
+  const [group, sub] = args;
+  if (group === 'auth' && sub === 'status') return true;
+  if (['pr', 'issue', 'repo', 'run', 'release', 'workflow'].includes(group) && ['list', 'view', 'status', 'diff', 'checks'].includes(sub)) return true;
+  if (group !== 'api') return false;
+  let method = 'GET';
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === '-X' || a === '--method') method = args[++i] ?? '';
+    else if (a.startsWith('--method=')) method = a.slice(9);
+    else if (a.startsWith('-X')) method = a.slice(2).replace(/^=/, '');
+    else if (/^(-f|-F|--field|--raw-field|--input)($|=)/.test(a) || /^-[fF]./.test(a)) return false; // fields imply a write
+  }
+  return method.toUpperCase() === 'GET';
+}
+
+function commandIsReadOnly(c: SimpleCommand): boolean {
+  if (c.outputs.some((o) => o.dynamic || !SAFE_OUTPUTS.has(o.target))) return false;
+  // leading VAR=value assignments only affect the environment
+  let k = 0;
+  while (k < c.words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(c.words[k])) k++;
+  const words = c.words.slice(k);
+  const dynamic = c.dynamic.slice(k);
+  if (!words.length) return !dynamic.some(Boolean);
+  if (dynamic[0]) return false; // the program itself is unknown
+  const cmd = words[0].toLowerCase().replace(/^.*[\\/]/, '');
+  const args = words.slice(1);
+  const line = [cmd, ...args].join(' ');
+  if (VERSION_ONLY.test(line)) return true;
+  if (OPTION_SENSITIVE.has(cmd) && dynamic.some(Boolean)) return false;
+  if (cmd === 'gh') return ghReadOnly(args);
+  if (cmd === 'git') return GIT_READ.test(line) && !args.some((a) => /^(--output(=|$)|-o$|-o.|--output-directory)/.test(a));
+  if (!READ_ONLY.has(cmd)) return false;
+  return readOnlyForm(cmd, args);
+}
+
+/** True when every command in the line is a known read-only form with fully known arguments. */
+export function isReadOnlyCommand(command: string): boolean {
+  const { commands } = parseShell(command);
+  return commands.length > 0 && commands.every((c) => commandIsReadOnly(c) && !c.dynamic.some(Boolean));
 }
 
 export function assessShell(command: string, runtime: Runtime): Assessment {
   let risk: Risk = 'low';
   let reason: string | undefined;
+  // Rules see both the text as written and with quoting removed ("rm" -rf ~ is rm -rf ~).
+  const { commands, normalized } = parseShell(command);
   for (const rule of RULES) {
-    if (rule.re.test(command)) {
+    if (rule.re.test(command) || rule.re.test(normalized)) {
       if (rule.block) return { risk: 'critical', reason: rule.reason, blocked: `Blocked: this command ${rule.reason}.` };
       if (riskRank(rule.risk) > riskRank(risk)) {
         risk = rule.risk;
@@ -159,7 +350,7 @@ export function assessShell(command: string, runtime: Runtime): Assessment {
     }
   }
   if (risk === 'low') {
-    const ro = segments(command).every(segmentIsReadOnly);
+    const ro = commands.every(commandIsReadOnly);
     if (!ro) {
       risk = 'medium';
       reason = 'runs a program that can change files';
@@ -184,6 +375,9 @@ export interface BrowserTarget {
   inputType?: string; // password, email, ...
   autocomplete?: string;
   url?: string;
+  href?: string;
+  /** Identity of the exact element (stable for the life of the page, unlike e12 refs). */
+  elementId?: string;
 }
 
 export function assessBrowser(action: string, target: BrowserTarget | undefined, runtime: Runtime): Assessment {

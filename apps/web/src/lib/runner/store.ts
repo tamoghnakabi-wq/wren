@@ -53,11 +53,12 @@ export class DbRunStore implements RunStore {
   constructor(private readonly r: RunRefs) {}
 
   /**
-   * SQL condition: this worker still holds the run's lease. It is part of each
-   * write statement itself, so a takeover between "check" and "write" can't slip in.
+   * SQL condition: this worker still holds the run's lease. It is part of each write statement
+   * itself and share-locks the run row, so a takeover (which updates that row) waits for the write
+   * to finish, and a write that queued behind a takeover re-checks against the new owner.
    */
   private holds(sql: ReturnType<typeof db>) {
-    return this.r.leaseId ? sql`exists (select 1 from public.runs where id = ${this.r.runId}::uuid and lease_id = ${this.r.leaseId}::uuid)` : sql`true`;
+    return this.r.leaseId ? sql`exists (select 1 from public.runs where id = ${this.r.runId}::uuid and lease_id = ${this.r.leaseId}::uuid for share)` : sql`true`;
   }
 
   /** After a write matched nothing: was it because the lease is gone? */
@@ -139,17 +140,19 @@ export class DbRunStore implements RunStore {
   async recordUsage(u: ModelUsage, model: string): Promise<void> {
     const sql = db();
     // Usage is what the provider charged, so it is always recorded, even by a worker that just
-    // lost its lease; the per-run totals follow the same rule so the two never disagree.
-    await sql`
-      insert into public.usage_records (user_id, agent_id, run_id, source, model, input_tokens, output_tokens, cached_tokens)
-      values (${this.r.userId}, ${this.r.agentId}, ${this.r.runId}, ${this.r.source}, ${model}, ${u.inputTokens}, ${u.outputTokens}, ${u.cachedTokens})`;
-    await sql`
-      update public.runs set usage = jsonb_build_object(
-        'input_tokens', coalesce((usage->>'input_tokens')::bigint, 0) + ${u.inputTokens},
-        'output_tokens', coalesce((usage->>'output_tokens')::bigint, 0) + ${u.outputTokens},
-        'cached_tokens', coalesce((usage->>'cached_tokens')::bigint, 0) + ${u.cachedTokens},
-        'requests', coalesce((usage->>'requests')::bigint, 0) + 1)
-      where id = ${this.r.runId}`;
+    // lost its lease. The record and the per-run total commit together, so they never disagree.
+    await sql.begin(async (tx) => {
+      await tx`
+        insert into public.usage_records (user_id, agent_id, run_id, source, model, input_tokens, output_tokens, cached_tokens)
+        values (${this.r.userId}, ${this.r.agentId}, ${this.r.runId}, ${this.r.source}, ${model}, ${u.inputTokens}, ${u.outputTokens}, ${u.cachedTokens})`;
+      await tx`
+        update public.runs set usage = jsonb_build_object(
+          'input_tokens', coalesce((usage->>'input_tokens')::bigint, 0) + ${u.inputTokens},
+          'output_tokens', coalesce((usage->>'output_tokens')::bigint, 0) + ${u.outputTokens},
+          'cached_tokens', coalesce((usage->>'cached_tokens')::bigint, 0) + ${u.cachedTokens},
+          'requests', coalesce((usage->>'requests')::bigint, 0) + 1)
+        where id = ${this.r.runId}`;
+    });
   }
 
   async notify(title: string, body: string, kind: string): Promise<void> {

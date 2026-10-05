@@ -17,7 +17,9 @@ export interface BrowserAction {
   amount?: number;
   full_page?: boolean;
   /** The element this action was assessed/approved against; refused if it changed. */
-  expect?: { label?: string; role?: string; inputType?: string };
+  expect?: { label?: string; role?: string; inputType?: string; elementId?: string; url?: string; href?: string };
+  /** The task this action belongs to: each task gets its own tab, so tasks can't move each other's page. */
+  tab?: string;
 }
 
 /** Field kinds an agent may never type into, enforced here as well as in the policy. */
@@ -33,12 +35,21 @@ export interface BrowserResponse {
   image?: string;
   /** Small JPEG base64 for the live view. */
   preview?: string;
-  target?: { label: string; role: string; inputType?: string; autocomplete?: string; href?: string };
+  target?: { label: string; role: string; inputType?: string; autocomplete?: string; href?: string; elementId?: string; url?: string };
 }
+
+// Gives an element an identity that survives new snapshots (refs like e12 are renumbered each
+// time) and is unique per page load, so an approval names one exact DOM node.
+const ELEMENT_ID_JS = `const wrenId = (el) => {
+    if (!window.__wrenDoc) { window.__wrenDoc = Math.random().toString(36).slice(2, 10); window.__wrenSeq = 0; }
+    if (!el.getAttribute('data-wren-id')) el.setAttribute('data-wren-id', window.__wrenDoc + '-' + (++window.__wrenSeq));
+    return el.getAttribute('data-wren-id');
+  };`;
 
 // Runs inside the page. Walks the DOM in order, tags interactive elements with
 // data-wren-ref and returns a compact text rendering.
 const SNAPSHOT_FN = `(() => {
+  ${ELEMENT_ID_JS}
   const MAX = 24000, MAX_REFS = 450;
   let n = 0, out = [], len = 0, seenText = new Set();
   const push = (s) => { if (len > MAX) return; out.push(s); len += s.length + 1; };
@@ -102,6 +113,7 @@ const SNAPSHOT_FN = `(() => {
     if (interactive(el) && n < MAX_REFS) {
       const ref = 'e' + (++n);
       el.setAttribute('data-wren-ref', ref);
+      wrenId(el);
       const r = role(el);
       let line = '[' + ref + '] ' + r + ' "' + name(el) + '"';
       if (el.tagName === 'A') { const h = el.getAttribute('href') || ''; if (h && !h.startsWith('javascript')) line += ' -> ' + h.slice(0, 120); }
@@ -124,28 +136,44 @@ const SNAPSHOT_FN = `(() => {
 })()`;
 
 const DESCRIBE_FN = `(ref) => {
+  ${ELEMENT_ID_JS}
   const el = ref === '@focused' ? (document.activeElement && document.activeElement !== document.body ? document.activeElement : null) : document.querySelector('[data-wren-ref="' + ref + '"]');
-  if (!el) return ref === '@focused' ? { label: '', role: 'page' } : null;
+  if (!el) return ref === '@focused' ? { label: '', role: 'page', elementId: 'page:' + (window.__wrenDoc || (window.__wrenDoc = Math.random().toString(36).slice(2, 10))), url: location.href } : null;
   const t = (el.getAttribute('type') || '').toLowerCase();
   const hidden = t === 'password' || /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i.test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
   const label = (el.getAttribute('aria-label') || el.innerText || (hidden ? '' : el.value) || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
   const form = el.closest('form');
   const submitText = form ? Array.from(form.querySelectorAll('button,[type=submit]')).map(b => (b.innerText || b.value || '').trim()).join(' / ').slice(0, 120) : '';
-  return { label: label + (submitText && el.tagName !== 'BUTTON' ? ' (form: ' + submitText + ')' : ''), role: el.getAttribute('role') || el.tagName.toLowerCase(), inputType: el.getAttribute('type') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined, href: el.getAttribute('href') || undefined };
+  return { label: label + (submitText && el.tagName !== 'BUTTON' ? ' (form: ' + submitText + ')' : ''), role: el.getAttribute('role') || el.tagName.toLowerCase(), inputType: el.getAttribute('type') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined, href: el.getAttribute('href') || undefined, elementId: wrenId(el), url: location.href };
 }`;
 
 export class BrowserController {
   private page: Page | null = null;
+  /** One tab per task (see BrowserAction.tab). */
+  private readonly tabs = new Map<string, Page>();
   private readonly context: BrowserContext;
 
   constructor(context: BrowserContext) {
     this.context = context;
     context.on('page', (p) => {
-      this.page = p;
+      // A popup opened from a task's tab becomes that task's tab.
+      void p.opener().then((op) => {
+        for (const [tab, page] of this.tabs) if (op && page === op) return void this.tabs.set(tab, p);
+        if (![...this.tabs.values()].includes(p)) this.page = p;
+      });
     });
   }
 
-  private async current(): Promise<Page> {
+  private async current(tab?: string): Promise<Page> {
+    if (tab) {
+      const own = this.tabs.get(tab);
+      if (own && !own.isClosed()) return own;
+      // The first tab of a fresh browser is reused rather than left blank beside a new one.
+      const blank = this.context.pages().find((p) => !p.isClosed() && p.url() === 'about:blank' && ![...this.tabs.values()].includes(p));
+      const page = blank ?? (await this.context.newPage());
+      this.tabs.set(tab, page);
+      return page;
+    }
     const pages = this.context.pages().filter((p) => !p.isClosed());
     if (this.page && !this.page.isClosed()) return this.page;
     this.page = pages[pages.length - 1] ?? (await this.context.newPage());
@@ -166,7 +194,13 @@ export class BrowserController {
     return { ok: true, title, url: page.url(), snapshot: snapshot ? `Title: ${title}\nURL: ${page.url()}\n\n${snapshot}` : undefined, preview };
   }
 
-  private async locator(page: Page, ref?: string) {
+  /** The element to act on: the exact node an approval named when there is one, else the ref. */
+  private async locator(page: Page, ref?: string, elementId?: string) {
+    if (elementId && /^[a-z0-9]+-\d+$/.test(elementId)) {
+      const exact = page.locator(`[data-wren-id="${elementId}"]`).first();
+      if ((await exact.count()) === 0) throw new Error('That element is not on the page any more. Take a new snapshot and try again.');
+      return exact;
+    }
     if (!ref || !/^e\d+$/.test(ref)) throw new Error('Unknown element ref. Take a snapshot and use a ref like e12.');
     const loc = page.locator(`[data-wren-ref="${ref}"]`).first();
     if ((await loc.count()) === 0) throw new Error(`Element ${ref} is not on the page any more. Take a new snapshot and use a current ref.`);
@@ -182,7 +216,8 @@ export class BrowserController {
     if (a.action !== 'click' && a.action !== 'type' && a.action !== 'press') return null;
     const target = await this.describe(page, a.action === 'press' ? '@focused' : a.ref ?? '');
     if (a.expect) {
-      const same = !!target && (target.label ?? '') === (a.expect.label ?? '') && (target.role ?? '') === (a.expect.role ?? '') && (target.inputType ?? '') === (a.expect.inputType ?? '');
+      const e = a.expect;
+      const same = !!target && (['label', 'role', 'inputType', 'elementId', 'url', 'href'] as const).every((k) => (k === 'elementId' || k === 'url' ? !e[k] : false) || (target[k] ?? '') === (e[k] ?? ''));
       if (!same) return 'The page changed since this action was checked, so it was not taken. Take a new snapshot and try again.';
     }
     if (a.action === 'type' && target && SECRET_FIELD.test(`${target.inputType ?? ''} ${target.autocomplete ?? ''} ${target.label ?? ''}`)) {
@@ -193,7 +228,13 @@ export class BrowserController {
 
   async act(a: BrowserAction): Promise<BrowserResponse> {
     try {
-      const page = await this.current();
+      if (a.action === 'close' && a.tab) {
+        const own = this.tabs.get(a.tab);
+        this.tabs.delete(a.tab);
+        if (own && !own.isClosed()) await own.close().catch(() => {});
+        return { ok: true };
+      }
+      const page = await this.current(a.tab);
       const refused = await this.guard(page, a);
       if (refused) return { ...(await this.state(page)), ok: false, error: refused };
       switch (a.action) {
@@ -206,14 +247,14 @@ export class BrowserController {
         case 'snapshot':
           return this.state(page);
         case 'click': {
-          const loc = await this.locator(page, a.ref);
+          const loc = await this.locator(page, a.ref, a.expect?.elementId);
           await loc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
           await loc.click({ timeout: 8000 });
           await this.settle(page);
-          return this.state(await this.current());
+          return this.state(await this.current(a.tab));
         }
         case 'type': {
-          const loc = await this.locator(page, a.ref);
+          const loc = await this.locator(page, a.ref, a.expect?.elementId);
           const editable = await loc.evaluate((el) => (el as HTMLElement).isContentEditable).catch(() => false);
           if (editable) {
             await loc.click({ timeout: 5000 });
@@ -225,12 +266,12 @@ export class BrowserController {
             await loc.press('Enter');
             await this.settle(page, 3000);
           }
-          return this.state(await this.current());
+          return this.state(await this.current(a.tab));
         }
         case 'press':
           await page.keyboard.press(a.key || 'Enter');
           await this.settle(page);
-          return this.state(await this.current());
+          return this.state(await this.current(a.tab));
         case 'scroll': {
           const amount = Math.max(1, Math.min(10, a.amount ?? 1));
           await page.evaluate(([dir, amt]) => window.scrollBy(0, (dir === 'up' ? -1 : 1) * window.innerHeight * 0.85 * (amt as number)), [a.direction ?? 'down', amount] as const);
@@ -259,7 +300,7 @@ export class BrowserController {
       const msg = (e as Error).message.split('\n')[0];
       let extra: BrowserResponse = { ok: false };
       try {
-        extra = await this.state(await this.current());
+        extra = await this.state(await this.current(a.tab));
       } catch {
         /* ignore */
       }

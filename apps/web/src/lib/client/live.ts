@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
 
 // Reads rows the user owns straight from Postgres (RLS) and keeps them fresh
@@ -18,6 +18,12 @@ export interface LiveOptions {
   /** Realtime filter column (one equality, Supabase limitation). */
   realtimeFilter?: { column: string; value: string };
   enabled?: boolean;
+  /**
+   * Rows are only ever added (the limit applies to each load, not to what is kept), and a reload
+   * whose newest page doesn't reach what is already kept also fetches the rows in between (by the
+   * order column), so a growing list like a task timeline never develops a hole.
+   */
+  keepAll?: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -29,15 +35,11 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const key = JSON.stringify(o);
-  const optsRef = useRef(o);
-  optsRef.current = o;
 
   useEffect(() => {
-    const opts = optsRef.current;
-    if (opts.enabled === false) {
-      setLoading(false);
-      return;
-    }
+    // The options are plain data, so the effect reads them back from the key it depends on.
+    const opts = JSON.parse(key) as LiveOptions;
+    if (opts.enabled === false) return; // reported as not loading below
     const sb = supabase();
     const pk = opts.pk ?? 'id';
     type R = Record<string, unknown>;
@@ -59,18 +61,40 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
       });
     };
 
-    const load = async () => {
+    // keepAll: everything seen for this subscription, by primary key.
+    const kept = new Map<unknown, T>();
+    const keep = (list: T[]) => {
+      for (const r of list) kept.set((r as R)[pk], r);
+      setRows(sortRows([...kept.values()]));
+    };
+    const query = () => {
       let q = sb.from(opts.table).select(opts.select ?? '*');
       for (const [k, v] of Object.entries(opts.eq ?? {})) if (v !== undefined) q = v === null ? q.is(k, null) : q.eq(k, v);
       for (const k of Object.keys(opts.is ?? {})) q = q.is(k, null);
       if (opts.inList) q = q.in(opts.inList.column, opts.inList.values);
+      return q;
+    };
+
+    const load = async () => {
+      let q = query();
       if (opts.order) q = q.order(opts.order.column, { ascending: !!opts.order.ascending });
       if (opts.limit) q = q.limit(opts.limit);
       const { data, error } = await q;
       if (cancelled) return;
       if (error) setError(error.message);
-      else {
-        setRows((data ?? []) as unknown as T[]);
+      else if (opts.keepAll && opts.order && opts.limit && kept.size && (data ?? []).length >= opts.limit) {
+        // The newest page may not reach back to what is kept (many rows arrived meanwhile): fetch the gap.
+        const col = opts.order.column;
+        const val = (r: unknown) => (r as R)[col] as number | string;
+        const keptNewest = [...kept.values()].reduce((m, r) => (val(r) > m ? val(r) : m), val([...kept.values()][0]));
+        const pageOldest = (data as unknown as T[]).reduce((m, r) => (val(r) < m ? val(r) : m), val((data as unknown as T[])[0]));
+        const gap = pageOldest > keptNewest ? await query().gt(col, keptNewest).lt(col, pageOldest).order(col, { ascending: true }).limit(5000) : { data: [] };
+        if (cancelled) return;
+        keep([...((gap.data ?? []) as unknown as T[]), ...(data as unknown as T[])]);
+        setError(null);
+      } else {
+        if (opts.keepAll) keep((data ?? []) as unknown as T[]);
+        else setRows((data ?? []) as unknown as T[]);
         setError(null);
       }
       setLoading(false);
@@ -88,6 +112,17 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
           'postgres_changes',
           { event: '*', schema: 'public', table: opts.table, ...(opts.realtimeFilter ? { filter: `${opts.realtimeFilter.column}=eq.${opts.realtimeFilter.value}` } : {}) },
           (payload) => {
+            if (opts.keepAll) {
+              if (payload.eventType === 'DELETE') {
+                kept.delete((payload.old as Row)[pk]);
+                setRows(sortRows([...kept.values()]));
+              } else if (matches(payload.new as R)) {
+                const row = payload.new as T;
+                const old = kept.get((row as R)[pk]);
+                keep([old ? ({ ...old, ...row } as T) : row]);
+              }
+              return;
+            }
             setRows((prev) => {
               if (payload.eventType === 'DELETE') return prev.filter((r) => (r as R)[pk] !== (payload.old as Row)[pk]);
               const row = payload.new as T;
@@ -114,5 +149,5 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
     };
   }, [key, nonce]);
 
-  return { rows, loading, error, reload: () => setNonce((n) => n + 1) };
+  return { rows, loading: o.enabled === false ? false : loading, error, reload: () => setNonce((n) => n + 1) };
 }

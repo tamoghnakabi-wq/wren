@@ -121,7 +121,11 @@ export interface ToolCallData {
   endedAt?: number;
   engine?: boolean; // emitted by an external CLI engine (display only)
   /** The page element a browser action was assessed (and approved) against. */
-  target?: { label?: string; role?: string; inputType?: string; autocomplete?: string };
+  /**
+   * The browser element a click/type/press was assessed (and approved) against: the exact DOM
+   * node (elementId, unique per page load), the page it was on, and a link's destination.
+   */
+  target?: { label?: string; role?: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string };
 }
 
 export interface ToolResult {

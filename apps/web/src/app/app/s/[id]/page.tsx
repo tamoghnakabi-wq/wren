@@ -28,7 +28,9 @@ export default function SessionPage() {
   const { agentById, approvals, devices } = useApp();
   const session = useLive<Session>({ table: 'sessions', eq: { id }, realtimeFilter: { column: 'id', value: id } });
   // The newest events stay live; older history loads a page at a time on request (by seq).
-  const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: PAGE, realtimeFilter: { column: 'session_id', value: id } });
+  // keepAll: rows that scroll out of the newest page stay, so the timeline has no holes between
+  // the live part and the older pages loaded below.
+  const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: PAGE, keepAll: true, realtimeFilter: { column: 'session_id', value: id } });
   const [older, setOlder] = useState<{ session: string; rows: EventRow[]; more: boolean }>({ session: id, rows: [], more: true });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderRows = older.session === id ? older.rows : [];

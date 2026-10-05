@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assessCall, assessShell, needsApproval } from '../src/policy';
+import { assessCall, assessShell, isReadOnlyCommand, needsApproval } from '../src/policy';
 import { isPrivateAddress } from '../src/net';
 
 describe('shell risk', () => {
@@ -53,6 +53,35 @@ describe('shell risk', () => {
   });
   it('sees every spelling of a GitHub write method', () => {
     for (const c of ['gh api --method=DELETE repos/o/r', 'gh api -XDELETE repos/o/r', 'gh api -X=PATCH repos/o/r', 'gh api --method PUT repos/o/r/x']) expect(desk(c).risk, c).toBe('high');
+  });
+  it('reads options the way the program receives them (quotes removed)', () => {
+    for (const c of ['sort "-o" output.txt input.txt', "sort '-o' out in", 'yq "-i" ".a = 1" file.yml', 'rg "--pre=/x/pre" pattern file', 'fd "-x" rm', 'tree "-o" out.txt', 'find . "-delete"', 'xxd "-r" in out', 's\\ort -o out in']) {
+      expect(desk(c).risk, c).not.toBe('low');
+    }
+    for (const c of ["gh api repos/o/r -X'DELETE'", 'gh api repos/o/r -X"DELETE"', 'gh api repos/o/r "-X" DELETE', "gh api repos/o/r '--method=DELETE'", 'gh api repos/o/r "-f" a=b']) {
+      expect(desk(c).risk, c).toBe('high');
+    }
+    expect(desk('"rm" -rf ~').blocked, 'quoted rm').toBeTruthy();
+    expect(desk("'git' push origin main").risk).toBe('high');
+    expect(desk('echo $(rm -rf build)').risk).toBe('high');
+  });
+  it('treats unknown values conservatively', () => {
+    expect(desk('sort $OPTS data.txt').risk).toBe('medium');
+    expect(desk('$CMD file').risk).toBe('medium');
+    expect(desk('rg "$(cat flags)" src').risk).toBe('medium');
+    expect(desk('echo $HOME').risk).toBe('low');
+    expect(desk('cat "$FILE"').risk).toBe('low');
+  });
+  it('keeps quoted operators inside their argument', () => {
+    for (const c of ['grep "a|b" notes.txt', "grep 'x;y' f", 'echo "a && b"', 'git log --format="%h %s"', 'echo $(date) done', 'LC_ALL=C sort data.txt', 'cat a.txt 2>&1 | wc -l']) {
+      expect(desk(c).risk, c).toBe('low');
+    }
+  });
+  it('replays only read commands with known arguments', () => {
+    expect(isReadOnlyCommand('ls -la && cat a.txt')).toBe(true);
+    expect(isReadOnlyCommand('sort "-o" out in')).toBe(false);
+    expect(isReadOnlyCommand('cat $FILE')).toBe(false);
+    expect(isReadOnlyCommand('echo hi > x')).toBe(false);
   });
   it('blocks catastrophic commands', () => {
     expect(desk('rm -rf /').blocked).toBeTruthy();

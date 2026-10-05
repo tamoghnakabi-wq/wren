@@ -2,7 +2,6 @@ import { app } from 'electron';
 import { spawn } from 'node:child_process';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -41,12 +40,13 @@ export interface UpdateState {
 }
 
 /**
- * Copy the download into a fresh private (0700) folder, hashing the bytes as they are written,
- * so what gets installed is exactly what was checked, not whatever the shared update folder
- * holds by then. Returns null (and removes the copy) when it doesn't match what was signed.
+ * Copy the download into a fresh folder inside Wren's data folder, hashing the bytes as they are
+ * written, so what gets installed is exactly what was checked. Agent commands can neither read
+ * nor write Wren's data folder (every sandbox profile denies it), unlike the temp folders they
+ * may use. Returns null (and removes the copy) when it doesn't match what was signed.
  */
 async function verifiedCopy(file: string, sha256: string, size: number): Promise<string | null> {
-  const dir = mkdtempSync(join(tmpdir(), 'wren-update-'));
+  const dir = mkdtempSync(join(dataDir(), 'install-'));
   const dest = join(dir, basename(file));
   const hash = createHash('sha256');
   let n = 0;
@@ -85,8 +85,9 @@ export class Updater {
 
   constructor(private readonly onChange: () => void) {}
 
-  /** Delete downloads of versions already installed (each one is a full ~130 MB build). */
+  /** Delete downloads of versions already installed (each one is a full ~130 MB build) and old install staging. */
   cleanup() {
+    for (const d of readdirSync(dataDir())) if (/^install-/.test(d)) rmSync(join(dataDir(), d), { recursive: true, force: true });
     const root = join(dataDir(), 'updates');
     if (!existsSync(root)) return;
     for (const v of readdirSync(root)) {
@@ -156,9 +157,13 @@ export class Updater {
   }
 
   /** Quit and install the downloaded update, then relaunch. */
-  async install(beforeQuit: () => void) {
+  async install(stopAgents: () => void) {
     const file = this.state.file;
     if (!file || !existsSync(file)) return;
+    // Stop agents (and every command they started) before anything is staged, so nothing they run
+    // is around while the installer is prepared. Where commands aren't sandboxed (Windows) this is
+    // what keeps them away from it.
+    stopAgents();
     // The file sat on disk since download: install from a private copy that is verified as it's made.
     const copy = this.state.sha256 && this.state.size ? await verifiedCopy(file, this.state.sha256, this.state.size).catch(() => null) : null;
     if (!copy) {
@@ -169,7 +174,6 @@ export class Updater {
     }
     if (process.platform === 'win32') {
       spawn(copy, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
-      beforeQuit();
       app.quit();
       return;
     }
@@ -203,7 +207,6 @@ rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
       { mode: 0o700, flag: 'wx' },
     );
     spawn('/bin/bash', [script, String(process.pid), copy, staging, bundle, this.state.sha256!], { detached: true, stdio: 'ignore' }).unref();
-    beforeQuit();
     app.quit();
   }
 }
