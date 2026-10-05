@@ -12,7 +12,8 @@ export class RemoteStore implements RunStore {
   onApproval?: (id: string, req: ApprovalRequest) => void;
 
   /** With remote approvals off, only a decision made on this computer counts. */
-  localOnlyApprovals = false;
+  /** Read when an approval is created, so turning remote approvals off applies at once. */
+  localOnlyApprovals: () => boolean = () => false;
 
   constructor(
     private readonly runId: string,
@@ -36,7 +37,7 @@ export class RemoteStore implements RunStore {
     return this.call<{ cancel: boolean; pause: boolean }>('control');
   }
   async createApproval(req: ApprovalRequest): Promise<string> {
-    const { id } = await this.call<{ id: string }>('approval', { ...req, localOnly: this.localOnlyApprovals });
+    const { id } = await this.call<{ id: string }>('approval', { ...req, localOnly: this.localOnlyApprovals() });
     this.onApproval?.(id, req);
     return id;
   }

@@ -120,6 +120,8 @@ export interface ToolCallData {
   startedAt?: number;
   endedAt?: number;
   engine?: boolean; // emitted by an external CLI engine (display only)
+  /** The page element a browser action was assessed (and approved) against. */
+  target?: { label?: string; role?: string; inputType?: string; autocomplete?: string };
 }
 
 export interface ToolResult {

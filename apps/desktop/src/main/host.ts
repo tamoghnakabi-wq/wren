@@ -1,20 +1,24 @@
 import { desktopCapturer, screen } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { fetchReadable } from '@wren/core/net';
 import { BrowserController } from '@wren/core/browser/controller';
 import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
+import { readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
-import { seatbeltProfile } from './sandbox';
+import { hasSeatbelt, seatbeltProfile } from './sandbox';
+import { toolEnv } from './shellenv';
 
 // Tool host for runs on this computer. Everything is confined to the folders
-// the user allowed in this app's Settings (a policy the server can't change).
-// On macOS shell commands additionally run inside a Seatbelt sandbox that only
-// permits writes to those folders and blocks reads of credential stores.
+// the user allowed in this app's Settings (a policy the server can't change),
+// read afresh for every action so a change in Settings applies at once.
+// On macOS shell commands and file reads/writes additionally run inside a
+// Seatbelt sandbox that only permits those folders (plus toolchains for
+// commands) and blocks credential stores.
 
 const MAX_OUT = 60_000;
 
@@ -23,6 +27,8 @@ interface Job {
   out: string;
   exit: number | null;
   started: number;
+  /** The run that started it: its jobs (background ones included) end with it. */
+  runId: string;
 }
 
 const jobs = new Map<string, Job>();
@@ -33,10 +39,14 @@ export class LocalHost implements ToolHost {
   readonly imageCache = new Map<string, { mime: string; data: string }>();
 
   constructor(
-    private readonly policy: Policy,
+    private readonly currentPolicy: () => Policy,
     private readonly runId: string,
     private readonly lease: string,
   ) {}
+
+  private get policy(): Policy {
+    return this.currentPolicy();
+  }
 
   // -------------------------------------------------------- paths
 
@@ -49,18 +59,16 @@ export class LocalHost implements ToolHost {
     return confinePath(p, this.roots());
   }
 
-  /** Write without following a symlink at the final path component (closes a check-then-swap race). */
-  private writeConfined(p: string, content: string) {
-    const fd = openSync(p, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o644);
-    try {
-      writeSync(fd, content);
-    } finally {
-      closeSync(fd);
-    }
+  private read(p: string, max: number) {
+    return readConfined(p, this.roots(), dataDir(), max);
+  }
+
+  private write(p: string, content: string) {
+    return writeConfined(p, Buffer.from(content), this.roots(), dataDir());
   }
 
   async riskContext(name: string, args: Record<string, unknown>) {
-    const unsandboxed = process.platform === 'win32' || (process.platform === 'darwin' && !existsSync('/usr/bin/sandbox-exec'));
+    const unsandboxed = !hasSeatbelt();
     if (name === 'computer.shell') return { unsandboxed };
     if ((name === 'browser.click' || name === 'browser.type' || name === 'browser.press') && browserCtl) {
       // A key press acts on whatever has focus, so describe that element.
@@ -97,8 +105,13 @@ export class LocalHost implements ToolHost {
       case 'computer.read_file': {
         const p = this.resolvePath(s('path'));
         if (!existsSync(p)) return { output: `File not found: ${p}`, isError: true };
-        const buf = readFileSync(p);
-        if (buf.byteLength > 8 * 1024 * 1024) return { output: 'File is larger than 8 MB; use the terminal to inspect it.', isError: true };
+        let buf: Buffer;
+        try {
+          buf = await this.read(p, 8 * 1024 * 1024);
+        } catch (e) {
+          if (e instanceof TooLarge) return { output: 'File is larger than 8 MB; use the terminal to inspect it.', isError: true };
+          throw e;
+        }
         if (buf.includes(0)) return { output: `${p} looks like a binary file (${buf.byteLength} bytes).`, isError: true };
         const lines = buf.toString('utf8').split('\n');
         const start = Math.max(1, Number(args.offset) || 1);
@@ -109,19 +122,17 @@ export class LocalHost implements ToolHost {
       }
       case 'computer.write_file': {
         const p = this.resolvePath(s('path'));
-        mkdirSync(dirname(p), { recursive: true });
-        this.resolvePath(p); // re-check after creating directories
-        this.writeConfined(p, s('content'));
+        await this.write(p, s('content'));
         return { output: `Wrote ${Buffer.byteLength(s('content'))} bytes to ${p}.` };
       }
       case 'computer.edit_file': {
         const p = this.resolvePath(s('path'));
         if (!existsSync(p)) return { output: `File not found: ${p}`, isError: true };
-        const text = readFileSync(p, 'utf8');
+        const text = (await this.read(p, 16 * 1024 * 1024)).toString('utf8');
         const count = text.split(s('old_text')).length - 1;
         if (!s('old_text') || count === 0) return { output: 'old_text was not found in the file.', isError: true };
         if (count > 1) return { output: `old_text appears ${count} times; include more context so it is unique.`, isError: true };
-        this.writeConfined(p, text.replace(s('old_text'), () => s('new_text')));
+        await this.write(p, text.replace(s('old_text'), () => s('new_text')));
         return { output: `Edited ${p}.` };
       }
       case 'computer.list_files': {
@@ -149,7 +160,14 @@ export class LocalHost implements ToolHost {
       case 'computer.share_file': {
         const p = this.resolvePath(s('path'));
         if (!existsSync(p)) return { output: `File not found: ${p}`, isError: true };
-        const a = await this.upload(readFileSync(p), s('name') || p.split(sep).pop() || 'file', 'file');
+        let data: Buffer;
+        try {
+          data = await this.read(p, 200 * 1024 * 1024);
+        } catch (e) {
+          if (e instanceof TooLarge) return { output: 'File is larger than 200 MB.', isError: true };
+          throw e;
+        }
+        const a = await this.upload(data, s('name') || p.split(sep).pop() || 'file', 'file');
         return { output: `Shared "${a.name}" (${a.size} bytes) with the user.`, artifacts: [{ id: a.id, name: a.name }] };
       }
       case 'screen.capture':
@@ -157,7 +175,7 @@ export class LocalHost implements ToolHost {
     }
     if (name.startsWith('browser.')) {
       if (!this.policy.browser) return { output: 'Browser use is turned off on this computer.', isError: true };
-      return this.browser(name.slice(8), args);
+      return this.browser(name.slice(8), args, ctx.expect);
     }
     if (name.startsWith('mcp_')) return deviceJson<ToolResult>(`/api/device/runs/${this.runId}/mcp`, { name, args }, { lease: this.lease });
     return { output: `Tool ${name} is not available on this computer.`, isError: true };
@@ -169,14 +187,16 @@ export class LocalHost implements ToolHost {
     return seatbeltProfile(this.roots(), dataDir());
   }
 
-  private spawnShell(command: string, cwd: string): ChildProcess {
+  private async spawnShell(command: string, cwd: string): Promise<ChildProcess> {
     const env = { ...process.env, WREN_AGENT: '1', ELECTRON_RUN_AS_NODE: undefined } as NodeJS.ProcessEnv;
     for (const k of Object.keys(env)) if (/^(WREN_URL|WREN_DATA_DIR)$/.test(k)) delete env[k];
     if (process.platform === 'win32') {
       return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { cwd, env, windowsHide: true });
     }
-    if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
-      return spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-lc', command], { cwd, env, detached: true });
+    if (hasSeatbelt()) {
+      // Not a login shell: startup files stay unread (and unreadable); PATH and toolchain
+      // variables come from toolEnv() instead.
+      return spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-c', command], { cwd, env: { ...env, ...(await toolEnv()) }, detached: true });
     }
     return spawn('/bin/bash', ['-lc', command], { cwd, env, detached: true });
   }
@@ -189,8 +209,8 @@ export class LocalHost implements ToolHost {
       if (!command.trim()) return { output: 'Empty command.', isError: true };
       const dir = this.resolvePath(cwd || '.');
       id = randomUUID().slice(0, 8);
-      const proc = this.spawnShell(command, dir);
-      const j: Job = { proc, out: '', exit: null, started: Date.now() };
+      const proc = await this.spawnShell(command, dir);
+      const j: Job = { proc, out: '', exit: null, started: Date.now(), runId: this.runId };
       const add = (b: Buffer) => {
         j.out += b.toString('utf8');
         if (j.out.length > MAX_OUT * 2) j.out = j.out.slice(-MAX_OUT);
@@ -262,9 +282,10 @@ export class LocalHost implements ToolHost {
     throw new Error(`Could not open a browser. Install Google Chrome or Microsoft Edge. (${(lastErr as Error)?.message?.split('\n')[0]})`);
   }
 
-  private async browser(action: string, args: Record<string, unknown>): Promise<ToolResult> {
+  private async browser(action: string, args: Record<string, unknown>, expect?: ToolContext['expect']): Promise<ToolResult> {
     const ctl = await this.controller();
-    const r = await ctl.act({ ...(args as object), action } as Parameters<BrowserController['act']>[0]);
+    // `expect` is the element an approval was given for; the controller refuses if the page changed.
+    const r = await ctl.act({ ...(args as object), action, ...(expect ? { expect } : {}) } as Parameters<BrowserController['act']>[0]);
     if (r.preview) {
       deviceJson(`/api/device/runs/${this.runId}/live`, { image: r.preview, url: r.url, title: r.title }, { lease: this.lease }).catch(() => {});
     }
@@ -299,7 +320,7 @@ export class LocalHost implements ToolHost {
     form.append('file', new Blob([new Uint8Array(data)]), name);
     form.append('runId', this.runId);
     form.append('kind', kind);
-    const res = await deviceFetch('/api/device/artifacts', { method: 'POST', body: form });
+    const res = await deviceFetch('/api/device/artifacts', { method: 'POST', body: form, lease: this.lease });
     if (!res.ok) throw new Error(`Upload failed (${res.status})`);
     return res.json();
   }
@@ -326,4 +347,13 @@ export async function closeBrowser() {
 export function killAllJobs() {
   for (const j of jobs.values()) kill(j.proc);
   jobs.clear();
+}
+
+/** Stop the commands a run started (foreground or background); other runs' jobs keep going. */
+export function killRunJobs(runId?: string) {
+  for (const [id, j] of jobs) {
+    if (runId && j.runId !== runId) continue;
+    if (j.exit === null) kill(j.proc);
+    jobs.delete(id);
+  }
 }

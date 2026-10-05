@@ -93,12 +93,17 @@ async function verifyIdToken(idToken: string, clientId: string, nonce: string | 
 
 let pending: { server: Server; reject: (e: Error) => void } | null = null;
 
+function cancelPending(why: string) {
+  if (!pending) return;
+  pending.reject(new Error(why));
+  pending.server.close();
+  pending = null;
+}
+
 export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<ChatGPTStatus> {
-  if (pending) {
-    pending.reject(new Error('Superseded by a new sign-in.'));
-    pending.server.close();
-    pending = null;
-  }
+  cancelPending('Superseded by a new sign-in.');
+  // A sign-out (or another sign-in) while this one is open makes it stale: it must not save.
+  const startGeneration = authGeneration;
   const verifier = b64url(randomBytes(48));
   const challenge = b64url(createHash('sha256').update(verifier).digest());
   const state = b64url(randomBytes(24));
@@ -182,6 +187,7 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
       scopes,
       saved_at: new Date().toISOString(),
     };
+    if (authGeneration !== startGeneration) throw new Error('Sign-in was cancelled.');
     authGeneration++;
     writeSecret(SECRET, reg);
     // Kept for the next sign-in's hints; the id token goes in encrypted storage only.
@@ -190,7 +196,7 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
     return status();
   } finally {
     server.close();
-    pending = null;
+    if (pending?.server === server) pending = null;
   }
 }
 
@@ -205,17 +211,19 @@ async function tokenRequest(form: Record<string, string>) {
   return j as { access_token: string; refresh_token: string; id_token: string; expires_in?: string; scope?: string };
 }
 
-let refreshing: Promise<string> | null = null;
-/** Bumped by sign-in and sign-out, so a refresh that started earlier can't save stale tokens. */
+let refreshing: { generation: number; promise: Promise<string> } | null = null;
+/** Bumped by sign-in and sign-out, so a refresh or sign-in that started earlier can't save stale tokens. */
 let authGeneration = 0;
 
 /** A valid access token, refreshed (serialised) when close to expiry. */
 export async function accessToken(): Promise<string> {
+  // Captured before reading storage: whatever is read belongs to this generation.
+  const generation = authGeneration;
   const r = load();
   if (!r?.refresh_token) throw new Error('Not signed in with ChatGPT on this computer.');
   if (r.expires_at - Date.now() > 120_000) return r.access_token;
-  const generation = authGeneration;
-  refreshing ??= (async () => {
+  if (refreshing?.generation === generation) return refreshing.promise;
+  const promise = (async () => {
     try {
       const tok = await tokenRequest({ grant_type: 'refresh_token', client_id: r.client_id, refresh_token: r.refresh_token, resource: RESOURCE });
       if (generation !== authGeneration) throw new Error('Signed out of ChatGPT on this computer.');
@@ -238,15 +246,20 @@ export async function accessToken(): Promise<string> {
       }
       throw e;
     } finally {
-      refreshing = null;
+      if (refreshing?.generation === generation) refreshing = null; // only this refresh can hold that generation
     }
   })();
-  return refreshing;
+  refreshing = { generation, promise };
+  return promise;
 }
 
 export async function signOut(): Promise<{ revoked: boolean }> {
-  authGeneration++;
+  // Local sign-out takes effect at once: tokens are gone before any network wait, refreshes and
+  // sign-ins already under way can no longer save, and an open sign-in is closed.
   const r = load();
+  authGeneration++;
+  writeSecret(SECRET, null);
+  cancelPending('Signed out.');
   let revoked = false;
   if (r?.refresh_token) {
     try {
@@ -263,8 +276,7 @@ export async function signOut(): Promise<{ revoked: boolean }> {
       revoked = false;
     }
   }
-  // Keep the client/account mapping and host id for a later sign-in.
-  writeSecret(SECRET, null);
+  // The client/account mapping and host id stay for a later sign-in.
   return { revoked };
 }
 

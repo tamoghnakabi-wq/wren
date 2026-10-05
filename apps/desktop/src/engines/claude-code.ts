@@ -1,7 +1,6 @@
-import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { LoopOutcome } from '@wren/core';
-import { decide, engineEnv, findCli, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
+import { decide, findCli, spawnEngine, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
 // computer, signed in by the user through Anthropic's login. Wren never sees
@@ -103,7 +102,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   for (const f of run.folders.slice(1)) args.push('--add-dir', f);
   if (run.resumeId) args.push('--resume', run.resumeId);
 
-  const proc = spawn(cli, args, { cwd: run.cwd, env: engineEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = await spawnEngine('claude-code', cli, args, run, approveScript);
   proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: run.prompt } }) + '\n');
   const onAbort = () => proc.kill('SIGTERM');
   run.signal.addEventListener('abort', onAbort, { once: true });

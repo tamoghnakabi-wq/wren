@@ -16,7 +16,12 @@ export interface BrowserAction {
   direction?: 'up' | 'down';
   amount?: number;
   full_page?: boolean;
+  /** The element this action was assessed/approved against; refused if it changed. */
+  expect?: { label?: string; role?: string; inputType?: string };
 }
+
+/** Field kinds an agent may never type into, enforced here as well as in the policy. */
+const SECRET_FIELD = /password|cc-|card|cvc|cvv|security code|one-time|otp|2fa|passcode|ssn|social security|iban|routing/i;
 
 export interface BrowserResponse {
   ok: boolean;
@@ -168,9 +173,29 @@ export class BrowserController {
     return loc;
   }
 
+  private async describe(page: Page, ref: string): Promise<BrowserResponse['target'] | null> {
+    return (await page.evaluate(`(${DESCRIBE_FN})(${JSON.stringify(ref)})`)) as BrowserResponse['target'] | null;
+  }
+
+  /** Refuse when the element differs from what was approved, or is a secret field. */
+  private async guard(page: Page, a: BrowserAction): Promise<string | null> {
+    if (a.action !== 'click' && a.action !== 'type' && a.action !== 'press') return null;
+    const target = await this.describe(page, a.action === 'press' ? '@focused' : a.ref ?? '');
+    if (a.expect) {
+      const same = !!target && (target.label ?? '') === (a.expect.label ?? '') && (target.role ?? '') === (a.expect.role ?? '') && (target.inputType ?? '') === (a.expect.inputType ?? '');
+      if (!same) return 'The page changed since this action was checked, so it was not taken. Take a new snapshot and try again.';
+    }
+    if (a.action === 'type' && target && SECRET_FIELD.test(`${target.inputType ?? ''} ${target.autocomplete ?? ''} ${target.label ?? ''}`)) {
+      return 'Agents never type passwords, card numbers or other credentials. Ask the user to do this step.';
+    }
+    return null;
+  }
+
   async act(a: BrowserAction): Promise<BrowserResponse> {
     try {
       const page = await this.current();
+      const refused = await this.guard(page, a);
+      if (refused) return { ...(await this.state(page)), ok: false, error: refused };
       switch (a.action) {
         case 'navigate': {
           if (!a.url || !/^https?:\/\//i.test(a.url)) throw new Error('A full http(s) URL is required.');
@@ -222,7 +247,7 @@ export class BrowserController {
           await this.settle(page);
           return this.state(page);
         case 'describe': {
-          const target = (await page.evaluate(`(${DESCRIBE_FN})(${JSON.stringify(a.ref ?? '')})`)) as BrowserResponse['target'] | null;
+          const target = await this.describe(page, a.ref ?? '');
           return { ok: true, target: target ?? undefined };
         }
         case 'close':

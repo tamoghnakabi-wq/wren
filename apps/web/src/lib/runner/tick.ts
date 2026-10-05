@@ -71,12 +71,7 @@ export async function runTick(runId: string): Promise<string> {
     runId,
     githubToken: github?.secret,
     mcp,
-    onLiveView: async (p) => {
-      await sql`
-        insert into public.run_live (run_id, user_id, session_id, image, url, title, updated_at)
-        values (${runId}, ${run.user_id}, ${run.session_id}, ${p.data}, ${p.url ?? null}, ${p.title ?? null}, now())
-        on conflict (run_id) do update set image = excluded.image, url = excluded.url, title = excluded.title, updated_at = now()`;
-    },
+    onLiveView: (p) => store.live({ image: p.data, url: p.url, title: p.title }),
   });
 
   const loadImage = async (ref: ImageRef) => {
@@ -114,6 +109,7 @@ export async function runTick(runId: string): Promise<string> {
       modelDeadline: started + MODEL_BUDGET_MS,
       step: run.step,
       maxSteps: run.max_steps,
+      modelRetries: Number(run.retry_count) || 0,
       log: (m, e) => console.log(`[run ${runId.slice(0, 8)}] ${m}`, e ?? ''),
     });
   } catch (e) {
@@ -134,9 +130,14 @@ export async function runTick(runId: string): Promise<string> {
   }
 
   if (outcome.kind === 'yield') {
-    // A clean hand-off: progress was made, so earlier timeouts no longer count.
+    // A clean hand-off proves ticks finish in time, so earlier timeouts no longer count, unless
+    // the tick only failed to reach the model: then the loop's retry count (which fails the run
+    // once it runs out) carries over and the crash count stays. A completed step resets both.
     const wakeMs = outcome.wakeInMs ?? 0;
-    const handed = await sql`update public.runs set step = ${outcome.steps}, lease_id = null, lease_until = null, crash_count = 0,
+    const progressed = outcome.steps > Number(run.step);
+    const retries = outcome.retries ?? (progressed ? 0 : Number(run.retry_count) || 0);
+    const crashes = outcome.retries !== undefined && !progressed ? Number(run.crash_count) : 0;
+    const handed = await sql`update public.runs set step = ${outcome.steps}, lease_id = null, lease_until = null, crash_count = ${crashes}, retry_count = ${retries},
       wake_at = ${wakeMs ? new Date(Date.now() + wakeMs) : null} where id = ${runId} and lease_id = ${lease} returning id`;
     if (handed.length && !wakeMs) await kickTick(runId);
     return 'yield';

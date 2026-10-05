@@ -1,4 +1,3 @@
-import { Sandbox } from '@vercel/sandbox';
 import { requireUser } from '@/lib/auth';
 import { db, type Json } from '@/lib/db';
 import { body, json, notFound, route, uuid } from '@/lib/http';
@@ -34,12 +33,7 @@ export const DELETE = route<Ctx>(async (req, ctx) => {
   if (!a) notFound('Agent not found.');
   await sql`update public.runs set cancel_requested = true where agent_id = ${id} and status in ('queued', 'running', 'waiting', 'paused')`;
   await sql`update public.schedules set enabled = false where agent_id = ${id}`;
-  // Remove the agent's cloud computer (and its snapshots).
-  try {
-    const sb = await Sandbox.get({ name: SandboxHost.sandboxName(id), resume: false });
-    await sb.delete();
-  } catch {
-    /* never created */
-  }
+  // Remove the agent's cloud computer and browser (and their snapshots).
+  await SandboxHost.deleteComputers(id);
   return json({ ok: true });
 });

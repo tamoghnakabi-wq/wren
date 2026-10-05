@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { runLoop, type ApprovalState, type RunStore, type ToolHost } from '../src/loop';
+import { MAX_MODEL_RETRIES, runLoop, type ApprovalState, type RunStore, type ToolContext, type ToolHost } from '../src/loop';
 import { toolCatalog } from '../src/tools';
-import { DEFAULT_TOOLS, type ModelClient, type ModelRequest, type ModelTurn, type SessionEvent, type ToolCallData } from '../src/types';
+import { DEFAULT_TOOLS, ModelError, type ModelClient, type ModelRequest, type ModelTurn, type SessionEvent, type ToolCallData } from '../src/types';
 import { buildTurns } from '../src/transcript';
 
 class MemStore implements RunStore {
@@ -74,7 +74,8 @@ class ScriptModel implements ModelClient {
 class FakeHost implements ToolHost {
   runtime = 'cloud' as const;
   ran: string[] = [];
-  async execute(name: string, args: Record<string, unknown>) {
+  riskContext?: ToolHost['riskContext'];
+  async execute(name: string, args: Record<string, unknown>, _ctx?: ToolContext) {
     this.ran.push(`${name}:${JSON.stringify(args)}`);
     return { output: `ok ${name}` };
   }
@@ -210,6 +211,54 @@ describe('agent loop', () => {
     expect((push.data as ToolCallData).result?.output).toMatch(/interrupted/);
   });
 
+  it('does not repeat a low-risk cloud write after a crash', async () => {
+    const store = new MemStore();
+    await store.userSays('log it');
+    const turn = await store.append('message', { role: 'assistant', text: '', raw: { format: 'responses', items: [] } }, 'done');
+    // Low risk in the cloud (the VM is the agent's own), but appending twice is still a change.
+    await store.append('tool', { callId: 'w', name: 'computer.shell', args: { command: 'printf x >> log.txt' }, title: 'append', risk: 'low', turnId: turn.id, startedAt: 1 }, 'running');
+    const host = new FakeHost();
+    const out = await base(store, new ScriptModel([{ text: 'Checked.' }]), host);
+    expect(out.kind).toBe('completed');
+    expect(host.ran).toEqual([]);
+    expect(store.events_.find((e) => (e.data as ToolCallData).callId === 'w')!.status).toBe('error');
+  });
+
+  it('refuses an approved browser action when the element changed', async () => {
+    const store = new MemStore();
+    await store.userSays('send it');
+    const model = new ScriptModel([{ calls: [{ name: 'browser.click', args: { ref: 'e5' } }] }, { text: 'The page changed; stopping.' }]);
+    let label = 'Send message';
+    const host = new FakeHost();
+    host.riskContext = async () => ({ browserTarget: { label, role: 'button' } });
+    const first = await base(store, model, host);
+    expect(first.kind).toBe('waiting_approval');
+    const tool = store.events_.find((e) => e.type === 'tool')!;
+    expect((tool.data as ToolCallData).target).toMatchObject({ label: 'Send message' });
+    label = 'Place order'; // another run reused the browser while this waited
+    store.approvals.set((tool.data as ToolCallData).approvalId!, 'approved');
+    const out = await base(store, model, host);
+    expect(out.kind).toBe('completed');
+    expect(host.ran).toEqual([]);
+    expect((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).result?.output).toMatch(/page changed/);
+  });
+
+  it('passes the assessed element to the browser', async () => {
+    const store = new MemStore();
+    await store.userSays('next page');
+    const model = new ScriptModel([{ calls: [{ name: 'browser.click', args: { ref: 'e2' } }] }, { text: 'Done.' }]);
+    const host = new FakeHost();
+    host.riskContext = async () => ({ browserTarget: { label: 'Next page', role: 'link' } });
+    let seen: unknown;
+    host.execute = async (name, args, ctx) => {
+      seen = ctx?.expect;
+      host.ran.push(name);
+      return { output: 'ok' };
+    };
+    await base(store, model, host, { autonomy: 'autonomous' });
+    expect(seen).toMatchObject({ label: 'Next page', role: 'link' });
+  });
+
   it('re-creates tool calls a crash left unsaved', async () => {
     const store = new MemStore();
     await store.userSays('list');
@@ -270,5 +319,24 @@ describe('agent loop', () => {
     expect(out.kind).toBe('completed');
     expect([...store.mem.values()]).toEqual(['Likes tea']);
     expect(store.events_.some((e) => e.type === 'plan')).toBe(true);
+  });
+
+  it('retries a failing provider later, with a limit that survives across ticks', async () => {
+    class Failing implements ModelClient {
+      label = 'failing';
+      async stream(): Promise<ModelTurn> {
+        throw new ModelError('upstream overloaded', 503, 'overloaded', true);
+      }
+    }
+    const store = new MemStore();
+    await store.userSays('hello');
+    const sleep = async () => {};
+    const first = await base(store, new Failing(), new FakeHost(), { sleep });
+    expect(first).toMatchObject({ kind: 'yield', retries: 1, wakeInMs: 60_000 });
+    const third = await base(store, new Failing(), new FakeHost(), { sleep, modelRetries: 2 });
+    expect(third).toMatchObject({ kind: 'yield', retries: 3, wakeInMs: 240_000 });
+    const last = await base(store, new Failing(), new FakeHost(), { sleep, modelRetries: MAX_MODEL_RETRIES - 1 });
+    expect(last.kind).toBe('failed');
+    expect(last.kind === 'failed' && last.error).toMatch(/kept failing/);
   });
 });

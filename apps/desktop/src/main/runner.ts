@@ -22,7 +22,7 @@ import { deviceJson } from './api';
 import { detect, type Capabilities } from './capabilities';
 import * as chatgpt from './chatgpt';
 import { loadDevice, loadPolicy, type Policy } from './config';
-import { LocalHost } from './host';
+import { killRunJobs, LocalHost } from './host';
 import { allowedRoots, isConfined } from './paths';
 import { ProxyModelClient, RemoteStore } from './remote';
 
@@ -60,6 +60,10 @@ export class DeviceRunner {
   private channel: RealtimeChannel | null = null;
   private timer: NodeJS.Timeout | null = null;
   private active = new Map<string, AbortController>();
+  /** Runs driven by a CLI engine (Claude Code, Grok Build). */
+  private engineRuns = new Set<string>();
+  /** Why a run was stopped by this app (not by the user), reported as its outcome. */
+  private stopReasons = new Map<string, string>();
   private ticking = false;
   private again = false;
   state: RunnerState = { connected: false, running: 0 };
@@ -165,10 +169,11 @@ export class DeviceRunner {
           .then((ctl) => ctl.cancel && abort.abort())
           .catch((e: { status?: number }) => e?.status === 409 && abort.abort());
       }, 45_000);
-      store.localOnlyApprovals = !policy.remoteApprovals;
-      store.onApproval = (id, req) => this.approvalPrompt(id, req, c, policy, abort.signal);
+      store.localOnlyApprovals = () => !loadPolicy().remoteApprovals;
+      store.onApproval = (id, req) => this.approvalPrompt(id, req, c, abort.signal);
       const model = c.run.model;
       if (model.source === 'claude-code' || model.source === 'grok-build') {
+        this.engineRuns.add(runId);
         outcome = await this.runEngine(c, store, policy, abort.signal);
       } else {
         outcome = await this.runAgentLoop(c, store, policy, settings, abort.signal);
@@ -178,6 +183,12 @@ export class DeviceRunner {
       outcome = { kind: 'failed', error: (e as Error).message, steps: 0 };
     } finally {
       if (keepalive) clearInterval(keepalive);
+      const stopped = this.stopReasons.get(runId);
+      if (stopped) outcome = { kind: 'failed', error: stopped, code: 'permissions_changed', steps: outcome.steps };
+      this.stopReasons.delete(runId);
+      this.engineRuns.delete(runId);
+      // A finished run's commands (background ones included) end with it.
+      if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') killRunJobs(runId);
       log(`run ${runId.slice(0, 8)} -> ${outcome.kind}`);
       if (lease) await deviceJson(`/api/device/runs/${runId}/finish`, outcome, { lease }).catch(() => {});
       this.active.delete(runId);
@@ -186,9 +197,22 @@ export class DeviceRunner {
     }
   }
 
-  private inFolders(policy: Policy) {
-    const roots = allowedRoots(policy.folders);
-    return (p: string) => isConfined(p, roots);
+  /** Checked against the folders allowed right now, not when the run started. */
+  private inFolders() {
+    return (p: string) => isConfined(p, allowedRoots(loadPolicy().folders));
+  }
+
+  /**
+   * Settings took a permission away. Commands started under the old rules stop; a CLI engine
+   * was sandboxed with the old folders when it started, so its run ends (the user can continue
+   * it with a message). Agent-loop runs carry on: every action re-reads the new policy.
+   */
+  permissionsReduced() {
+    for (const id of this.active.keys()) killRunJobs(id);
+    for (const id of this.engineRuns) {
+      this.stopReasons.set(id, 'Stopped because this computer’s permissions changed while it was running. Send a message to continue with the new settings.');
+      this.active.get(id)?.abort();
+    }
   }
 
   private async runEngine(c: Claim, store: RemoteStore, policy: Policy, signal: AbortSignal): Promise<LoopOutcome> {
@@ -208,14 +232,26 @@ export class DeviceRunner {
       prompt,
       cwd: policy.folders[0],
       folders: policy.folders,
-      allow: { shell: policy.shell, browser: policy.browser, screen: policy.screen },
+      // Getters: the switches are checked as they are now on every permission request.
+      allow: {
+        get shell() {
+          return loadPolicy().shell;
+        },
+        get browser() {
+          return loadPolicy().browser;
+        },
+        get screen() {
+          return loadPolicy().screen;
+        },
+      },
       resumeId: resume?.data.resumeId,
       signal,
       saveResumeId: async (id: string) => {
         if (id !== resume?.data.resumeId) await store.append('reasoning', { engine, resumeId: id }, 'done');
       },
     };
-    const inFolders = this.inFolders(policy);
+    if (!policy.folders.length) return { kind: 'failed', error: 'No folders are allowed on this computer. Add one in Wren → Settings → This computer.', code: 'no_folders', steps: 0 };
+    const inFolders = this.inFolders();
     if (engine === 'claude-code') return runClaudeCode(run, inFolders, approveScript());
     return runGrokBuild(run, inFolders, approveScript().replace(/mcp-approve\.mjs$/, 'grok-hook.mjs'));
   }
@@ -224,7 +260,7 @@ export class DeviceRunner {
     const ref = c.run.model;
     let model: ModelClient;
     let source = ref.source as string;
-    const host = new LocalHost(policy, c.run.id, store.lease);
+    const host = new LocalHost(loadPolicy, c.run.id, store.lease);
     // Models called directly from here need image bytes: screenshots from this run are cached,
     // anything else (uploads, earlier turns) comes from the server for this run's account.
     const loadImage = async (img: ImageRef) => {
@@ -272,6 +308,7 @@ export class DeviceRunner {
       return true;
     });
     let step = c.run.step;
+    let modelRetries = 0;
     for (;;) {
       const outcome = await runLoop({
         model,
@@ -288,24 +325,33 @@ export class DeviceRunner {
         deadline: Date.now() + 20 * 60_000,
         step,
         maxSteps: c.run.maxSteps,
+        modelRetries,
         signal,
         log: (m, e) => console.log(`[run ${c.run.id.slice(0, 8)}] ${m}`, e ?? ''),
       });
       if (outcome.kind !== 'yield') return outcome;
+      // The loop fails the run once the model provider has failed too many times in a row.
+      modelRetries = outcome.retries ?? (outcome.steps > step ? 0 : modelRetries);
       step = outcome.steps;
-      if (outcome.wakeInMs) await new Promise((r) => setTimeout(r, Math.min(outcome.wakeInMs!, 120_000)));
+      if (outcome.wakeInMs) {
+        const ms = Math.min(outcome.wakeInMs, 120_000);
+        await new Promise<void>((r) => {
+          const t = setTimeout(r, ms);
+          signal.addEventListener('abort', () => (clearTimeout(t), r()), { once: true });
+        });
+      }
       if (signal.aborted) return { kind: 'cancelled', steps: step };
     }
   }
 
   /** Show approvals on this computer too; with remote approvals off, only a local answer counts. */
-  private approvalPrompt(id: string, req: ApprovalRequest, c: Claim, policy: Policy, signal: AbortSignal) {
+  private approvalPrompt(id: string, req: ApprovalRequest, c: Claim, signal: AbortSignal) {
     if (Notification.isSupported()) {
       const n = new Notification({ title: `${c.agent.name} needs your approval`, body: `${req.title}${req.reason ? ` — ${req.reason}` : ''}`, urgency: 'critical' });
       n.on('click', () => this.onOpenTask(c.run.sessionId));
       n.show();
     }
-    if (policy.remoteApprovals) return;
+    if (loadPolicy().remoteApprovals) return;
     void dialog
       .showMessageBox({
         type: 'warning',

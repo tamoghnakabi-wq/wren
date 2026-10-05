@@ -1,11 +1,13 @@
 import { app } from 'electron';
 import { spawn } from 'node:child_process';
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { Readable } from 'node:stream';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { APP_URL, dataDir } from './config';
+import { compareVersions } from '@wren/core';
 
 // Self-updater. The update endpoint returns {version, url, sha256, size,
 // signature}; the signature is ed25519 over a canonical string and is checked
@@ -38,25 +40,29 @@ export interface UpdateState {
   size?: number;
 }
 
-/** Compare dotted versions numerically (1.10.0 > 1.9.3). */
-export function compareVersions(a: string, b: string): number {
-  const pa = a.split(/[.-]/).map((x) => parseInt(x, 10) || 0);
-  const pb = b.split(/[.-]/).map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d) return d > 0 ? 1 : -1;
-  }
-  return 0;
-}
-
-async function sha256File(file: string): Promise<{ sha256: string; size: number }> {
+/**
+ * Copy the download into a fresh private (0700) folder, hashing the bytes as they are written,
+ * so what gets installed is exactly what was checked, not whatever the shared update folder
+ * holds by then. Returns null (and removes the copy) when it doesn't match what was signed.
+ */
+async function verifiedCopy(file: string, sha256: string, size: number): Promise<string | null> {
+  const dir = mkdtempSync(join(tmpdir(), 'wren-update-'));
+  const dest = join(dir, basename(file));
   const hash = createHash('sha256');
-  let size = 0;
-  for await (const chunk of createReadStream(file)) {
-    hash.update(chunk as Buffer);
-    size += (chunk as Buffer).length;
+  let n = 0;
+  const tap = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      hash.update(chunk);
+      n += chunk.length;
+      cb(null, chunk);
+    },
+  });
+  await pipeline(createReadStream(file), tap, createWriteStream(dest, { flags: 'wx', mode: 0o600 }));
+  if (hash.digest('hex') !== sha256 || n !== size) {
+    rmSync(dir, { recursive: true, force: true });
+    return null;
   }
-  return { sha256: hash.digest('hex'), size };
+  return dest;
 }
 
 export const platformKey = () => `${process.platform}-${process.arch === 'arm64' ? 'arm64' : 'x64'}`;
@@ -109,7 +115,7 @@ export class Updater {
         return this.state;
       }
       // Already holding this (or a newer) download: nothing to do. A newer release replaces it.
-      if (this.state.ready && compareVersions(info.version, this.state.version ?? '0') <= 0) return this.state;
+      if (this.state.ready && compareVersions(info.version, this.state.version ?? '0.0.0') <= 0) return this.state;
       this.state = { available: true, version: info.version, downloading: true };
       this.onChange();
       const file = await this.download(info);
@@ -133,7 +139,7 @@ export class Updater {
     if (!res.ok || !res.body) throw new Error(`Download failed (${res.status})`);
     const hash = createHash('sha256');
     let size = 0;
-    const tap = new (await import('node:stream')).Transform({
+    const tap = new Transform({
       transform(chunk, _enc, cb) {
         hash.update(chunk);
         size += chunk.length;
@@ -153,16 +159,16 @@ export class Updater {
   async install(beforeQuit: () => void) {
     const file = this.state.file;
     if (!file || !existsSync(file)) return;
-    // The file sat on disk since download: verify it is still exactly what was signed.
-    const now = await sha256File(file);
-    if (now.sha256 !== this.state.sha256 || now.size !== this.state.size) {
+    // The file sat on disk since download: install from a private copy that is verified as it's made.
+    const copy = this.state.sha256 && this.state.size ? await verifiedCopy(file, this.state.sha256, this.state.size).catch(() => null) : null;
+    if (!copy) {
       rmSync(file, { force: true });
       this.state = { available: false, error: 'The downloaded update changed on disk and was discarded. It will be downloaded again.' };
       this.onChange();
       return;
     }
     if (process.platform === 'win32') {
-      spawn(file, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
+      spawn(copy, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
       beforeQuit();
       app.quit();
       return;
@@ -170,15 +176,19 @@ export class Updater {
     // macOS: <bundle>/Contents/MacOS/Wren -> swap the .app after this process exits.
     const bundle = resolve(dirname(process.execPath), '..', '..');
     if (!bundle.endsWith('.app')) return;
-    const staging = join(dirname(file), 'staging');
-    const script = join(dirname(file), 'install.sh');
+    // Script, archive copy and staging all live in the private folder; the script checks the
+    // archive once more right before extracting it, after this process has exited.
+    const priv = dirname(copy);
+    const staging = join(priv, 'staging');
+    const script = join(priv, 'install.sh');
     // Paths are passed as arguments, never pasted into the script text.
     writeFileSync(
       script,
       `#!/bin/bash
 set -e
-PID="$1"; FILE="$2"; STAGING="$3"; BUNDLE="$4"
+PID="$1"; FILE="$2"; STAGING="$3"; BUNDLE="$4"; SHA="$5"
 while kill -0 "$PID" 2>/dev/null; do sleep 0.3; done
+[ "$(/usr/bin/shasum -a 256 "$FILE" | /usr/bin/cut -d' ' -f1)" = "$SHA" ] || exit 1
 rm -rf "$STAGING" && mkdir -p "$STAGING"
 /usr/bin/ditto -x -k "$FILE" "$STAGING"
 NEW="$(/usr/bin/find "$STAGING" -maxdepth 1 -name '*.app' | head -1)"
@@ -187,12 +197,12 @@ NEW="$(/usr/bin/find "$STAGING" -maxdepth 1 -name '*.app' | head -1)"
 rm -rf "$BUNDLE.old"
 mv "$BUNDLE" "$BUNDLE.old"
 mv "$NEW" "$BUNDLE"
-rm -rf "$BUNDLE.old" "$STAGING"
+rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
 /usr/bin/open "$BUNDLE"
 `,
-      { mode: 0o755 },
+      { mode: 0o700, flag: 'wx' },
     );
-    spawn('/bin/bash', [script, String(process.pid), file, staging, bundle], { detached: true, stdio: 'ignore' }).unref();
+    spawn('/bin/bash', [script, String(process.pid), copy, staging, bundle, this.state.sha256!], { detached: true, stdio: 'ignore' }).unref();
     beforeQuit();
     app.quit();
   }

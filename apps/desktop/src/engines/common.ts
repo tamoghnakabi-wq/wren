@@ -1,12 +1,16 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcome, type MessageData, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
+import { dataDir } from '../main/config';
+import { allowedRoots } from '../main/paths';
+import { engineProfile, hasSeatbelt, type Engine } from '../main/sandbox';
+import { toolEnv } from '../main/shellenv';
 
 // Shared plumbing for external agent engines (Claude Code, Grok Build): they
 // run their own loop, Wren mirrors what they do into the task timeline and
@@ -53,6 +57,21 @@ export function engineEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Start an engine CLI. On macOS it runs inside a Seatbelt profile (the allowed folders,
+ * toolchains and the CLI's own state), and so does every command it runs: its shell tool
+ * can't read or change files outside the allowed folders any more than Wren's own can.
+ * `helper` is this app's script the CLI starts for approvals (it must stay readable).
+ */
+export async function spawnEngine(engine: Engine, cli: string, args: string[], run: EngineRun, helper: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<ChildProcessWithoutNullStreams> {
+  const env = { ...engineEnv(), ...extraEnv };
+  if (!hasSeatbelt()) return spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  Object.assign(env, await toolEnv());
+  const appBundle = process.platform === 'darwin' ? resolve(process.execPath, '..', '..', '..') : dirname(process.execPath);
+  const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), [appBundle, dirname(helper)]);
+  return spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...args], { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+}
+
 export class TimelineWriter {
   private msgId: string | null = null;
   private text = '';
@@ -97,8 +116,40 @@ export class TimelineWriter {
     this.text = '';
   }
 
-  async toolStart(callId: string, name: string, args: Record<string, unknown>, title?: string) {
+  /**
+   * The open timeline entry for the same action under the other id. A permission prompt can
+   * arrive before or after the engine reports the tool call, and not always with its id.
+   */
+  matchOpen(name: string, title: string, synthetic: boolean): string | undefined {
+    for (const [id, t] of this.tools) {
+      if (t.data.endedAt || t.data.name !== name || t.data.title !== title) continue;
+      if (/^(perm|hook)-/.test(id) === synthetic) return id;
+    }
+  }
+
+  /** Entries being created, so the stream and a permission prompt for the same call share one. */
+  private starting = new Map<string, Promise<string>>();
+
+  async toolStart(callId: string, name: string, args: Record<string, unknown>, title?: string): Promise<string> {
+    const known = this.tools.get(callId);
+    if (known) return known.id;
+    const pending = this.starting.get(callId);
+    if (pending) return pending;
+    const p = this.createTool(callId, name, args, title).finally(() => this.starting.delete(callId));
+    this.starting.set(callId, p);
+    return p;
+  }
+
+  private async createTool(callId: string, name: string, args: Record<string, unknown>, title?: string): Promise<string> {
     await this.endMessage();
+    // Already shown by its permission prompt: keep that entry and track it by the real id.
+    const prompted = this.matchOpen(name, title ?? describeCall(name, args), true);
+    if (prompted) {
+      const t = this.tools.get(prompted)!;
+      this.tools.delete(prompted);
+      this.tools.set(callId, t);
+      return t.id;
+    }
     const data: ToolCallData = { callId, name, args, title: title ?? describeCall(name, args), risk: 'low', engine: true, startedAt: Date.now() };
     const ev = await this.store.append<ToolCallData>('tool', data, 'running');
     this.tools.set(callId, { id: ev.id, data });
@@ -135,11 +186,15 @@ export async function decide(
   if (call.name === 'computer.shell' && !run.allow.shell) return { allow: false, message: 'Blocked by Wren: terminal access is turned off on this computer (Wren → Settings → This computer).' };
   if (call.name.startsWith('browser.') && !run.allow.browser) return { allow: false, message: 'Blocked by Wren: browser use is turned off on this computer.' };
   if (call.name.startsWith('screen.') && !run.allow.screen) return { allow: false, message: 'Blocked by Wren: screen capture is turned off on this computer.' };
-  // The engine runs commands itself, outside Wren's sandbox, on every platform.
-  const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: true });
+  // On macOS the engine (and everything it runs) is inside Wren's sandbox; elsewhere it isn't.
+  const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: !hasSeatbelt() });
   if (a.blocked) return { allow: false, message: a.blocked };
   if (!needsApproval(a.risk as Risk, run.autonomy)) return { allow: true };
   let t = writer.tools.get(call.callId);
+  if (!t && /^(perm|hook)-/.test(call.callId)) {
+    const shown = writer.matchOpen(call.name, call.title, false);
+    if (shown) t = writer.tools.get(shown);
+  }
   if (!t) {
     await writer.toolStart(call.callId, call.name, call.args, call.title);
     t = writer.tools.get(call.callId)!;

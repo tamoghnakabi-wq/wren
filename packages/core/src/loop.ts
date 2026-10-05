@@ -1,4 +1,4 @@
-import { assessCall, needsApproval, type BrowserTarget } from './policy';
+import { assessCall, assessShell, needsApproval, type BrowserTarget } from './policy';
 import { describeCall } from './tools';
 import { clipMiddle } from './transcript';
 import type {
@@ -58,6 +58,10 @@ export interface ToolContext {
   callId: string;
   /** Persist progress for long-running tools (e.g. a background job handle). */
   checkpoint(background: ToolCallData['background']): Promise<void>;
+  /** Whether the user pressed Stop (tools that wait should check it now and then). */
+  isCancelled?: () => Promise<boolean>;
+  /** For browser actions: the element that was assessed; the browser refuses if it changed. */
+  expect?: ToolCallData['target'];
 }
 
 export interface ToolHost {
@@ -85,16 +89,22 @@ export interface LoopOptions {
   modelDeadline?: number;
   step: number;
   maxSteps: number;
+  /** Consecutive model-provider failures already retried in earlier ticks without any step completing. */
+  modelRetries?: number;
   signal?: AbortSignal;
   log?: (msg: string, extra?: unknown) => void;
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** Consecutive retried model failures (across ticks, with no step completed) before the run fails. */
+export const MAX_MODEL_RETRIES = 6;
+
 export type LoopOutcome =
   | { kind: 'completed'; result: string; steps: number }
   | { kind: 'waiting_approval'; approvalId: string; steps: number }
   | { kind: 'waiting_input'; question: string; steps: number }
-  | { kind: 'yield'; steps: number; wakeInMs?: number }
+  /** `retries`: set when yielding to retry a failing model provider (the new consecutive count). */
+  | { kind: 'yield'; steps: number; wakeInMs?: number; retries?: number }
   | { kind: 'cancelled'; steps: number }
   | { kind: 'paused'; steps: number }
   | { kind: 'failed'; error: string; code?: string; steps: number };
@@ -139,8 +149,9 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
         }
 
         // Found already running with no resumable handle: the worker died mid-action. Re-running
-        // anything beyond a read could repeat a side effect, so report it and let the agent check.
-        if (ev.status === 'running' && !d.background && d.risk && d.risk !== 'low' && !isBuiltin(d.name)) {
+        // anything that isn't a pure read could repeat a side effect (whatever its approval risk,
+        // e.g. a low-risk append in the cloud), so report it and let the agent check.
+        if (ev.status === 'running' && !d.background && !isBuiltin(d.name) && !replaySafe(d)) {
           await finish(o, ev, d, {
             output: 'Wren was interrupted while this action was running, so it may or may not have completed. Check the current state before trying it again.',
             isError: true,
@@ -167,11 +178,22 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
             });
             continue;
           }
-          // approved: fall through to execution
+          // Approved: make sure it still acts on the element the user saw.
+          if (BROWSER_TARGETED.has(d.name) && d.target) {
+            const now = (await o.host.riskContext?.(d.name, d.args).catch(() => undefined))?.browserTarget;
+            if (!sameTarget(d.target, now)) {
+              await finish(o, ev, d, { output: 'The page changed after this was approved, so the action was not taken. Take a new snapshot and try again.', isError: true });
+              continue;
+            }
+          }
         }
 
         if (ev.status === 'pending') {
           const ctx = (await o.host.riskContext?.(d.name, d.args).catch(() => undefined)) ?? {};
+          if (BROWSER_TARGETED.has(d.name) && ctx.browserTarget) {
+            const t = ctx.browserTarget;
+            d.target = { label: t.label, role: t.role, inputType: t.inputType, autocomplete: t.autocomplete };
+          }
           const a = assessCall(d.name, d.args, o.host.runtime, ctx);
           if (a.blocked) {
             await o.store.update(ev.id, { status: 'error', data: { ...d, risk: a.risk, endedAt: Date.now(), result: { output: a.blocked, isError: true } } });
@@ -207,7 +229,17 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
 
     const turn = await modelTurn(o, events, sleep, log);
     if ('error' in turn) {
-      if (turn.retryLater) return { kind: 'yield', steps, wakeInMs: turn.retryLater };
+      if (turn.retryLater) {
+        // Retry later with growing gaps, but not forever: the count survives across ticks and
+        // only resets once a step completes.
+        const retries = (steps > o.step ? 0 : o.modelRetries ?? 0) + 1;
+        if (retries >= MAX_MODEL_RETRIES) {
+          return { kind: 'failed', error: `The model provider kept failing (${turn.error}). Try again later or choose another model.`, code: turn.code ?? 'model_unavailable', steps };
+        }
+        const wakeInMs = Math.min(turn.retryLater * 2 ** (retries - 1), 10 * 60_000);
+        await o.store.append<StatusData>('status', { text: `The model provider had a problem (${turn.error.slice(0, 200)}). Trying again in ${Math.round(wakeInMs / 60_000)} min.`, level: 'warn', code: 'model_retry' }, 'done');
+        return { kind: 'yield', steps, wakeInMs, retries };
+      }
       return { kind: 'failed', error: turn.error, code: turn.code, steps };
     }
     steps++;
@@ -241,6 +273,32 @@ async function appendCall(o: LoopOptions, turnId: string, c: NonNullable<Message
     await o.store.append<ToolCallData>('tool', { ...data, endedAt: Date.now(), result: { output: c.argsError ?? `Unknown tool "${qualifiedName}".`, isError: true } }, 'error');
   } else {
     await o.store.append<ToolCallData>('tool', data, 'pending');
+  }
+}
+
+const BROWSER_TARGETED = new Set(['browser.click', 'browser.type', 'browser.press']);
+
+function sameTarget(a: ToolCallData['target'], b: { label?: string; role?: string; inputType?: string } | undefined) {
+  return !!b && (a?.label ?? '') === (b.label ?? '') && (a?.role ?? '') === (b.role ?? '') && (a?.inputType ?? '') === (b.inputType ?? '');
+}
+
+/** Calls that only read, so repeating one after a crash can't change anything. */
+function replaySafe(d: ToolCallData): boolean {
+  switch (d.name) {
+    case 'computer.read_file':
+    case 'computer.list_files':
+    case 'computer.shell_status':
+    case 'web.fetch':
+    case 'browser.snapshot':
+    case 'browser.screenshot':
+      return true;
+    case 'github.request':
+      return String(d.args.method ?? 'GET').toUpperCase() === 'GET';
+    case 'computer.shell':
+      // Judged as on a real computer: the cloud's "it's the agent's own VM" discount doesn't make a write repeatable.
+      return assessShell(String(d.args.command ?? ''), 'desktop').risk === 'low';
+    default:
+      return false;
   }
 }
 
@@ -311,6 +369,8 @@ async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (
       deadline: o.deadline,
       signal: o.signal,
       callId: d.callId,
+      expect: d.target,
+      isCancelled: async () => (await o.store.control()).cancel,
       checkpoint: async (background) => {
         d.background = background;
         await o.store.update(ev.id, { status: 'running', data: { ...d } });

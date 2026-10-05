@@ -29,7 +29,7 @@ function computerTools(runtime: Runtime): ToolSpec[] {
     {
       namespace: 'computer',
       name: 'shell',
-      description: `Run a shell command on ${where}. Returns stdout/stderr and exit code. Use background=true for servers or very long jobs, then poll with shell_status.`,
+      description: `Run a shell command on ${where}. Returns stdout/stderr and exit code. Use background=true for servers or very long jobs, then poll with shell_status. Background jobs belong to this task: they are stopped when the task ends or is stopped.`,
       parameters: obj(
         {
           command: str('The command line to run (bash on Linux/macOS, PowerShell on Windows).'),

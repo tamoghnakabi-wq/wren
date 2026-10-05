@@ -45,6 +45,15 @@ describe('shell risk', () => {
     expect(desk('gh api repos/o/r').risk).toBe('low');
     expect(desk('find . -name "*.log" -delete').risk).toBe('high');
   });
+  it('catches writing and executing forms of listed read commands', () => {
+    for (const c of ['xxd -r -p input.hex out.bin', 'xxd in.bin out.hex', 'uniq input.txt output.txt', 'sort -ooutput.txt input.txt', 'sort -rno out.txt in.txt', 'yq -i .a=1 file.yml', 'rg --pre ./run.sh TODO', 'fd -x rm {}', 'fd --exec-batch touch', 'date -s 2026-01-01', 'date 0101000026', 'hostname evil']) {
+      expect(desk(c).risk, c).not.toBe('low');
+    }
+    for (const c of ['xxd file.bin', 'uniq -c input.txt', 'sort -n data.txt', 'yq .a file.yml', 'rg TODO src', 'fd .ts src', 'date +%s', 'hostname']) expect(desk(c).risk, c).toBe('low');
+  });
+  it('sees every spelling of a GitHub write method', () => {
+    for (const c of ['gh api --method=DELETE repos/o/r', 'gh api -XDELETE repos/o/r', 'gh api -X=PATCH repos/o/r', 'gh api --method PUT repos/o/r/x']) expect(desk(c).risk, c).toBe('high');
+  });
   it('blocks catastrophic commands', () => {
     expect(desk('rm -rf /').blocked).toBeTruthy();
     expect(desk('rm -rf ~').blocked).toBeTruthy();
@@ -65,6 +74,13 @@ describe('approval thresholds', () => {
 });
 
 describe('browser + other tools', () => {
+  it('asks for every unsandboxed (Windows) command unless autonomous', () => {
+    expect(assessCall('computer.shell', { command: 'ls' }, 'desktop', { unsandboxed: true }).risk).toBe('high');
+    expect(assessCall('computer.shell', { command: 'type C:\\Users\\me\\notes.txt' }, 'desktop', { unsandboxed: true }).risk).toBe('high');
+    expect(assessCall('computer.shell', { command: 'ls' }, 'desktop').risk).toBe('low');
+    expect(assessCall('computer.shell', { command: 'rm -rf /' }, 'desktop', { unsandboxed: true }).blocked).toBeTruthy();
+  });
+
   it('blocks typing into password and card fields', () => {
     expect(assessCall('browser.type', { ref: 'e1', text: 'x' }, 'cloud', { browserTarget: { inputType: 'password' } }).blocked).toBeTruthy();
     expect(assessCall('browser.type', { ref: 'e1', text: 'x' }, 'cloud', { browserTarget: { autocomplete: 'cc-number' } }).blocked).toBeTruthy();
@@ -79,6 +95,10 @@ describe('browser + other tools', () => {
     expect(assessCall('browser.press', { key: 'Enter' }, 'cloud', { browserTarget: { label: 'Buy now' } }).risk).toBe('critical');
     expect(assessCall('browser.press', { key: 'Space' }, 'cloud', { browserTarget: { label: 'Delete account' } }).risk).toBe('high');
     expect(assessCall('browser.press', { key: 'Control+Enter' }, 'cloud', { browserTarget: { label: 'Send' } }).risk).toBe('high');
+    // A literal space is Space to the browser, alone or with modifiers.
+    expect(assessCall('browser.press', { key: ' ' }, 'cloud', { browserTarget: { label: 'Place order' } }).risk).toBe('critical');
+    expect(assessCall('browser.press', { key: 'Shift+ ' }, 'cloud', { browserTarget: { label: 'Place order' } }).risk).toBe('critical');
+    expect(assessCall('browser.press', { key: 'ArrowDown' }, 'cloud').risk).toBe('low');
   });
   it('fails closed when the element cannot be inspected', () => {
     expect(assessCall('browser.click', { ref: 'e9' }, 'cloud').risk).toBe('high');

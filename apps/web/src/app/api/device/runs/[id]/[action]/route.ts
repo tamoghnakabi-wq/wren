@@ -35,8 +35,9 @@ function requireLease(run: Record<string, unknown>, lease: string | null) {
   }
 }
 
-function storeFor(run: Record<string, unknown>, source?: string) {
-  return new DbRunStore({ runId: run.id as string, sessionId: run.session_id as string, agentId: run.agent_id as string, userId: run.user_id as string, agentName: run.agent_name as string, source: source ?? (run.model as ModelRef).source });
+/** Store for this run; with the lease, every write re-checks it in the same statement. */
+function storeFor(run: Record<string, unknown>, lease: string | null, source?: string) {
+  return new DbRunStore({ runId: run.id as string, sessionId: run.session_id as string, agentId: run.agent_id as string, userId: run.user_id as string, agentName: run.agent_name as string, source: source ?? (run.model as ModelRef).source, leaseId: lease ?? undefined });
 }
 
 async function renew(runId: string, leaseId: string | null) {
@@ -83,26 +84,26 @@ export const POST = route<Ctx>(async (req, ctx) => {
     }
     case 'events': {
       await renew(runId, lease);
-      return json({ events: await storeFor(run).events() });
+      return json({ events: await storeFor(run, lease).events() });
     }
     case 'append': {
       const b = z.object({ type: z.enum(['message', 'tool', 'status', 'plan', 'reasoning']), data: z.unknown(), status: z.string().max(30).optional() }).parse(raw);
       await renew(runId, lease);
-      return json(await storeFor(run).append(b.type, b.data, b.status));
+      return json(await storeFor(run, lease).append(b.type, b.data, b.status));
     }
     case 'update': {
       const b = z.object({ id: z.string().uuid(), data: z.unknown().optional(), status: z.string().max(30).optional() }).parse(raw);
-      await storeFor(run).update(b.id, { data: b.data, status: b.status });
+      await storeFor(run, lease).update(b.id, { data: b.data, status: b.status });
       await renew(runId, lease);
       return json({ ok: true });
     }
     case 'control': {
       await renew(runId, lease);
-      return json(await storeFor(run).control());
+      return json(await storeFor(run, lease).control());
     }
     case 'approval': {
       const b = z.object({ eventId: z.string().uuid(), tool: z.string(), title: z.string(), risk: z.enum(['low', 'medium', 'high', 'critical']), reason: z.string().optional(), args: z.record(z.string(), z.unknown()), localOnly: z.boolean().optional() }).parse(raw);
-      const id = await storeFor(run).createApproval(b, { localOnly: b.localOnly });
+      const id = await storeFor(run, lease).createApproval(b, { localOnly: b.localOnly });
       return json({ id });
     }
     case 'decide': {
@@ -120,22 +121,22 @@ export const POST = route<Ctx>(async (req, ctx) => {
     }
     case 'approval-state': {
       const b = z.object({ id: z.string().uuid() }).parse(raw);
-      return json({ state: await storeFor(run).approvalState(b.id) });
+      return json({ state: await storeFor(run, lease).approvalState(b.id) });
     }
     case 'usage': {
       const b = z.object({ model: z.string(), inputTokens: z.number(), outputTokens: z.number(), cachedTokens: z.number(), source: z.string().max(30).optional() }).parse(raw);
-      const s = storeFor(run, b.source);
+      const s = storeFor(run, lease, b.source);
       await s.recordUsage(b, b.model);
       return json({ ok: true });
     }
     case 'notify': {
       const b = z.object({ title: z.string().max(200), body: z.string().max(2000), kind: z.string().max(30) }).parse(raw);
-      await storeFor(run).notify(b.title, b.body, b.kind);
+      await storeFor(run, lease).notify(b.title, b.body, b.kind);
       return json({ ok: true });
     }
     case 'memory': {
       const b = z.object({ op: z.enum(['add', 'remove']), value: z.string().max(600) }).parse(raw);
-      const s = storeFor(run);
+      const s = storeFor(run, lease);
       return json(b.op === 'add' ? { id: await s.memory.add(b.value) } : { ok: await s.memory.remove(b.value) });
     }
     case 'artifact': {
@@ -148,9 +149,7 @@ export const POST = route<Ctx>(async (req, ctx) => {
     }
     case 'live': {
       const b = z.object({ image: z.string().max(400_000), url: z.string().max(2000).optional(), title: z.string().max(300).optional() }).parse(raw);
-      await sql`insert into public.run_live (run_id, user_id, session_id, image, url, title, updated_at)
-        values (${runId}, ${run.user_id}, ${run.session_id}, ${b.image}, ${b.url ?? null}, ${b.title ?? null}, now())
-        on conflict (run_id) do update set image = excluded.image, url = excluded.url, title = excluded.title, updated_at = now()`;
+      await storeFor(run, lease).live({ image: b.image, url: b.url, title: b.title });
       return json({ ok: true });
     }
     case 'mcp': {
@@ -224,7 +223,7 @@ async function modelProxy(req: Request, run: Record<string, unknown>): Promise<R
     return bytes ? { mime: a.mime, data: bytes.toString('base64') } : null;
   };
   const client = createModelClient({ source: b.source, credential, loadImage });
-  const events = await storeFor(run).events();
+  const events = await storeFor(run, null).events();
   const enc = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {

@@ -78,16 +78,31 @@ export interface Policy {
   launchAtLogin: boolean;
 }
 
-export function defaultPolicy(): Policy {
+function defaultFolder(): string {
   const workspace = join(homedir(), 'Wren');
   mkdirSync(workspace, { recursive: true });
-  return { folders: [workspace], shell: true, browser: true, screen: false, remoteApprovals: true, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false };
+  return workspace;
 }
 
+/** Read on every agent action, so changes in Settings apply to runs already under way. */
 export function loadPolicy(): Policy {
-  const p = { ...defaultPolicy(), ...readJson<Partial<Policy>>('policy.json', {}) };
-  if (!p.folders.length) p.folders = defaultPolicy().folders;
-  return p;
+  const saved = readJson<Partial<Policy>>('policy.json', {});
+  return {
+    shell: true,
+    browser: true,
+    screen: false,
+    remoteApprovals: true,
+    localModelUrl: 'http://127.0.0.1:1234/v1',
+    launchAtLogin: false,
+    ...saved,
+    // Only a policy that never listed folders starts with ~/Wren; an empty list means none.
+    folders: Array.isArray(saved.folders) ? saved.folders : [defaultFolder()],
+  };
+}
+
+/** True when `next` takes away something `prev` allowed. */
+export function permissionsReduced(prev: Policy, next: Policy): boolean {
+  return (['shell', 'browser', 'screen', 'remoteApprovals'] as const).some((k) => prev[k] && !next[k]) || prev.folders.some((f) => !next.folders.includes(f));
 }
 
 export function savePolicy(p: Policy) {

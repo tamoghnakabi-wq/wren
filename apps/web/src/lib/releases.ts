@@ -1,3 +1,4 @@
+import { compareVersions } from '@wren/core';
 import { env } from './env';
 
 // Desktop releases live on GitHub Releases of the public source repo. Each
@@ -44,7 +45,11 @@ export async function latestRelease(): Promise<Release | null> {
       html_url: string;
       assets: { name: string; browser_download_url: string; size: number }[];
     }[];
-    const r = list.find((x) => !x.draft && x.assets.some((a) => a.name === 'wren-update.json'));
+    // Stable channel only: GitHub prereleases (and tags that aren't plain x.y.z) are never offered,
+    // and the highest version wins rather than the most recently published.
+    const r = list
+      .filter((x) => !x.draft && !x.prerelease && /^v?\d+\.\d+\.\d+$/.test(x.tag_name) && x.assets.some((a) => a.name === 'wren-update.json'))
+      .sort((a, b) => compareVersions(b.tag_name, a.tag_name))[0];
     if (!r) return null;
     const find = (re: RegExp) => {
       const a = r.assets.find((x) => re.test(x.name));
@@ -72,15 +77,4 @@ export async function updateManifest(r: Release): Promise<{ version: string; not
   return res.json();
 }
 
-export function compareVersions(a: string, b: string): number {
-  const pa = a.split(/[.-]/).map((x) => (/^\d+$/.test(x) ? Number(x) : x));
-  const pb = b.split(/[.-]/).map((x) => (/^\d+$/.test(x) ? Number(x) : x));
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] ?? 0;
-    const y = pb[i] ?? 0;
-    if (x === y) continue;
-    if (typeof x === 'number' && typeof y === 'number') return x - y;
-    return String(x) < String(y) ? -1 : 1;
-  }
-  return 0;
-}
+export { compareVersions } from '@wren/core';

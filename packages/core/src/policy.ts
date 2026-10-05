@@ -39,7 +39,7 @@ const READ_ONLY = new Set([
 const VERSION_ONLY = /^(node|npm|npx|pnpm|yarn|bun|python3?|pip3?|go|cargo|rustc|java|ruby|git|gh|docker|deno)\s+(-v|--version|version)\s*$/i;
 
 const GIT_READ = /^git\s+(status|log|diff|show|branch(\s+(-a|-r|--list|-v+))?\s*$|remote(\s+-v)?\s*$|rev-parse|ls-files|blame|describe|tag(\s+-l)?\s*$|config\s+--get|shortlog|reflog\s*$|stash\s+list)/i;
-const GH_READ = /^gh\s+(pr|issue|repo|run|release|workflow)\s+(list|view|status|diff|checks)\b|^gh\s+(auth\s+status|api\s+(?!.*((-X|--method)\s*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))))/i;
+const GH_READ = /^gh\s+(pr|issue|repo|run|release|workflow)\s+(list|view|status|diff|checks)\b|^gh\s+(auth\s+status|api\s+(?!.*((-X|--method)[\s=]*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))))/i;
 /** Read commands that can still write a file through an option. */
 const WRITE_OPTION = /\s(--output(=|\s)|-o\s|--output-directory)/;
 
@@ -68,7 +68,7 @@ const RULES: Rule[] = [
   // high: destructive or externally visible
   { re: /\brm\s|\brmdir\b|\bunlink\b|Remove-Item|\bdel\s|\berase\s|\bshred\b|\btruncate\s|\bfind\b[^|;&]*\s-delete\b/i, risk: 'high', reason: 'deletes files' },
   { re: /\bgit\s+(push|reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s|branch\s+-D|rebase|filter-branch|filter-repo|update-ref\s+-d)/i, risk: 'high', reason: 'rewrites or publishes git history' },
-  { re: /\bgh\s+(pr\s+(create|merge|close|comment|review|edit)|issue\s+(create|close|comment|edit|delete)|repo\s+(create|delete|archive|edit|rename)|release\s+(create|delete|upload)|api\s+.*((-X|--method)\s*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))|secret|workflow\s+run)/i, risk: 'high', reason: 'changes things on GitHub' },
+  { re: /\bgh\s+(pr\s+(create|merge|close|comment|review|edit)|issue\s+(create|close|comment|edit|delete)|repo\s+(create|delete|archive|edit|rename)|release\s+(create|delete|upload)|api\s+.*((-X|--method)[\s=]*(POST|PUT|PATCH|DELETE)|\s(-f|-F|--field|--raw-field|--input)(\s|=))|secret|workflow\s+run)/i, risk: 'high', reason: 'changes things on GitHub' },
   { re: /\b(npm|pnpm|yarn)\s+publish|\bcargo\s+publish|\btwine\s+upload|\bgem\s+push|\bvercel\s+(deploy\s+.*--prod|--prod|promote|remove|rm)|\bnetlify\s+deploy\s+--prod|\bfly\s+deploy|\bterraform\s+(apply|destroy)|\bkubectl\s+(apply|delete)|\bheroku\b/i, risk: 'high', reason: 'publishes or deploys' },
   { re: /\b(curl|wget|http|Invoke-WebRequest|Invoke-RestMethod)\b[^|]*(-X\s*(POST|PUT|PATCH|DELETE)|--data|-d\s|--upload-file|-F\s|-T\s|-Method\s+(Post|Put|Patch|Delete))/i, risk: 'high', reason: 'sends data to a server' },
   { re: new RegExp(`${CMD}(ssh|scp|rsync|sftp|ftp|telnet|nc|ncat|socat)\\s`), risk: 'high', reason: 'connects to another machine' },
@@ -99,6 +99,42 @@ function writesThroughRedirect(seg: string): boolean {
   return false;
 }
 
+/** Rough shell words (quotes kept together), without the command itself. */
+function argWords(seg: string): string[] {
+  return (seg.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).slice(1);
+}
+
+/**
+ * Commands on the read-only list that still have writing or executing forms:
+ * output files given as options or extra positional arguments, in-place edits,
+ * and options that run other programs.
+ */
+function readOnlyForm(cmd: string, seg: string): boolean {
+  const words = argWords(seg);
+  const positional = words.filter((w) => !w.startsWith('-'));
+  switch (cmd) {
+    case 'sort':
+    case 'tree':
+      return !words.some((w) => /^-o|^--output/.test(w) || (cmd === 'sort' && /^-[a-zA-Z]*o/.test(w)));
+    case 'uniq':
+      return positional.length <= 1; // uniq IN OUT writes OUT
+    case 'xxd':
+      return !words.some((w) => /^-r|^-revert/.test(w)) && positional.length <= 1;
+    case 'yq':
+      return !words.some((w) => /^-[a-zA-Z]*i|^--inplace/.test(w));
+    case 'rg':
+      return !words.some((w) => /^--pre(=|$)/.test(w));
+    case 'fd':
+      return !words.some((w) => /^-[a-zA-Z]*[xX]|^--exec/.test(w));
+    case 'date':
+      return positional.every((w) => w.startsWith('+')) && !words.some((w) => /^-[a-zA-Z]*s|^--set/.test(w));
+    case 'hostname':
+      return positional.length === 0;
+    default:
+      return true;
+  }
+}
+
 function segmentIsReadOnly(seg: string): boolean {
   if (writesThroughRedirect(seg)) return false;
   if (VERSION_ONLY.test(seg) || GH_READ.test(seg)) return true;
@@ -106,7 +142,7 @@ function segmentIsReadOnly(seg: string): boolean {
   const first = seg.split(/\s+/)[0].toLowerCase().replace(/^.*[\\/]/, '');
   if (!READ_ONLY.has(first)) return false;
   if (first === 'find' && /\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\b/.test(seg)) return false;
-  if ((first === 'sort' || first === 'uniq' || first === 'tree') && WRITE_OPTION.test(seg)) return false;
+  if (!readOnlyForm(first, seg)) return false;
   return true;
 }
 
@@ -200,8 +236,11 @@ export function assessCall(
   switch (name) {
     case 'computer.shell': {
       const a = assessShell(s('command'), runtime);
-      // Without an OS sandbox (Windows) anything that can change files asks in balanced mode.
-      if (context.unsandboxed && a.risk === 'medium') return { risk: 'high', reason: 'runs a program on your computer (not sandboxed on Windows)' };
+      // Without an OS sandbox (Windows) even a "read-only" command could read any of the user's
+      // files, not just the allowed folders, so every command asks unless the agent is autonomous.
+      if (context.unsandboxed && !a.blocked && riskRank(a.risk) < riskRank('high')) {
+        return { risk: 'high', reason: 'runs a command without a sandbox (Windows), so it could read or change any of your files' };
+      }
       return a;
     }
     case 'computer.write_file':
@@ -261,10 +300,14 @@ export function assessCall(
   }
 }
 
-/** Keys that can click, submit or toggle the focused element (alone or with modifiers). */
+/**
+ * Keys that can click, submit or toggle the focused element (alone or with
+ * modifiers). A literal " " is Space; "" means the controller's default, Enter.
+ */
 export function isActivatingKey(key: string): boolean {
-  const last = key.split('+').pop()!.trim();
-  return key === '' || /^(enter|return|numpadenter| |space|spacebar)$/i.test(last) || /^(enter|return)$/i.test(key);
+  if (key === '' || key === ' ' || key.endsWith('+ ') || key.endsWith('+')) return true;
+  const last = key.split('+').pop()!.trim().toLowerCase();
+  return /^(enter|return|numpadenter|space|spacebar)$/.test(last);
 }
 
 export { bump as bumpRisk };

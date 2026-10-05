@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Archive, Cloud, Download, FileText, Laptop, MoreHorizontal, Pause, Play, Square, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { AgentAvatar } from '@/components/agent-avatar';
 import type { Mood } from '@/lib/characters';
 import { Composer } from '@/components/app/composer';
@@ -13,8 +14,12 @@ import { PlanCard, Timeline } from '@/components/app/timeline';
 import { Button, cx, formatBytes, formatTokens, Spinner, timeAgo, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
+import { supabase } from '@/lib/client/supabase';
 import { modelLabel } from '@/lib/client/sources';
 import type { Artifact, EventRow, PlanItem, Run, RunLive, Session } from '@/lib/client/types';
+
+/** Events per page of task history. */
+const PAGE = 500;
 
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
@@ -22,10 +27,34 @@ export default function SessionPage() {
   const toast = useToast();
   const { agentById, approvals, devices } = useApp();
   const session = useLive<Session>({ table: 'sessions', eq: { id }, realtimeFilter: { column: 'id', value: id } });
-  // Newest events first so long sessions load their recent activity (the API returns at most 1000 rows),
-  // then shown oldest-first.
-  const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: 1000, realtimeFilter: { column: 'session_id', value: id } });
-  const events = useMemo(() => ({ ...eventsLive, rows: [...eventsLive.rows].sort((a, b) => a.seq - b.seq) }), [eventsLive]);
+  // The newest events stay live; older history loads a page at a time on request (by seq).
+  const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: PAGE, realtimeFilter: { column: 'session_id', value: id } });
+  const [older, setOlder] = useState<{ session: string; rows: EventRow[]; more: boolean }>({ session: id, rows: [], more: true });
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const olderRows = older.session === id ? older.rows : [];
+  const events = useMemo(() => {
+    const byId = new Map<string, EventRow>();
+    for (const e of olderRows) byId.set(e.id, e);
+    for (const e of eventsLive.rows) byId.set(e.id, e);
+    return { ...eventsLive, rows: [...byId.values()].sort((a, b) => a.seq - b.seq) };
+  }, [eventsLive, olderRows]);
+  const hasOlder = !eventsLive.loading && eventsLive.rows.length >= PAGE && (older.session !== id || older.more);
+  // The current plan is fetched on its own, so it shows even when it is older than the loaded history.
+  const latestPlan = useLive<EventRow>({ table: 'events', eq: { session_id: id, type: 'plan' }, order: { column: 'seq', ascending: false }, limit: 1, realtimeFilter: { column: 'session_id', value: id } });
+  const loadOlder = async () => {
+    const first = events.rows[0];
+    if (!first || loadingOlder) return;
+    setLoadingOlder(true);
+    const { data, error } = await supabase().from('events').select('*').eq('session_id', id).lt('seq', first.seq).order('seq', { ascending: false }).limit(PAGE);
+    setLoadingOlder(false);
+    if (error) return toast(error.message, 'error');
+    const rows = (data ?? []) as EventRow[];
+    // Earlier history goes above: keep what the user was looking at in place.
+    const el = scroller.current;
+    const fromBottom = el ? el.scrollHeight - el.scrollTop : 0;
+    flushSync(() => setOlder((o) => ({ session: id, rows: [...rows, ...(o.session === id ? o.rows : [])], more: rows.length === PAGE })));
+    if (el) el.scrollTop = el.scrollHeight - fromBottom;
+  };
   const runs = useLive<Run>({ table: 'runs', eq: { session_id: id }, order: { column: 'created_at' }, limit: 20, realtimeFilter: { column: 'session_id', value: id } });
   const live = useLive<RunLive>({ table: 'run_live', eq: { session_id: id }, pk: 'run_id', realtimeFilter: { column: 'session_id', value: id } });
   const files = useLive<Artifact>({ table: 'artifacts', eq: { session_id: id }, order: { column: 'created_at' }, realtimeFilter: { column: 'session_id', value: id } });
@@ -44,9 +73,9 @@ export default function SessionPage() {
   const sessionApprovals = approvals.filter((a) => a.session_id === id);
   const working = !!run && ['queued', 'running'].includes(run.status);
   const plan = useMemo(() => {
-    const p = [...events.rows].reverse().find((e) => e.type === 'plan');
+    const p = [...latestPlan.rows].sort((a, b) => b.seq - a.seq)[0];
     return (p?.data.items as PlanItem[] | undefined) ?? null;
-  }, [events.rows]);
+  }, [latestPlan.rows]);
   const liveShot = live.rows.find((l) => l.run_id === run?.id) ?? live.rows[0];
   const shareable = files.rows.filter((f) => f.kind !== 'screenshot');
   const usage = runs.rows.reduce((n, r) => n + (r.usage?.input_tokens ?? 0) + (r.usage?.output_tokens ?? 0), 0);
@@ -70,6 +99,7 @@ export default function SessionPage() {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [events.rows, sessionApprovals.length]);
+
 
   if (session.loading) return <Spinner className="mx-auto mt-32" />;
   if (!s)
@@ -239,6 +269,13 @@ export default function SessionPage() {
             className="flex-1 overflow-y-auto px-3 py-6 scrollbar-thin sm:px-6"
           >
             <div className="mx-auto max-w-3xl">
+              {hasOlder && (
+                <div className="mb-6 text-center">
+                  <Button variant="secondary" size="sm" onClick={loadOlder} loading={loadingOlder}>
+                    Load earlier activity
+                  </Button>
+                </div>
+              )}
               {events.loading ? <Spinner className="mx-auto" /> : <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} />}
               {run?.status === 'failed' && run.error && !events.rows.some((e) => e.type === 'status' && e.data.text === run.error) && <p className="mt-4 text-center text-sm text-danger">{run.error}</p>}
             </div>

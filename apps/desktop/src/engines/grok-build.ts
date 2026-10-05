@@ -1,10 +1,9 @@
-import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import readline from 'node:readline';
 import type { LoopOutcome } from '@wren/core';
-import { decide, engineEnv, findCli, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
+import { decide, findCli, spawnEngine, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
 
 // Grok Build engine: drives xAI's official `grok` CLI through its documented
 // Agent Client Protocol mode (`grok agent stdio`), authenticated with the
@@ -75,8 +74,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   const args = ['--no-auto-update', 'agent'];
   if (run.model && run.model !== 'default') args.push('-m', run.model);
   args.push('--always-approve', '--plugin-dir', pluginDir, 'stdio');
-  const env = { ...engineEnv(), ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token };
-  const proc = spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token });
   let stderr = '';
   proc.stderr.on('data', (c) => (stderr = (stderr + c).slice(-4000)));
   const rl = readline.createInterface({ input: proc.stdout });

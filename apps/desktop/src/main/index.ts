@@ -5,7 +5,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
-import { APP_ORIGIN, APP_URL, loadDevice, loadPolicy, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
+import { APP_ORIGIN, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
 import { closeBrowser, killAllJobs } from './host';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
@@ -304,6 +304,7 @@ function registerIpc() {
     if (typeof next.localModelUrl !== 'string' || !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(next.localModelUrl)) next.localModelUrl = cur.localModelUrl;
     savePolicy(next);
     app.setLoginItemSettings({ openAtLogin: !!next.launchAtLogin });
+    if (permissionsReduced(cur, next)) runner.permissionsReduced();
     void runner.tick();
     return next;
   });

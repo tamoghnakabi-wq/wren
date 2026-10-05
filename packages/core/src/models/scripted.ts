@@ -1,10 +1,11 @@
-import type { MessageData, ModelClient, ModelRequest, ModelStreamEvent, ModelTurn } from '../types';
+import { ModelError, type MessageData, type ModelClient, type ModelRequest, type ModelStreamEvent, type ModelTurn } from '../types';
 
 // Deterministic model for automated end-to-end tests. The last user message
 // carries a script:  #script [{"call":"computer.shell","args":{...}}, {"say":"done"}]
 // Each model turn performs the next step; plain text ends the run.
 
-type Step = { call?: string; args?: Record<string, unknown>; calls?: { call: string; args?: Record<string, unknown> }[]; say?: string; delayMs?: number };
+// {"fail":"…"} simulates a provider outage (a retryable error) at that step.
+type Step = { call?: string; args?: Record<string, unknown>; calls?: { call: string; args?: Record<string, unknown> }[]; say?: string; delayMs?: number; fail?: string };
 
 export class ScriptedModel implements ModelClient {
   readonly label = 'test';
@@ -30,6 +31,7 @@ export class ScriptedModel implements ModelClient {
     const done = req.events.slice(scriptAt + 1).filter((e) => e.type === 'message' && (e.data as MessageData).role === 'assistant' && e.status === 'done').length;
     const step = steps[Math.min(done, steps.length - 1)] ?? { say: 'Done.' };
     if (step.delayMs) await new Promise((r) => setTimeout(r, Math.min(step.delayMs!, 20000)));
+    if (step.fail) throw new ModelError(`Scripted failure: ${step.fail}`, 503, 'test_failure', true);
     const calls = step.calls ?? (step.call ? [{ call: step.call, args: step.args }] : []);
     const text = step.say ?? '';
     for (const ch of text.match(/[\s\S]{1,12}/g) ?? []) onEvent({ type: 'text', delta: ch });

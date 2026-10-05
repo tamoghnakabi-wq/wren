@@ -12,6 +12,11 @@ import { env } from '../env';
 // Sandbox (one per agent); the model loop and every credential stay in our
 // functions, never inside the VM. web.fetch and github.request run here with
 // guards; everything else is a command or file operation in the sandbox.
+//
+// The browser runs in a second VM of its own. Its control endpoint is only
+// reachable from inside that VM, which agent commands never run in, so a shell
+// command can't drive the browser around the approval checks (or read its
+// cookies); only this host's browser tools can.
 
 export const WORKSPACE = '/vercel/sandbox';
 const JOB_DIR = '$HOME/.wren/jobs';
@@ -20,28 +25,52 @@ const JOB_DIR = '$HOME/.wren/jobs';
 const DAEMON_VERSION = createHash('sha256').update(BROWSER_DAEMON_TS).digest('hex').slice(0, 16);
 const HEALTH = `[ "$(cat "$HOME/.wren/browser.version" 2>/dev/null)" = "${DAEMON_VERSION}" ] && curl -s -m 2 http://127.0.0.1:9333/health`;
 
+// The command runs in a session of its own; its id ($id.sid) is what stopping a job kills,
+// so everything the command started goes with it. $id.run names the run that owns the job.
 const RUN_SH = `#!/bin/bash
-# usage: run.sh <id> <cwd> <command>
+# usage: run.sh <id> <cwd> <command> [run id]
 id="$1"; cwd="$2"; cmd="$3"
 dir="$HOME/.wren/jobs"; mkdir -p "$dir"
 cd "$cwd" 2>/dev/null || cd ${WORKSPACE}
 echo $$ > "$dir/$id.pid"
-setsid bash -lc "$cmd" > "$dir/$id.log" 2>&1 < /dev/null
+[ -n "$4" ] && echo "$4" > "$dir/$id.run"
+setsid -w bash -c 'echo $$ > "$0"; exec bash -lc "$1"' "$dir/$id.sid" "$cmd" > "$dir/$id.log" 2>&1 < /dev/null
 echo $? > "$dir/$id.exit"
 `;
 
+/** Shell function `stopjob <id>`: ends a job's whole session, politely first. */
+const STOP_JOB = `stopjob() { d="$HOME/.wren/jobs"; s=$(cat "$d/$1.sid" 2>/dev/null); p=$(cat "$d/$1.pid" 2>/dev/null)
+  [ -n "$s" ] && { kill -TERM -- -"$s"; pkill -TERM -s "$s"; } 2>/dev/null; [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
+  sleep 1; [ -n "$s" ] && { kill -KILL -- -"$s"; pkill -KILL -s "$s"; } 2>/dev/null; true; }`;
+
+// One-time browser install in the browser VM. It takes minutes on a new VM, so it runs in the
+// background (a long silent command would outlive its connection) and is polled with
+// BROWSER_STATE, which prints ok | running | failed (+ log tail) and (re)starts it when needed.
 const BROWSER_SETUP = `set -e
 mkdir -p "$HOME/.wren" && cd "$HOME/.wren"
 if [ ! -d node_modules/playwright ]; then
   echo '{"type":"module","private":true}' > package.json
-  npm install --silent --no-audit --no-fund playwright@1.63.0 >/dev/null 2>&1
+  npm install --no-audit --no-fund playwright@1.63.0
 fi
 if [ ! -f .chromium-ok ]; then
-  sudo -E env "PATH=$PATH" npx --yes playwright@1.63.0 install-deps chromium >/dev/null 2>&1 || true
-  npx --yes playwright@1.63.0 install chromium >/dev/null 2>&1
+  sudo -E env "PATH=$PATH" npx --yes playwright@1.63.0 install-deps chromium || true
+  npx --yes playwright@1.63.0 install chromium
   touch .chromium-ok
 fi
 `;
+const BROWSER_STATE = `cd "$HOME/.wren"
+if [ -f .chromium-ok ] && [ -d node_modules/playwright ]; then echo ok; exit 0; fi
+p=$(cat setup.pid 2>/dev/null); if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo running; exit 0; fi
+if [ -f setup.exit ]; then e=$(cat setup.exit); rm -f setup.exit; if [ "$e" != 0 ]; then echo failed; tail -c 600 setup.log; exit 0; fi; fi
+(setsid nohup bash -c 'echo $$ > "$HOME/.wren/setup.pid"; bash "$HOME/.wren/setup.sh" > "$HOME/.wren/setup.log" 2>&1; echo $? > "$HOME/.wren/setup.exit"' >/dev/null 2>&1 < /dev/null &)
+echo running`;
+
+const STOP_BROWSER = `pkill -f "node [b]rowser.ts" 2>/dev/null
+for i in $(seq 1 20); do pgrep -f "node [b]rowser.ts" >/dev/null || break; sleep 0.25; done
+pkill -9 -f "node [b]rowser.ts" 2>/dev/null; pkill -9 -f "[m]s-playwright/chromium" 2>/dev/null
+rm -f "$HOME/.wren/profile/Singleton"*; mkdir -p "$HOME/.wren"; echo "$HOME"`;
+
+class BrowserNotReady extends Error {}
 
 export interface SandboxHostOptions {
   agentId: string;
@@ -57,6 +86,7 @@ export interface SandboxHostOptions {
 export class SandboxHost implements ToolHost {
   readonly runtime = 'cloud' as const;
   private sandbox: Sandbox | null = null;
+  private browserBox: Sandbox | null = null;
   private ready = false;
   private browserReady = false;
   private home = '/home/ubuntu';
@@ -69,36 +99,82 @@ export class SandboxHost implements ToolHost {
     return `wren-agent-${agentId}`;
   }
 
-  async computer(): Promise<Sandbox> {
-    if (this.sandbox && this.ready) return this.sandbox;
-    this.sandbox = await Sandbox.getOrCreate({
-      name: SandboxHost.sandboxName(this.o.agentId),
+  static browserName(agentId: string) {
+    return `wren-browser-${agentId}`;
+  }
+
+  private static vm(name: string, agentId: string, role: string) {
+    return Sandbox.getOrCreate({
+      name,
       image: 'vercel/sandbox/universal',
       region: env.sandboxRegion,
       timeout: 45 * 60 * 1000,
       resources: { vcpus: 2 },
       keepLastSnapshots: { count: 1, deleteEvicted: true },
       snapshotExpiration: 30 * 24 * 60 * 60 * 1000,
-      tags: { app: 'wren', agent: this.o.agentId.slice(0, 32) },
+      tags: { app: 'wren', agent: agentId.slice(0, 32), role },
     });
+  }
+
+  /** Delete an agent's computers and their snapshots (agent or account deletion). */
+  static async deleteComputers(agentId: string) {
+    for (const name of [SandboxHost.sandboxName(agentId), SandboxHost.browserName(agentId)]) {
+      try {
+        const sb = await Sandbox.get({ name, resume: false });
+        await sb.delete();
+      } catch {
+        /* never created */
+      }
+    }
+  }
+
+  /** Stop the shell jobs a run started (foreground or background), leaving other runs' jobs alone. */
+  static async stopRunJobs(agentId: string, runId: string) {
+    try {
+      const sb = await Sandbox.get({ name: SandboxHost.sandboxName(agentId), resume: false });
+      if (sb.status !== 'running') return; // a stopped computer runs nothing
+      await sb.runCommand({
+        cmd: 'bash',
+        args: ['-lc', `${STOP_JOB}\nfor f in "$HOME"/.wren/jobs/*.run; do [ -f "$f" ] && [ "$(cat "$f")" = ${shq(runId)} ] && stopjob "$(basename "$f" .run)"; done; true`],
+      });
+    } catch {
+      /* never created, or gone */
+    }
+  }
+
+  async computer(): Promise<Sandbox> {
+    if (this.sandbox && this.ready) return this.sandbox;
+    this.sandbox = await SandboxHost.vm(SandboxHost.sandboxName(this.o.agentId), this.o.agentId, 'computer');
     // Idempotent per session: helper scripts live in $HOME/.wren.
     const setup = await this.sandbox.runCommand({
       cmd: 'bash',
-      args: ['-lc', `mkdir -p ${WORKSPACE} "$HOME/.wren/jobs" && cat > "$HOME/.wren/run.sh" <<'WREN_EOF'\n${RUN_SH}WREN_EOF\nchmod +x "$HOME/.wren/run.sh" && echo "$HOME"`],
+      // Older versions ran the browser in this VM: stop it and drop its profile (cookies) for good.
+      args: ['-lc', `pkill -f "node [b]rowser.ts" 2>/dev/null; rm -rf "$HOME/.wren/profile" "$HOME/.wren/browser.ts" "$HOME/.wren/browser.version"; mkdir -p ${WORKSPACE} "$HOME/.wren/jobs" && cat > "$HOME/.wren/run.sh" <<'WREN_EOF'\n${RUN_SH}WREN_EOF\nchmod +x "$HOME/.wren/run.sh" && echo "$HOME"`],
     });
     this.home = (await setup.stdout()).trim().split('\n').pop() || this.home;
     this.ready = true;
     return this.sandbox;
   }
 
-  /** Stop the agent's computer (its filesystem is snapshotted automatically). */
+  private async browserVm(): Promise<Sandbox> {
+    if (!this.browserBox) this.browserBox = await SandboxHost.vm(SandboxHost.browserName(this.o.agentId), this.o.agentId, 'browser');
+    return this.browserBox;
+  }
+
+  /** Stop the agent's computer and browser (their filesystems are snapshotted automatically). */
   async stop() {
-    try {
-      const sb = this.sandbox ?? (await Sandbox.get({ name: SandboxHost.sandboxName(this.o.agentId), resume: false }));
-      if (sb.status === 'running' || sb.status === 'pending') await sb.stop();
-    } catch {
-      // never created, already stopped, or gone
-    }
+    const names = [SandboxHost.sandboxName(this.o.agentId), SandboxHost.browserName(this.o.agentId)];
+    const held = [this.sandbox, this.browserBox];
+    await Promise.all(
+      names.map(async (name, i) => {
+        try {
+          const sb = held[i] ?? (await Sandbox.get({ name, resume: false }));
+          if (sb.status === 'running' || sb.status === 'pending') await sb.stop();
+        } catch {
+          // never created, already stopped, or gone
+        }
+      }),
+    );
   }
 
   async riskContext(name: string, args: Record<string, unknown>) {
@@ -110,7 +186,7 @@ export class SandboxHost implements ToolHost {
     if (name === 'browser.click' || name === 'browser.type' || name === 'browser.press') {
       // A fresh tick doesn't know yet whether the browser from an earlier tick is still up.
       if (!this.browserReady) {
-        const sb = await this.computer();
+        const sb = await this.browserVm();
         const health = await sb.runCommand({ cmd: 'bash', args: ['-lc', HEALTH] });
         this.browserReady = (await health.stdout()).trim() === 'ok';
       }
@@ -186,7 +262,7 @@ export class SandboxHost implements ToolHost {
         return { output: `Shared "${a.name}" (${a.size} bytes) with the user.`, artifacts: [{ id: a.id, name: a.name }] };
       }
     }
-    if (name.startsWith('browser.')) return this.browser(name.slice(8), args);
+    if (name.startsWith('browser.')) return this.browser(name.slice(8), args, ctx);
     if (name.startsWith('mcp_')) {
       const ns = name.slice(0, name.indexOf('.'));
       const server = this.o.mcp?.get(ns);
@@ -208,22 +284,35 @@ export class SandboxHost implements ToolHost {
       id = randomUUID().slice(0, 8);
       // No credentials go into the VM: GitHub access is only through the github.request tool,
       // which is risk-assessed and runs here.
-      await sb.runCommand({ cmd: 'bash', args: ['-lc', `nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} >/dev/null 2>&1 &`] });
+      await sb.runCommand({ cmd: 'bash', args: ['-lc', `setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`] });
       if (background) return { output: `Started background job ${id}. Check it with computer.shell_status.`, meta: { job: id } };
       await ctx.checkpoint({ kind: 'job', handle: id, startedAt: started });
     }
     const limit = Math.min(Math.max(timeoutSec, 5), 1800) * 1000;
+    let checked = Date.now();
     for (;;) {
       const st = await this.readJob(id);
       if (st.exit !== null) return { output: formatJob(st.exit, st.log), isError: st.exit !== 0 };
       if (Date.now() - started > limit) {
-        await sb.runCommand({ cmd: 'bash', args: ['-lc', `kill -- -$(cat ${JOB_DIR}/${id}.pid) 2>/dev/null; kill $(cat ${JOB_DIR}/${id}.pid) 2>/dev/null; true`] });
+        await this.stopJob(id);
         return { output: `Timed out after ${Math.round(limit / 1000)}s (job ${id} was stopped).\n${tail(st.log)}`, isError: true };
+      }
+      if (Date.now() - checked > 5000) {
+        checked = Date.now();
+        if (await ctx.isCancelled?.()) {
+          await this.stopJob(id);
+          return { output: `Stopped by the user (job ${id} was stopped).\n${tail(st.log)}`, isError: true };
+        }
       }
       if (Date.now() > ctx.deadline - 5000) return { yield: true };
       if (!st.alive) return { output: `The command stopped unexpectedly (the computer may have restarted).\n${tail(st.log)}`, isError: true };
       await new Promise((r) => setTimeout(r, 1200));
     }
+  }
+
+  private async stopJob(id: string) {
+    const sb = await this.computer();
+    await sb.runCommand({ cmd: 'bash', args: ['-lc', `${STOP_JOB}\nstopjob ${shq(id)}`] });
   }
 
   private async readJob(id: string): Promise<{ exit: number | null; log: string; alive: boolean }> {
@@ -241,10 +330,15 @@ export class SandboxHost implements ToolHost {
   private async jobStatus(id: string, waitSec: number, ctx: ToolContext): Promise<ToolResult> {
     if (!/^[a-f0-9-]{4,40}$/i.test(id)) return { output: 'Unknown job id.', isError: true };
     const until = Math.min(Date.now() + waitSec * 1000, ctx.deadline - 8000);
+    let checked = Date.now();
     for (;;) {
       const st = await this.readJob(id);
       if (st.exit !== null) return { output: `Job ${id} finished.\n${formatJob(st.exit, st.log)}` };
       if (Date.now() >= until) return { output: `Job ${id} is ${st.alive ? 'still running' : 'not running (it may have been interrupted)'}.\n${tail(st.log)}` };
+      if (Date.now() - checked > 5000) {
+        checked = Date.now();
+        if (await ctx.isCancelled?.()) return { output: 'Stopped by the user.', isError: true };
+      }
       await new Promise((r) => setTimeout(r, 1500));
     }
   }
@@ -264,23 +358,35 @@ export class SandboxHost implements ToolHost {
 
   // ------------------------------------------------------------ browser
 
-  private async ensureBrowser() {
+  private async ensureBrowser(deadline: number) {
     if (this.browserReady) return;
-    const sb = await this.computer();
+    const sb = await this.browserVm();
     const health = await sb.runCommand({ cmd: 'bash', args: ['-lc', HEALTH] });
     if ((await health.stdout()).trim() === 'ok') {
       this.browserReady = true;
       return;
     }
-    // Not running, or an older daemon: (re)start the current one.
-    await sb.runCommand({ cmd: 'bash', args: ['-lc', 'pkill -f "node browser.ts" 2>/dev/null; sleep 0.5; true'] });
-    const setup = await sb.runCommand({ cmd: 'bash', args: ['-lc', BROWSER_SETUP] });
-    if (setup.exitCode !== 0) throw new Error(`Could not set up the browser: ${(await setup.output('both')).slice(-800)}`);
+    // Not running, or an older daemon: (re)start the current one. ("[b]rowser" so pkill doesn't
+    // match, and kill, the shell running it.)
+    // The old daemon and its Chromium must be gone (port and profile free), and a profile restored
+    // from a snapshot can carry a stale "in use" lock that makes Chromium quit at once.
+    const prep = await sb.runCommand({ cmd: 'bash', args: ['-lc', STOP_BROWSER] });
+    const home = (await prep.stdout()).trim().split('\n').pop() || '/home/ubuntu';
+    await sb.writeFiles([{ path: `${home}/.wren/setup.sh`, content: Buffer.from(BROWSER_SETUP) }]);
+    for (;;) {
+      const st = (await (await sb.runCommand({ cmd: 'bash', args: ['-lc', BROWSER_STATE] })).stdout()).trim();
+      if (st === 'ok') break;
+      if (st.startsWith('failed')) throw new Error(`Could not set up the browser: ${st.slice(6).trim()}`);
+      if (Date.now() > deadline - 20_000) throw new BrowserNotReady();
+      await new Promise((r) => setTimeout(r, 4000));
+    }
     await sb.writeFiles([
-      { path: `${this.home}/.wren/browser.ts`, content: Buffer.from(BROWSER_DAEMON_TS) },
-      { path: `${this.home}/.wren/browser.version`, content: Buffer.from(DAEMON_VERSION) },
+      { path: `${home}/.wren/browser.ts`, content: Buffer.from(BROWSER_DAEMON_TS) },
+      { path: `${home}/.wren/browser.version`, content: Buffer.from(DAEMON_VERSION) },
     ]);
-    await sb.runCommand({ cmd: 'bash', args: ['-lc', 'cd "$HOME/.wren" && nohup node browser.ts > browser.log 2>&1 &'] });
+    // A detached command (never waited on): a shell that started the daemon in the background
+    // would otherwise keep the command's output open, and the call hang, while the daemon runs.
+    await sb.runCommand({ cmd: 'bash', args: ['-lc', 'cd "$HOME/.wren" && exec setsid node browser.ts > browser.log 2>&1 < /dev/null'], detached: true });
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 500));
       const h = await sb.runCommand({ cmd: 'bash', args: ['-lc', HEALTH] });
@@ -294,7 +400,7 @@ export class SandboxHost implements ToolHost {
   }
 
   private async browserAct(action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; snapshot?: string; image?: string; preview?: string; url?: string; title?: string; target?: { label: string; role: string; inputType?: string; autocomplete?: string } }> {
-    const sb = await this.computer();
+    const sb = await this.browserVm();
     const payload = Buffer.from(JSON.stringify(action)).toString('base64');
     const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | curl -s -m 60 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act`] });
     const out = await r.stdout();
@@ -306,9 +412,16 @@ export class SandboxHost implements ToolHost {
     }
   }
 
-  private async browser(action: string, args: Record<string, unknown>): Promise<ToolResult> {
-    await this.ensureBrowser();
-    const r = await this.browserAct({ ...args, action });
+  private async browser(action: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    try {
+      await this.ensureBrowser(ctx.deadline);
+    } catch (e) {
+      if (e instanceof BrowserNotReady) return { output: 'The browser is still being installed for this agent (the first time takes a few minutes). Try the browser action again in a minute.', isError: true };
+      throw e;
+    }
+    const expect = ctx.expect;
+    // `expect` is the element the approval was given for; the controller refuses if the page changed.
+    const r = await this.browserAct({ ...args, action, ...(expect ? { expect } : {}) });
     if (r.preview && this.o.onLiveView) await this.o.onLiveView({ data: r.preview, url: r.url, title: r.title }).catch(() => {});
     const images: ImageRef[] = [];
     if (r.image) {

@@ -1,4 +1,5 @@
 import type { ApprovalRequest, ApprovalState, ModelUsage, RunStore, SessionEvent } from '@wren/core';
+import { HttpError } from '../auth';
 import { db, type Json } from '../db';
 import { notifyUser } from '../notify';
 
@@ -16,9 +17,9 @@ export interface RunRefs {
   leaseId?: string;
 }
 
-export class LeaseLostError extends Error {
+export class LeaseLostError extends HttpError {
   constructor() {
-    super('Another worker took over this run.');
+    super(409, 'This worker no longer holds this run.', 'lease_lost');
   }
 }
 
@@ -51,7 +52,16 @@ export function stripInline(data: unknown): unknown {
 export class DbRunStore implements RunStore {
   constructor(private readonly r: RunRefs) {}
 
-  private async fence() {
+  /**
+   * SQL condition: this worker still holds the run's lease. It is part of each
+   * write statement itself, so a takeover between "check" and "write" can't slip in.
+   */
+  private holds(sql: ReturnType<typeof db>) {
+    return this.r.leaseId ? sql`exists (select 1 from public.runs where id = ${this.r.runId}::uuid and lease_id = ${this.r.leaseId}::uuid)` : sql`true`;
+  }
+
+  /** After a write matched nothing: was it because the lease is gone? */
+  private async assertLease() {
     if (!this.r.leaseId) return;
     const [row] = await db()`select 1 from public.runs where id = ${this.r.runId} and lease_id = ${this.r.leaseId}`;
     if (!row) throw new LeaseLostError();
@@ -65,27 +75,27 @@ export class DbRunStore implements RunStore {
   }
 
   async append<T>(type: SessionEvent['type'], data: T, status?: string): Promise<SessionEvent<T>> {
-    await this.fence();
     const sql = db();
     const [row] = await sql<Row[]>`
       insert into public.events (user_id, session_id, run_id, type, status, data)
-      values (${this.r.userId}, ${this.r.sessionId}, ${this.r.runId}, ${type}, ${status ?? null}, ${sql.json(stripInline(data) as Json)})
+      select ${this.r.userId}::uuid, ${this.r.sessionId}::uuid, ${this.r.runId}::uuid, ${type}, ${status ?? null}, ${sql.json(stripInline(data) as Json)}
+      where ${this.holds(sql)}
       returning id, seq, run_id, type, status, data, created_at`;
+    if (!row) throw new LeaseLostError();
     await sql`update public.sessions set last_event_at = now() where id = ${this.r.sessionId}`;
     return toEvent(row) as SessionEvent<T>;
   }
 
   /** Only this run's own events can be changed. */
   async update(id: string, patch: { data?: unknown; status?: string }): Promise<void> {
-    await this.fence();
     const sql = db();
-    if (patch.data !== undefined && patch.status !== undefined) {
-      await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)}, status = ${patch.status} where id = ${id} and run_id = ${this.r.runId}`;
-    } else if (patch.data !== undefined) {
-      await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)} where id = ${id} and run_id = ${this.r.runId}`;
-    } else if (patch.status !== undefined) {
-      await sql`update public.events set status = ${patch.status} where id = ${id} and run_id = ${this.r.runId}`;
-    }
+    if (patch.data === undefined && patch.status === undefined) return;
+    const done =
+      patch.data !== undefined
+        ? await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)}, status = coalesce(${patch.status ?? null}, status)
+            where id = ${id} and run_id = ${this.r.runId} and ${this.holds(sql)} returning id`
+        : await sql`update public.events set status = ${patch.status!} where id = ${id} and run_id = ${this.r.runId} and ${this.holds(sql)} returning id`;
+    if (!done.length) await this.assertLease();
   }
 
   async control() {
@@ -94,16 +104,18 @@ export class DbRunStore implements RunStore {
   }
 
   async createApproval(req: ApprovalRequest, opts: { localOnly?: boolean } = {}): Promise<string> {
-    await this.fence();
     const sql = db();
-    // The approval must belong to one of this run's events.
-    const [ev] = await sql`select 1 from public.events where id = ${req.eventId} and run_id = ${this.r.runId}`;
-    if (!ev) throw new Error('Approval event does not belong to this run.');
+    // Only for one of this run's own events, and only while holding the lease.
     const [row] = await sql`
       insert into public.approvals (user_id, agent_id, session_id, run_id, event_id, tool, title, detail, risk)
-      values (${this.r.userId}, ${this.r.agentId}, ${this.r.sessionId}, ${this.r.runId}, ${req.eventId}, ${req.tool}, ${req.title.slice(0, 300)},
-              ${sql.json({ args: req.args as Json, reason: req.reason ?? null, ...(opts.localOnly ? { localOnly: true } : {}) })}, ${req.risk})
+      select ${this.r.userId}::uuid, ${this.r.agentId}::uuid, ${this.r.sessionId}::uuid, ${this.r.runId}::uuid, ${req.eventId}::uuid, ${req.tool}, ${req.title.slice(0, 300)},
+             ${sql.json({ args: req.args as Json, reason: req.reason ?? null, ...(opts.localOnly ? { localOnly: true } : {}) })}, ${req.risk}
+      where exists (select 1 from public.events where id = ${req.eventId}::uuid and run_id = ${this.r.runId}::uuid) and ${this.holds(sql)}
       returning id`;
+    if (!row) {
+      await this.assertLease();
+      throw new Error('Approval event does not belong to this run.');
+    }
     await notifyUser({
       userId: this.r.userId,
       kind: 'approval',
@@ -125,8 +137,9 @@ export class DbRunStore implements RunStore {
   }
 
   async recordUsage(u: ModelUsage, model: string): Promise<void> {
-    await this.fence();
     const sql = db();
+    // Usage is what the provider charged, so it is always recorded, even by a worker that just
+    // lost its lease; the per-run totals follow the same rule so the two never disagree.
     await sql`
       insert into public.usage_records (user_id, agent_id, run_id, source, model, input_tokens, output_tokens, cached_tokens)
       values (${this.r.userId}, ${this.r.agentId}, ${this.r.runId}, ${this.r.source}, ${model}, ${u.inputTokens}, ${u.outputTokens}, ${u.cachedTokens})`;
@@ -145,13 +158,30 @@ export class DbRunStore implements RunStore {
 
   memory = {
     add: async (fact: string) => {
-      const [row] = await db()`insert into public.agent_memories (user_id, agent_id, content) values (${this.r.userId}, ${this.r.agentId}, ${fact}) returning id`;
+      const sql = db();
+      const [row] = await sql`insert into public.agent_memories (user_id, agent_id, content)
+        select ${this.r.userId}::uuid, ${this.r.agentId}::uuid, ${fact} where ${this.holds(sql)} returning id`;
+      if (!row) throw new LeaseLostError();
       return String(row.id).slice(0, 8);
     },
     remove: async (id: string) => {
       if (!/^[a-f0-9-]{6,36}$/i.test(id)) return false;
-      const rows = await db()`delete from public.agent_memories where agent_id = ${this.r.agentId} and id::text like ${id.replace(/[^a-f0-9-]/gi, '') + '%'} returning id`;
+      const sql = db();
+      const rows = await sql`delete from public.agent_memories where agent_id = ${this.r.agentId} and id::text like ${id.replace(/[^a-f0-9-]/gi, '') + '%'} and ${this.holds(sql)} returning id`;
+      if (!rows.length) await this.assertLease();
       return rows.length > 0;
     },
   };
+
+  /** Live-view frame for this run (only from the worker holding the lease). */
+  async live(frame: { image: string; url?: string | null; title?: string | null }) {
+    const sql = db();
+    const rows = await sql`
+      insert into public.run_live (run_id, user_id, session_id, image, url, title, updated_at)
+      select ${this.r.runId}::uuid, ${this.r.userId}::uuid, ${this.r.sessionId}::uuid, ${frame.image}, ${frame.url ?? null}, ${frame.title ?? null}, now()
+      where ${this.holds(sql)}
+      on conflict (run_id) do update set image = excluded.image, url = excluded.url, title = excluded.title, updated_at = now()
+      returning run_id`;
+    if (!rows.length) await this.assertLease();
+  }
 }

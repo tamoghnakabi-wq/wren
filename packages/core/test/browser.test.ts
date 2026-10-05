@@ -28,6 +28,14 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
       const pw = await ctl.act({ action: 'describe', ref: '@focused' });
       expect(pw.target?.inputType).toBe('password');
       expect(JSON.stringify(pw.target)).not.toContain('hunter2');
+      // The browser itself refuses: typing into a password field, and acting on a changed element.
+      const snap2 = (await ctl.act({ action: 'snapshot' })).snapshot ?? '';
+      const pwRef = /\[(e\d+)\] textbox "[^"]*" type=password/.exec(snap2)?.[1];
+      expect((await ctl.act({ action: 'type', ref: pwRef, text: 'x' })).error).toMatch(/never type passwords/);
+      const btnRef = /\[(e\d+)\] button "Place order"/.exec(snap2)?.[1];
+      const moved = await ctl.act({ action: 'click', ref: btnRef, expect: { label: 'Send message', role: 'button' } });
+      expect(moved.ok).toBe(false);
+      expect(moved.error).toMatch(/page changed/);
     } finally {
       await browser.close();
     }

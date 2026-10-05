@@ -3,6 +3,7 @@ import { db, type Json } from './db';
 import { env, selfUrl } from './env';
 import { HttpError } from './auth';
 import { notifyUser, nudgeDevice } from './notify';
+import { SandboxHost } from './runner/sandbox-host';
 
 // Task lifecycle shared by the API routes, the cloud tick and the desktop API.
 
@@ -29,23 +30,16 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   if (!text && !i.attachments?.length) throw new HttpError(400, 'Say what the agent should do.', 'invalid');
   const imageRefs = (i.attachments ?? []).filter((a) => a.mime.startsWith('image/')).map((a) => ({ artifactId: a.artifactId, mime: a.mime }));
   const attachNote = i.attachments?.length ? `\n\n[Attached files: ${i.attachments.map((a) => a.name).join(', ')}]` : '';
+  const userMessage = { role: 'user', text: text + attachNote, images: imageRefs, attachments: i.attachments ?? [] };
 
-  // Continue an active run in this session instead of starting a new one.
+  // Continue the session's active run if it has one. Everything happens under a lock on the
+  // session row, so two follow-ups sent at once can't each start a run, and a reply can't miss
+  // a run that is switching to "waiting" (finishRun takes the run's lock and re-checks).
   if (i.sessionId) {
-    const [session] = await sql`select * from public.sessions where id = ${i.sessionId} and user_id = ${i.userId}`;
-    if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
-    const [active] = await sql`select * from public.runs where session_id = ${i.sessionId} and status in ('queued', 'running', 'waiting', 'paused') order by created_at desc limit 1`;
-    if (active) {
-      await sql`insert into public.events (user_id, session_id, run_id, type, status, data)
-        values (${i.userId}, ${i.sessionId}, ${active.id}, 'message', 'done', ${sql.json({ role: 'user', text: text + attachNote, images: imageRefs, attachments: i.attachments ?? [] } as unknown as Json)})`;
-      await sql`update public.sessions set last_event_at = now() where id = ${i.sessionId}`;
-      const waitingForInput = await sql`select 1 from public.events where run_id = ${active.id} and type = 'tool' and status = 'awaiting_input' limit 1`;
-      if (active.status === 'paused' || (active.status === 'waiting' && waitingForInput.length)) {
-        await sql`update public.runs set status = 'queued', pause_requested = false, wake_at = null where id = ${active.id}`;
-        await sql`update public.sessions set status = 'queued' where id = ${i.sessionId}`;
-        await kickRun(active.id);
-      }
-      return { sessionId: i.sessionId, runId: active.id, continued: true };
+    const cont = await continueActiveRun(i.sessionId, i.userId, userMessage);
+    if (cont) {
+      if (cont.kick) await kickRun(cont.runId);
+      return { sessionId: i.sessionId, runId: cont.runId, continued: true };
     }
   }
 
@@ -78,24 +72,61 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
     trigger: i.trigger ?? 'user',
     scheduleName: i.scheduleName,
   });
+  const msg: MessageData & { context: string } = { ...(userMessage as MessageData), context };
 
-  let sessionId = i.sessionId;
-  if (!sessionId) {
-    const title = (text.split('\n')[0] || 'New task').slice(0, 80);
-    const [s] = await sql`insert into public.sessions (user_id, agent_id, title, status, runtime, device_id)
-      values (${i.userId}, ${agent.id}, ${title}, 'queued', ${runtime}, ${deviceId}) returning id`;
-    sessionId = s.id as string;
+  // Session (if new), run, first message and session state are created together.
+  const created = await sql.begin(async (tx) => {
+    let sessionId = i.sessionId;
+    if (sessionId) {
+      const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${i.userId} for update`;
+      if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
+      // Someone else started a run while we were preparing: join it instead.
+      const [active] = await tx`select id from public.runs where session_id = ${sessionId} and status in ('queued', 'running', 'waiting', 'paused') limit 1`;
+      if (active) return { sessionId, runId: null as string | null };
+    } else {
+      const title = (text.split('\n')[0] || 'New task').slice(0, 80);
+      const [s] = await tx`insert into public.sessions (user_id, agent_id, title, status, runtime, device_id)
+        values (${i.userId}, ${agent.id}, ${title}, 'queued', ${runtime}, ${deviceId}) returning id`;
+      sessionId = s.id as string;
+    }
+    const [run] = await tx`
+      insert into public.runs (user_id, agent_id, session_id, status, runtime, device_id, trigger, schedule_id, model)
+      values (${i.userId}, ${agent.id}, ${sessionId!}, 'queued', ${runtime}, ${deviceId}, ${i.trigger ?? 'user'}, ${i.scheduleId ?? null}, ${tx.json(modelRef as unknown as Json)})
+      returning id`;
+    await tx`insert into public.events (user_id, session_id, run_id, type, status, data) values (${i.userId}, ${sessionId!}, ${run.id}, 'message', 'done', ${tx.json(msg as unknown as Json)})`;
+    await tx`update public.sessions set status = 'queued', runtime = ${runtime}, device_id = ${deviceId}, last_event_at = now() where id = ${sessionId!}`;
+    await tx`update public.agents set last_active_at = now() where id = ${agent.id}`;
+    return { sessionId: sessionId!, runId: run.id as string };
+  });
+  if (!created.runId) {
+    const cont = await continueActiveRun(created.sessionId, i.userId, userMessage);
+    if (!cont) throw new HttpError(409, 'The task changed while sending; try again.', 'conflict');
+    if (cont.kick) await kickRun(cont.runId);
+    return { sessionId: created.sessionId, runId: cont.runId, continued: true };
   }
-  const [run] = await sql`
-    insert into public.runs (user_id, agent_id, session_id, status, runtime, device_id, trigger, schedule_id, model)
-    values (${i.userId}, ${agent.id}, ${sessionId!}, 'queued', ${runtime}, ${deviceId}, ${i.trigger ?? 'user'}, ${i.scheduleId ?? null}, ${sql.json(modelRef as unknown as Json)})
-    returning id`;
-  const msg: MessageData & { context: string } = { role: 'user', text: text + attachNote, images: imageRefs, attachments: i.attachments ?? [], context };
-  await sql`insert into public.events (user_id, session_id, run_id, type, status, data) values (${i.userId}, ${sessionId!}, ${run.id}, 'message', 'done', ${sql.json(msg as unknown as Json)})`;
-  await sql`update public.sessions set status = 'queued', runtime = ${runtime}, device_id = ${deviceId}, last_event_at = now() where id = ${sessionId!}`;
-  await sql`update public.agents set last_active_at = now() where id = ${agent.id}`;
-  await kickRun(run.id);
-  return { sessionId: sessionId!, runId: run.id, continued: false };
+  await kickRun(created.runId);
+  return { sessionId: created.sessionId, runId: created.runId, continued: false };
+}
+
+/** Add a user message to the session's active run, resuming it if it was paused or waiting for this answer. */
+async function continueActiveRun(sessionId: string, userId: string, message: Record<string, unknown>): Promise<{ runId: string; kick: boolean } | null> {
+  return db().begin(async (tx) => {
+    const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${userId} for update`;
+    if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
+    const [active] = await tx`select id, status from public.runs where session_id = ${sessionId} and status in ('queued', 'running', 'waiting', 'paused') order by created_at desc limit 1 for update`;
+    if (!active) return null;
+    await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
+      values (${userId}, ${sessionId}, ${active.id}, 'message', 'done', ${tx.json(message as unknown as Json)})`;
+    await tx`update public.sessions set last_event_at = now() where id = ${sessionId}`;
+    const [asked] = await tx`select 1 from public.events where run_id = ${active.id} and type = 'tool' and status = 'awaiting_input' limit 1`;
+    if (active.status === 'paused' || (active.status === 'waiting' && asked)) {
+      await tx`update public.runs set status = 'queued', pause_requested = false, wake_at = null where id = ${active.id}`;
+      await tx`update public.sessions set status = 'queued' where id = ${sessionId}`;
+      return { runId: active.id as string, kick: true };
+    }
+    // Still running: its worker (or finishRun, which checks for a reply) will pick the message up.
+    return { runId: active.id as string, kick: false };
+  });
 }
 
 /** Start or wake whatever executes this run. */
@@ -129,6 +160,8 @@ function bypassHeader(): Record<string, string> {
   return b ? { 'x-vercel-protection-bypass': b } : {};
 }
 
+const terminalKind = (k: LoopOutcome['kind']) => k === 'completed' || k === 'failed' || k === 'cancelled';
+
 const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
   completed: 'completed',
   waiting_approval: 'waiting',
@@ -142,49 +175,67 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
 /**
  * Persist a terminal or waiting outcome for a run (cloud or desktop). With a
  * lease id, only the worker that still holds the lease can finish the run.
+ * Runs under the run row's lock: an approval decided, or a question answered,
+ * while the worker was stopping is seen here and the run is queued again
+ * instead of being left waiting (decideApproval / continueActiveRun take the
+ * same lock after writing their side).
  */
 export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string): Promise<void> {
   const sql = db();
-  const [run] = await sql`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId}`;
-  if (!run) return;
-  // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
-  if (run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(outcome.kind)) {
-    outcome = { kind: 'cancelled', steps: outcome.steps };
-    await sql`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
-    await sql`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
-  }
-  let runStatus =
-    outcome.kind === 'waiting_approval' || outcome.kind === 'waiting_input' ? 'waiting' : outcome.kind === 'yield' ? 'running' : outcome.kind;
-  // The user may have answered the approval while the worker was still stopping: don't strand the run.
-  let decidedEarly = false;
-  if (outcome.kind === 'waiting_approval') {
-    const [a] = await sql`select status from public.approvals where id = ${outcome.approvalId} and run_id = ${runId}`;
-    decidedEarly = !!a && ['approved', 'denied', 'expired'].includes(a.status);
-    if (decidedEarly) runStatus = 'queued';
-  }
-  const terminal = ['completed', 'failed', 'cancelled'].includes(runStatus);
-  const updated = await sql`
-    update public.runs set status = ${runStatus}, step = greatest(step, ${outcome.steps}), lease_id = null, lease_until = null,
-      error = ${outcome.kind === 'failed' ? outcome.error : null},
-      result = ${outcome.kind === 'completed' ? outcome.result.slice(0, 20000) : run.result},
-      ended_at = ${terminal ? new Date() : null}
-    where id = ${runId} and (${leaseId ?? null}::uuid is null or lease_id = ${leaseId ?? null}::uuid)
-    returning id`;
-  if (!updated.length) return; // another worker owns the run now
-  await sql`update public.sessions set status = ${decidedEarly ? 'queued' : SESSION_STATUS[outcome.kind]}, last_event_at = now() where id = ${run.session_id}`;
-  if (decidedEarly) await kickRun(runId);
-  if (terminal) await sql`delete from public.run_live where run_id = ${runId}`;
+  const done = await sql.begin(async (tx) => {
+    const [run] = await tx`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for update of r`;
+    if (!run) return null;
+    if (leaseId && run.lease_id !== leaseId) return null; // another worker owns the run now
+    let o = outcome;
+    // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
+    const cancelledLate = run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(o.kind);
+    if (cancelledLate) o = { kind: 'cancelled', steps: o.steps };
+    let runStatus = o.kind === 'waiting_approval' || o.kind === 'waiting_input' ? 'waiting' : o.kind === 'yield' ? 'running' : o.kind;
+    let resume = false;
+    if (o.kind === 'waiting_approval') {
+      const [a] = await tx`select status from public.approvals where id = ${o.approvalId} and run_id = ${runId}`;
+      resume = !!a && ['approved', 'denied', 'expired'].includes(a.status);
+    } else if (o.kind === 'waiting_input') {
+      const [answered] = await tx`
+        select 1 from public.events m where m.run_id = ${runId} and m.type = 'message' and m.data->>'role' = 'user'
+          and m.seq > (select coalesce(max(seq), 0) from public.events where run_id = ${runId} and type = 'tool' and status = 'awaiting_input')
+        limit 1`;
+      resume = !!answered;
+    }
+    if (resume) runStatus = 'queued';
+    const terminal = ['completed', 'failed', 'cancelled'].includes(runStatus);
+    await tx`
+      update public.runs set status = ${runStatus}, step = greatest(step, ${o.steps}), lease_id = null, lease_until = null,
+        retry_count = case when ${o.steps} > step then 0 else retry_count end,
+        error = ${o.kind === 'failed' ? o.error : null},
+        result = ${o.kind === 'completed' ? o.result.slice(0, 20000) : run.result},
+        ended_at = ${terminal ? new Date() : null}
+      where id = ${runId}`;
+    if (cancelledLate) {
+      await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
+      await tx`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
+    }
+    await tx`update public.sessions set status = ${resume ? 'queued' : SESSION_STATUS[o.kind]}, last_event_at = now() where id = ${run.session_id}`;
+    if (terminal) await tx`delete from public.run_live where run_id = ${runId}`;
+    if (o.kind === 'failed') {
+      await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
+        values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${tx.json({ text: o.error, level: 'error', ...(o.code ? { code: o.code } : {}) } satisfies StatusData as unknown as Json)})`;
+    }
+    return { run, o, resume };
+  });
+  if (!done) return;
+  const { run, o, resume } = done;
+  if (resume) await kickRun(runId);
+  // A finished run's shell jobs (background ones included) end with it.
+  if (terminalKind(o.kind) && run.runtime === 'cloud') await SandboxHost.stopRunJobs(run.agent_id, runId);
 
   const url = `/app/s/${run.session_id}`;
-  if (outcome.kind === 'failed') {
-    await sql`insert into public.events (user_id, session_id, run_id, type, status, data)
-      values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${sql.json({ text: outcome.error, level: 'error', ...(outcome.code ? { code: outcome.code } : {}) } satisfies StatusData as unknown as Json)})`;
-    await notifyUser({ userId: run.user_id, kind: 'run_failed', title: `${run.agent_name} couldn't finish`, body: `${run.title}: ${outcome.error}`.slice(0, 300), url, sessionId: run.session_id });
-  } else if (outcome.kind === 'completed') {
-    await notifyUser({ userId: run.user_id, kind: 'run_completed', title: `${run.agent_name} finished`, body: (outcome.result || run.title).replace(/[#*_`>]/g, '').slice(0, 280), url, sessionId: run.session_id });
-  } else if (outcome.kind === 'waiting_input') {
-    // the question notification is sent by the loop's ask_user handler
+  if (o.kind === 'failed') {
+    await notifyUser({ userId: run.user_id, kind: 'run_failed', title: `${run.agent_name} couldn't finish`, body: `${run.title}: ${o.error}`.slice(0, 300), url, sessionId: run.session_id });
+  } else if (o.kind === 'completed') {
+    await notifyUser({ userId: run.user_id, kind: 'run_completed', title: `${run.agent_name} finished`, body: (o.result || run.title).replace(/[#*_`>]/g, '').slice(0, 280), url, sessionId: run.session_id });
   }
+  // waiting_input: the question notification is sent by the loop's ask_user handler
 }
 
 /** Approve or deny a pending approval; resumes the run. */
@@ -204,9 +255,13 @@ export async function decideApproval(userId: string, approvalId: string, approve
     return { runId: a.run_id, status: a.status };
   }
   const { run_id: runId, session_id: sessionId } = rows[0];
+  // If the worker is still switching the run to "waiting", this waits for its lock and then
+  // sees "waiting"; if it hasn't started yet, finishRun will see the decision instead.
   const [run] = await sql`update public.runs set status = 'queued' where id = ${runId} and status = 'waiting' returning id`;
-  await sql`update public.sessions set status = 'queued' where id = ${sessionId}`;
-  if (run) await kickRun(runId);
+  if (run) {
+    await sql`update public.sessions set status = 'queued' where id = ${sessionId}`;
+    await kickRun(runId);
+  }
   return { runId, status: approve ? 'approved' : 'denied' };
 }
 
@@ -219,6 +274,10 @@ export async function cancelRun(userId: string, runId: string) {
   if (run.status !== 'running' || !run.lease_until || new Date(run.lease_until) < new Date()) {
     await sql`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
     await finishRun(runId, { kind: 'cancelled', steps: 0 });
+  } else if (run.runtime === 'cloud') {
+    // A tick is mid-step: end the run's commands now so it notices Stop without waiting them out.
+    const [r] = await sql`select agent_id from public.runs where id = ${runId}`;
+    if (r) await SandboxHost.stopRunJobs(r.agent_id, runId);
   }
   if (run.runtime === 'desktop') await kickRun(runId);
 }
