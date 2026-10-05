@@ -1,8 +1,8 @@
 'use client';
 
-import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, Code2, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
+import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
 import { GithubMark as Github } from '../brand';
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import type { Approval, EventRow, PlanItem } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { Markdown } from '../markdown';
@@ -55,7 +55,24 @@ type Item =
   | { kind: 'assistant'; ev: EventRow; tools: EventRow[]; streaming?: EventRow }
   | { kind: 'tools'; tools: EventRow[] }
   | { kind: 'status'; ev: EventRow }
-  | { kind: 'plan'; ev: EventRow };
+  | { kind: 'plan'; ev: EventRow }
+  | { kind: 'stopped'; runId: string };
+
+const itemRuns = (it: Item): (string | null | undefined)[] =>
+  it.kind === 'tools' ? it.tools.map((t) => t.run_id) : it.kind === 'assistant' ? [it.ev.run_id, ...it.tools.map((t) => t.run_id)] : it.kind === 'stopped' ? [] : [it.ev.run_id];
+
+/** After the last thing a stopped run did, a line says it was stopped. */
+function markStopped(items: Item[], stopped: Set<string>): Item[] {
+  if (!stopped.size) return items;
+  const lastIndex = new Map<string, number>();
+  items.forEach((it, i) => itemRuns(it).forEach((r) => r && stopped.has(r) && lastIndex.set(r, i)));
+  const out: Item[] = [];
+  items.forEach((it, i) => {
+    out.push(it);
+    for (const [run, at] of lastIndex) if (at === i) out.push({ kind: 'stopped', runId: run });
+  });
+  return out;
+}
 
 function group(events: EventRow[]): Item[] {
   const items: Item[] = [];
@@ -92,8 +109,9 @@ function group(events: EventRow[]): Item[] {
   return items;
 }
 
-export function Timeline({ events, agent, approvals, working }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean }) {
-  const items = useMemo(() => group(events), [events]);
+export function Timeline({ events, agent, approvals, working, stoppedRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; stoppedRuns?: string[] }) {
+  const stoppedKey = (stoppedRuns ?? []).join(',');
+  const items = useMemo(() => markStopped(group(events), new Set(stoppedKey ? stoppedKey.split(',') : [])), [events, stoppedKey]);
   const last = events[events.length - 1];
   const showThinking = working && !(last?.type === 'message' && last.status === 'streaming' && String(last.data.text ?? ''));
   const toolRunning = events.some((e) => e.type === 'tool' && e.status === 'running');
@@ -115,10 +133,20 @@ export function Timeline({ events, agent, approvals, working }: { events: EventR
             return <StatusLine key={it.ev.id} ev={it.ev} />;
           case 'plan':
             return null;
+          case 'stopped':
+            return (
+              <div key={`stopped-${it.runId}`} className="flex items-center gap-3 text-[12.5px] text-faint" role="note">
+                <span className="h-px flex-1 bg-border" />
+                <span className="flex items-center gap-1.5">
+                  <CircleX className="h-3.5 w-3.5" aria-hidden /> Stopped
+                </span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            );
         }
       })}
       {showThinking && (
-        <div className="flex items-center gap-3 pl-1">
+        <div className="fade-in flex items-center gap-3 pl-1" role="status">
           {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={toolRunning ? 'working' : 'thinking'} seed={agent.name} />}
           <span className="text-shimmer text-sm font-medium">{toolRunning ? 'Working…' : 'Thinking…'}</span>
         </div>
@@ -170,14 +198,39 @@ function AssistantTurn({ ev, tools, agent, approvals, thinkingEv }: { ev: EventR
       <div className="min-w-0 flex-1 space-y-2.5">
         {(streaming || thinkingEv?.status === 'streaming') && thinking && <p className="line-clamp-2 text-[13px] text-faint italic">{thinking.slice(-220)}</p>}
         {text && (
-          <div className={cx(failed && 'opacity-60')}>
+          <div className={cx('group/answer relative', failed && 'opacity-60')}>
             <Markdown>{text + (streaming ? ' ▍' : '')}</Markdown>
+            {!streaming && !failed && <CopyButton text={text} />}
           </div>
         )}
         {failed && !text && <p className="text-sm text-faint">The model call failed.</p>}
         {visible.length > 0 && <Steps tools={visible} approvals={approvals} />}
       </div>
     </div>
+  );
+}
+
+/** Copies an answer; shown on hover with a mouse, always on touch screens. */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+      className="mt-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[12px] text-faint transition-[opacity,color,background-color] hover:bg-bg-subtle hover:text-text focus-visible:opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/answer:opacity-100"
+      aria-label={copied ? 'Copied' : 'Copy answer'}
+    >
+      {copied ? <Check className="h-3.5 w-3.5 text-success" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
   );
 }
 
@@ -190,7 +243,7 @@ function Steps({ tools, approvals }: { tools: EventRow[]; approvals: Approval[] 
   return (
     <div className="space-y-1.5">
       {collapsible && !open && (
-        <button onClick={() => setOpen(true)} className="text-[12.5px] text-faint hover:text-text">
+        <button type="button" onClick={() => setOpen(true)} className="text-[12.5px] text-faint transition-colors hover:text-text">
           Show {visible.length - 3} earlier steps
         </button>
       )}
@@ -206,6 +259,7 @@ function Steps({ tools, approvals }: { tools: EventRow[]; approvals: Approval[] 
 function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
   const d = ev.data as unknown as ToolData;
   const [open, setOpen] = useState(false);
+  const detailsId = useId();
   const Icon = d.name?.startsWith('mcp_') ? Plug : TOOL_ICONS[d.name] ?? Code2;
   const status = ev.status ?? 'pending';
   const dur = d.startedAt && d.endedAt ? Math.max(0, Math.round((d.endedAt - d.startedAt) / 100) / 10) : null;
@@ -226,12 +280,18 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
 
   return (
     <div className="border-b border-border last:border-0">
-      <button onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left hover:bg-surface-2">
-        <Icon className="h-4 w-4 shrink-0 text-faint" />
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={detailsId}
+        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition-colors hover:bg-surface-2 focus-visible:bg-surface-2"
+      >
+        <Icon className="h-4 w-4 shrink-0 text-faint" aria-hidden />
         <span className={cx('min-w-0 flex-1 truncate text-[13.5px]', status === 'running' ? 'text-text' : 'text-muted')}>{d.title || d.name}</span>
         {dur !== null && status === 'done' && <span className="text-[11.5px] text-faint tabular-nums">{dur}s</span>}
         <StepStatus status={status} />
-        <ChevronRight className={cx('h-3.5 w-3.5 text-faint transition', open && 'rotate-90')} />
+        <ChevronRight className={cx('h-3.5 w-3.5 text-faint transition-transform duration-200', open && 'rotate-90')} aria-hidden />
       </button>
       {status === 'awaiting_approval' && approval && (
         <div className="px-3 pb-3">
@@ -254,7 +314,7 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
         </div>
       )}
       {open && (
-        <div className="space-y-2 border-t border-border bg-bg-subtle/60 px-3.5 py-2.5">
+        <div id={detailsId} className="fade-in space-y-2 border-t border-border bg-bg-subtle/60 px-3.5 py-2.5">
           <pre className="max-h-40 overflow-auto font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted">{JSON.stringify(d.args, null, 2)}</pre>
           {d.result && <pre className={cx('max-h-72 overflow-auto rounded-lg border border-border bg-surface p-2.5 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap', d.result.isError ? 'text-danger' : 'text-text')}>{d.result.output}</pre>}
         </div>
@@ -264,12 +324,13 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
 }
 
 function StepStatus({ status }: { status: string }) {
-  if (status === 'running' || status === 'pending') return <Loader2 className="h-3.5 w-3.5 animate-spin text-success" />;
-  if (status === 'done') return <Check className="h-3.5 w-3.5 text-success" />;
-  if (status === 'awaiting_approval') return <Hand className="h-3.5 w-3.5 text-warning" />;
+  const sr = (label: string) => <span className="sr-only">{label}</span>;
+  if (status === 'running' || status === 'pending') return <span className="flex">{sr('Running')}<Loader2 className="h-3.5 w-3.5 animate-spin text-success" aria-hidden /></span>;
+  if (status === 'done') return <span className="flex">{sr('Done')}<Check className="h-3.5 w-3.5 text-success" aria-hidden /></span>;
+  if (status === 'awaiting_approval') return <span className="flex">{sr('Waiting for approval')}<Hand className="h-3.5 w-3.5 text-warning" aria-hidden /></span>;
   if (status === 'denied') return <span className="text-[11.5px] font-medium text-warning">Denied</span>;
   if (status === 'cancelled') return <span className="text-[11.5px] text-faint">Stopped</span>;
-  return <X className="h-3.5 w-3.5 text-danger" />;
+  return <span className="flex">{sr('Failed')}<X className="h-3.5 w-3.5 text-danger" aria-hidden /></span>;
 }
 
 function StatusLine({ ev }: { ev: EventRow }) {
@@ -308,7 +369,7 @@ export function PlanCard({ items }: { items: PlanItem[] }) {
       <ol className="space-y-1.5">
         {items.map((it, i) => (
           <li key={i} className="flex items-start gap-2.5 text-[13.5px]">
-            <span className={cx('mt-0.5 flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full border', it.status === 'done' ? 'border-success bg-success text-white' : it.status === 'in_progress' ? 'border-success' : 'border-border-strong')}>
+            <span className={cx('mt-0.5 flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full border', it.status === 'done' ? 'border-success bg-success text-bg' : it.status === 'in_progress' ? 'border-success' : 'border-border-strong')}>
               {it.status === 'done' ? <Check className="h-3 w-3" strokeWidth={3} /> : it.status === 'in_progress' ? <span className="h-2 w-2 animate-wren-pulse rounded-full bg-success" /> : null}
             </span>
             <span className={cx(it.status === 'done' ? 'text-faint line-through' : it.status === 'in_progress' ? 'font-medium' : 'text-muted')}>{it.text}</span>

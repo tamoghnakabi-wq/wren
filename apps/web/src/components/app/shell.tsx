@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Bell, CalendarClock, FolderOpen, Gauge, Home, Inbox, LayoutGrid, LogOut, Menu, Monitor, Plug, Plus, Settings, X } from 'lucide-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Logo } from '../brand';
 import { AgentAvatar } from '../agent-avatar';
 import { cx } from '../ui';
@@ -30,33 +30,35 @@ function useInboxCount() {
   return approvals.length + unread;
 }
 
+/** Count badge text: very large numbers read as 99+. */
+const badge = (n: number) => (n > 99 ? '99+' : String(n));
+
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [drawer, setDrawer] = useState(false);
-  useEffect(() => setDrawer(false), [pathname]);
+  const [drawerFor, setDrawerFor] = useState(pathname);
+  // Navigating closes the menu (adjusted during render rather than in an effect).
+  if (drawerFor !== pathname) {
+    setDrawerFor(pathname);
+    setDrawer(false);
+  }
   const fullBleed = pathname.startsWith('/app/s/');
+  const closeDrawer = useCallback(() => setDrawer(false), []);
 
   return (
     <div className="flex min-h-dvh">
+      <a href="#main" className="sr-only z-[70] rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-fg focus:not-sr-only focus:fixed focus:top-3 focus:left-3">
+        Skip to content
+      </a>
       <aside className="sticky top-0 hidden h-dvh w-[264px] shrink-0 flex-col border-r border-border bg-bg-subtle/60 lg:flex">
         <SidebarContent />
       </aside>
 
-      {drawer && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setDrawer(false)} />
-          <aside className="animate-in absolute inset-y-0 left-0 flex w-[84%] max-w-[300px] flex-col bg-bg shadow-pop">
-            <button className="absolute top-4 right-3 rounded-lg p-1.5 text-muted" onClick={() => setDrawer(false)} aria-label="Close menu">
-              <X className="h-5 w-5" />
-            </button>
-            <SidebarContent />
-          </aside>
-        </div>
-      )}
+      {drawer && <Drawer onClose={closeDrawer} />}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {!fullBleed && <MobileTopBar onMenu={() => setDrawer(true)} />}
-        <main className={cx('flex-1', fullBleed ? '' : 'px-4 pt-4 pb-28 sm:px-6 lg:px-10 lg:pt-10 lg:pb-12')}>
+        <main id="main" tabIndex={-1} className={cx('flex-1 focus:outline-none', fullBleed ? '' : 'px-4 pt-4 pb-28 sm:px-6 lg:px-10 lg:pt-10 lg:pb-12')}>
           <div className={cx(fullBleed ? '' : 'mx-auto w-full max-w-5xl')}>
             {!fullBleed && <DesktopLinkBanner />}
             {children}
@@ -66,6 +68,48 @@ export function Shell({ children }: { children: ReactNode }) {
       </div>
       <PushPrompt />
       <ChatGPTWelcome />
+    </div>
+  );
+}
+
+/** The phone menu: a modal panel that slides in, closes on Escape or a tap outside, and returns focus. */
+function Drawer({ onClose }: { onClose: () => void }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    panel.current?.querySelector<HTMLElement>('a, button')?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Tab' || !panel.current) return;
+      // Keep Tab inside the menu while it is open.
+      const f = Array.from(panel.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled])'));
+      if (!f.length) return;
+      if (e.shiftKey && document.activeElement === f[0]) {
+        e.preventDefault();
+        f[f.length - 1].focus();
+      } else if (!e.shiftKey && document.activeElement === f[f.length - 1]) {
+        e.preventDefault();
+        f[0].focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = overflow;
+      opener?.focus();
+    };
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Menu">
+      <div className="fade-in absolute inset-0 bg-black/40 backdrop-blur-[1px]" onClick={onClose} />
+      <aside ref={panel} className="drawer-in absolute inset-y-0 left-0 flex w-[84%] max-w-[300px] flex-col bg-bg shadow-pop" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
+        <button className="absolute top-4 right-3 z-10 rounded-lg p-1.5 text-muted transition-colors hover:bg-bg-subtle hover:text-text" style={{ marginTop: 'env(safe-area-inset-top)' }} onClick={onClose} aria-label="Close menu">
+          <X className="h-5 w-5" />
+        </button>
+        <SidebarContent />
+      </aside>
     </div>
   );
 }
@@ -94,10 +138,14 @@ function SidebarContent() {
         {NAV.map((n) => {
           const on = n.exact ? pathname === n.href : pathname.startsWith(n.href);
           return (
-            <Link key={n.href} href={n.href} className={cx('flex h-9 items-center gap-3 rounded-lg px-3 text-sm transition', on ? 'bg-surface font-medium text-text shadow-sm' : 'text-muted hover:bg-surface/70 hover:text-text')}>
-              <n.icon className="h-4 w-4" />
+            <Link key={n.href} href={n.href} aria-current={on ? 'page' : undefined} className={cx('flex h-9 items-center gap-3 rounded-lg px-3 text-sm transition-colors', on ? 'bg-surface font-medium text-text shadow-sm' : 'text-muted hover:bg-surface/70 hover:text-text')}>
+              <n.icon className="h-4 w-4" aria-hidden />
               <span className="flex-1">{n.label}</span>
-              {n.badge && inbox > 0 && <span className="rounded-full bg-brand px-1.5 text-[11px] font-semibold text-white">{inbox}</span>}
+              {n.badge && inbox > 0 && (
+                <span className="rounded-full bg-brand-solid px-1.5 text-[11px] font-semibold text-brand-fg tabular-nums" aria-label={`${inbox} new`}>
+                  {badge(inbox)}
+                </span>
+              )}
             </Link>
           );
         })}
@@ -110,7 +158,7 @@ function SidebarContent() {
       </div>
       <div className="mt-1.5 flex-1 space-y-0.5 overflow-y-auto px-3 scrollbar-thin">
         {agents.map((a) => (
-          <Link key={a.id} href={`/app/agents/${a.id}`} className={cx('flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition', pathname === `/app/agents/${a.id}` ? 'bg-surface shadow-sm' : 'hover:bg-surface/70')}>
+          <Link key={a.id} href={`/app/agents/${a.id}`} aria-current={pathname === `/app/agents/${a.id}` ? 'page' : undefined} className={cx('flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors', pathname === `/app/agents/${a.id}` ? 'bg-surface font-medium shadow-sm' : 'text-muted hover:bg-surface/70 hover:text-text')}>
             <AgentAvatar icon={a.icon} color={a.color} size={24} live={liveAgents.get(a.id) ?? null} seed={a.id} />
             <span className="truncate">{a.name}</span>
           </Link>
@@ -150,15 +198,19 @@ function MobileTopBar({ onMenu }: { onMenu: () => void }) {
   const inbox = useInboxCount();
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-bg/85 px-3 backdrop-blur-md lg:hidden" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
-      <button onClick={onMenu} className="rounded-lg p-2 text-muted" aria-label="Open menu">
+      <button onClick={onMenu} className="rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label="Open menu">
         <Menu className="h-5 w-5" />
       </button>
       <Link href="/app" aria-label="Wren home">
         <Logo />
       </Link>
-      <Link href="/app/inbox" className="relative rounded-lg p-2 text-muted" aria-label="Inbox">
-        <Bell className="h-5 w-5" />
-        {inbox > 0 && <span className="absolute top-1 right-1 min-w-4 rounded-full bg-brand px-1 text-center text-[10px] leading-4 font-bold text-white">{inbox}</span>}
+      <Link href="/app/inbox" className="relative rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label={inbox ? `Inbox, ${inbox} new` : 'Inbox'}>
+        <Bell className="h-5 w-5" aria-hidden />
+        {inbox > 0 && (
+          <span aria-hidden className="absolute top-1 right-1 min-w-4 rounded-full bg-brand-solid px-1 text-center text-[10px] leading-4 font-bold text-brand-fg tabular-nums">
+            {badge(inbox)}
+          </span>
+        )}
       </Link>
     </header>
   );
@@ -181,15 +233,26 @@ function MobileTabBar() {
           const on = t.exact ? pathname === t.href : pathname.startsWith(t.href.split('?')[0]) && !t.primary;
           if (t.primary)
             return (
-              <Link key={t.label} href={t.href} className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-fg shadow-pop" aria-label="New task">
-                <t.icon className="h-5 w-5" />
+              <Link key={t.label} href={t.href} className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-fg shadow-pop transition-transform active:scale-95" aria-label="New task">
+                <t.icon className="h-5 w-5" aria-hidden />
               </Link>
             );
           return (
-            <Link key={t.label} href={t.href} className={cx('relative flex w-14 flex-col items-center gap-0.5 text-[10.5px] font-medium', on ? 'text-text' : 'text-faint')}>
-              <t.icon className="h-5 w-5" />
+            <Link
+              key={t.label}
+              href={t.href}
+              aria-current={on ? 'page' : undefined}
+              aria-label={t.badge ? `${t.label}, ${t.badge} new` : undefined}
+              className={cx('relative flex w-14 flex-col items-center gap-0.5 py-1 text-[10.5px] font-medium transition-colors', on ? 'text-text' : 'text-faint hover:text-muted')}
+            >
+              <t.icon className="h-5 w-5" aria-hidden />
               {t.label}
-              {!!t.badge && <span className="absolute -top-1 right-2 min-w-4 rounded-full bg-brand px-1 text-center text-[10px] leading-4 font-bold text-white">{t.badge}</span>}
+              {on && <span aria-hidden className="absolute -bottom-1.5 h-1 w-1 rounded-full bg-text" />}
+              {!!t.badge && (
+                <span aria-hidden className="absolute -top-1 right-2 min-w-4 rounded-full bg-brand-solid px-1 text-center text-[10px] leading-4 font-bold text-brand-fg tabular-nums">
+                  {badge(t.badge)}
+                </span>
+              )}
             </Link>
           );
         })}

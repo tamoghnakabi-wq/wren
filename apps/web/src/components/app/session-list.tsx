@@ -18,17 +18,18 @@ export function SessionList({ sessions, showAgent = true, empty }: { sessions: S
         const dev = devices.find((d) => d.id === s.device_id);
         return (
           <li key={s.id}>
-            <Link href={`/app/s/${s.id}`} className="flex items-center gap-3 px-4 py-3 transition hover:bg-surface-2">
+            <Link href={`/app/s/${s.id}`} className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2 focus-visible:bg-surface-2">
               {showAgent && <AgentAvatar icon={a?.icon} color={a?.color} size={36} mood={sessionMood(s.status)} still={!['running', 'queued', 'waiting'].includes(s.status)} seed={s.id} />}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[14.5px] font-medium">{s.title}</p>
-                <p className="mt-0.5 flex items-center gap-1.5 truncate text-[12.5px] text-faint">
-                  {showAgent && a && <span>{a.name}</span>}
-                  {showAgent && a && <span>·</span>}
-                  {s.runtime === 'cloud' ? <Cloud className="h-3 w-3" /> : <Laptop className="h-3 w-3" />}
-                  <span>{s.runtime === 'cloud' ? 'Cloud' : dev?.name ?? 'Computer'}</span>
-                  <span>·</span>
-                  <span>{timeAgo(s.last_event_at)}</span>
+                {/* Names shrink with an ellipsis; the time always stays visible. */}
+                <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12.5px] whitespace-nowrap text-faint">
+                  {showAgent && a && <span className="max-w-[55%] min-w-0 shrink-0 truncate">{a.name}</span>}
+                  {showAgent && a && <span aria-hidden>·</span>}
+                  {s.runtime === 'cloud' ? <Cloud className="h-3 w-3 shrink-0" aria-hidden /> : <Laptop className="h-3 w-3 shrink-0" aria-hidden />}
+                  <span className="min-w-0 truncate">{s.runtime === 'cloud' ? 'Cloud' : dev?.name ?? 'Computer'}</span>
+                  <span aria-hidden>·</span>
+                  <span className="shrink-0">{timeAgo(s.last_event_at)}</span>
                 </p>
               </div>
               <StatusPill status={s.status} />

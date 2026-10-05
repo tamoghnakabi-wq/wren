@@ -1,12 +1,11 @@
 'use client';
 
 import { useSearchParams } from 'next/navigation';
-import Link from 'next/link';
 import { CalendarClock, Play, Plus, Trash2 } from 'lucide-react';
 import { Suspense, useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
 import { useApp } from '@/components/app/provider';
-import { Button, Dialog, EmptyState, Input, Label, PageHeader, Select, Spinner, Switch, Textarea, timeAgo, useToast } from '@/components/ui';
+import { Button, ButtonLink, Dialog, EmptyState, Input, Label, PageHeader, Select, SkeletonList, Switch, Textarea, timeAgo, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { describeCronClient, presetToCron, type Preset } from '@/lib/client/cron';
 import { useLive } from '@/lib/client/live';
@@ -14,7 +13,7 @@ import type { Schedule } from '@/lib/client/types';
 
 export default function SchedulesPage() {
   return (
-    <Suspense fallback={<Spinner className="mx-auto mt-24" />}>
+    <Suspense fallback={<SkeletonList rows={3} avatar={false} className="mt-24" />}>
       <Schedules />
     </Suspense>
   );
@@ -40,9 +39,9 @@ function Schedules() {
         }
       />
       {s.loading ? (
-        <Spinner />
+        <SkeletonList rows={3} avatar={false} />
       ) : !s.rows.length ? (
-        <EmptyState icon={<CalendarClock className="h-6 w-6" />} title="No schedules yet" action={agents.length ? <Button onClick={() => setOpen(true)}>Create a schedule</Button> : <Link href="/app/agents/new"><Button>Create an agent first</Button></Link>}>
+        <EmptyState icon={<CalendarClock className="h-6 w-6" />} title="No schedules yet" action={agents.length ? <Button onClick={() => setOpen(true)}>Create a schedule</Button> : <ButtonLink href="/app/agents/new">Create an agent first</ButtonLink>}>
           For example: “Every weekday at 8am, summarise my GitHub notifications and the news I care about.”
         </EmptyState>
       ) : (

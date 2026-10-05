@@ -11,7 +11,8 @@ import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
 import { StatusPill } from '@/components/app/status';
 import { PlanCard, Timeline } from '@/components/app/timeline';
-import { Button, cx, formatBytes, formatTokens, Spinner, timeAgo, useToast } from '@/components/ui';
+import { AgentCharacter } from '@/components/agent-character';
+import { Button, ButtonLink, cx, EmptyState, formatBytes, formatTokens, Menu, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { supabase } from '@/lib/client/supabase';
@@ -33,7 +34,7 @@ export default function SessionPage() {
   const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: PAGE, keepAll: true, realtimeFilter: { column: 'session_id', value: id } });
   const [older, setOlder] = useState<{ session: string; rows: EventRow[]; more: boolean }>({ session: id, rows: [], more: true });
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const olderRows = older.session === id ? older.rows : [];
+  const olderRows = useMemo(() => (older.session === id ? older.rows : []), [older, id]);
   const events = useMemo(() => {
     const byId = new Map<string, EventRow>();
     for (const e of olderRows) byId.set(e.id, e);
@@ -61,7 +62,7 @@ export default function SessionPage() {
   const live = useLive<RunLive>({ table: 'run_live', eq: { session_id: id }, pk: 'run_id', realtimeFilter: { column: 'session_id', value: id } });
   const files = useLive<Artifact>({ table: 'artifacts', eq: { session_id: id }, order: { column: 'created_at' }, realtimeFilter: { column: 'session_id', value: id } });
   const [panel, setPanel] = useState<'activity' | 'screen' | 'files'>('activity');
-  const [menu, setMenu] = useState(false);
+  const confirm = useConfirm();
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -103,14 +104,24 @@ export default function SessionPage() {
   }, [events.rows, sessionApprovals.length]);
 
 
-  if (session.loading) return <Spinner className="mx-auto mt-32" />;
+  if (session.loading) return <SessionSkeleton />;
   if (!s)
     return (
-      <div className="p-10 text-center">
-        <p className="text-muted">This task doesn’t exist or was deleted.</p>
-        <Link href="/app" className="mt-3 inline-block text-sm underline">
-          Go home
-        </Link>
+      <div className="flex min-h-dvh items-center justify-center px-4">
+        <EmptyState
+          art={<AgentCharacter character="pip" color="slate" size={72} mood="thinking" seed="missing" />}
+          title="This task isn’t here"
+          action={
+            <>
+              <ButtonLink href="/app">Go home</ButtonLink>
+              <ButtonLink href="/app/inbox" variant="secondary">
+                Open inbox
+              </ButtonLink>
+            </>
+          }
+        >
+          It may have been deleted, or the link is from another account.
+        </EmptyState>
       </div>
     );
 
@@ -186,7 +197,7 @@ export default function SessionPage() {
         <button onClick={() => (history.length > 1 ? router.back() : router.push('/app'))} className="rounded-lg p-1.5 text-muted hover:bg-bg-subtle" aria-label="Back">
           <ArrowLeft className="h-5 w-5" />
         </button>
-        <Link href={agent ? `/app/agents/${agent.id}` : '/app'} className="shrink-0">
+        <Link href={agent ? `/app/agents/${agent.id}` : '/app'} className="shrink-0 rounded-full" aria-label={agent ? `${agent.name}: agent page` : 'Home'}>
           <AgentAvatar icon={agent?.icon} color={agent?.color} size={38} mood={mood} seed={agent?.id} />
         </Link>
         <div className="min-w-0 flex-1">
@@ -217,45 +228,57 @@ export default function SessionPage() {
             <span className="hidden sm:inline">Stop</span>
           </Button>
         )}
-        <div className="relative">
-          <button onClick={() => setMenu((v) => !v)} className="rounded-lg p-1.5 text-muted hover:bg-bg-subtle" aria-label="More">
-            <MoreHorizontal className="h-5 w-5" />
-          </button>
-          {menu && (
-            <div className="animate-in absolute top-10 right-0 z-30 w-44 rounded-xl border border-border bg-surface p-1 shadow-pop" onMouseLeave={() => setMenu(false)}>
-              <button
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-bg-subtle"
-                onClick={async () => {
-                  await api(`/api/sessions/${id}`, { method: 'PATCH', body: { archived: !s.archived_at } });
-                  toast(s.archived_at ? 'Unarchived' : 'Archived');
-                  setMenu(false);
-                }}
-              >
-                <Archive className="h-4 w-4" /> {s.archived_at ? 'Unarchive' : 'Archive'}
-              </button>
-              <button
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger-soft"
-                onClick={async () => {
-                  if (!confirm('Delete this task and its history?')) return;
-                  try {
-                    await api(`/api/sessions/${id}`, { method: 'DELETE' });
-                    router.replace('/app');
-                  } catch (e) {
-                    toast((e as Error).message, 'error');
-                  }
-                }}
-              >
-                <Trash2 className="h-4 w-4" /> Delete
-              </button>
-            </div>
+        <Menu
+          trigger={(p) => (
+            <button type="button" {...p} className="rounded-lg p-1.5 text-muted transition-colors hover:bg-bg-subtle hover:text-text" aria-label="More actions">
+              <MoreHorizontal className="h-5 w-5" aria-hidden />
+            </button>
           )}
-        </div>
+          items={[
+            {
+              label: s.archived_at ? 'Unarchive' : 'Archive',
+              icon: Archive,
+              onSelect: async () => {
+                try {
+                  await api(`/api/sessions/${id}`, { method: 'PATCH', body: { archived: !s.archived_at } });
+                  toast(s.archived_at ? 'Moved back to your tasks' : 'Archived', 'success');
+                } catch (e) {
+                  toast((e as Error).message, 'error');
+                }
+              },
+            },
+            {
+              label: 'Delete',
+              icon: Trash2,
+              danger: true,
+              onSelect: async () => {
+                const ok = await confirm({ title: 'Delete this task?', body: 'Its whole history goes too. Files it shared stay in Files.', confirmLabel: 'Delete task', danger: true });
+                if (!ok) return;
+                try {
+                  await api(`/api/sessions/${id}`, { method: 'DELETE' });
+                  toast('Task deleted', 'success');
+                  router.replace('/app');
+                } catch (e) {
+                  toast((e as Error).message, 'error');
+                }
+              },
+            },
+          ]}
+        />
       </header>
 
-      <div className="flex border-b border-border lg:hidden">
+      <div className="flex border-b border-border lg:hidden" role="tablist" aria-label="Task views">
         {(['activity', 'screen', 'files'] as const).map((p) => (
-          <button key={p} onClick={() => setPanel(p)} className={cx('flex-1 py-2 text-[13px] font-medium capitalize', panel === p ? 'border-b-2 border-text text-text' : 'text-faint')}>
+          <button
+            key={p}
+            type="button"
+            role="tab"
+            aria-selected={panel === p}
+            onClick={() => setPanel(p)}
+            className={cx('-mb-px flex flex-1 items-center justify-center gap-1.5 border-b-2 py-2.5 text-[13px] font-medium capitalize transition-colors', panel === p ? 'border-text text-text' : 'border-transparent text-faint hover:text-muted')}
+          >
             {p === 'screen' ? 'Details' : p}
+            {p === 'files' && shareable.length > 0 && <span className="rounded-full bg-bg-subtle px-1.5 text-[11px] text-muted tabular-nums">{shareable.length}</span>}
           </button>
         ))}
       </div>
@@ -278,11 +301,15 @@ export default function SessionPage() {
                   </Button>
                 </div>
               )}
-              {events.loading ? <Spinner className="mx-auto" /> : <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} />}
+              {events.loading ? (
+                <TimelineSkeleton />
+              ) : (
+                <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} stoppedRuns={runs.rows.filter((r) => r.status === 'cancelled').map((r) => r.id)} />
+              )}
               {run?.status === 'failed' && run.error && !events.rows.some((e) => e.type === 'status' && e.data.text === run.error) && <p className="mt-4 text-center text-sm text-danger">{run.error}</p>}
             </div>
           </div>
-          <div className="pb-safe border-t border-border bg-bg px-3 pt-3 pb-3 sm:px-6">
+          <div className="border-t border-border bg-bg px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
             <div className="mx-auto max-w-3xl">
               {agent ? (
                 <Composer
@@ -305,12 +332,50 @@ export default function SessionPage() {
             shareable.length ? (
               sidePanel
             ) : (
-              <p className="p-6 text-center text-sm text-muted">Files the agent shares will appear here.</p>
+              <EmptyState icon={<FileText className="h-6 w-6" />} title="No files yet">
+                Reports, exports and other files the agent shares will appear here.
+              </EmptyState>
             )
           ) : (
             sidePanel
           )}
         </aside>
+      </div>
+    </div>
+  );
+}
+
+function SessionSkeleton() {
+  return (
+    <div className="flex h-dvh flex-col" aria-busy="true">
+      <div className="flex items-center gap-3 border-b border-border px-3 py-3 sm:px-5">
+        <Skeleton className="h-7 w-7 rounded-lg" />
+        <Skeleton className="h-9 w-9 rounded-full" />
+        <div className="flex-1 space-y-1.5">
+          <Skeleton className="h-4 w-1/2 max-w-xs" />
+          <Skeleton className="h-3 w-24" />
+        </div>
+      </div>
+      <div className="mx-auto w-full max-w-3xl flex-1 px-3 py-6 sm:px-6">
+        <TimelineSkeleton />
+      </div>
+    </div>
+  );
+}
+
+function TimelineSkeleton() {
+  return (
+    <div className="space-y-6" role="status" aria-label="Loading activity">
+      <div className="flex justify-end">
+        <Skeleton className="h-11 w-2/3 rounded-[20px]" />
+      </div>
+      <div className="flex gap-3">
+        <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
+        <div className="flex-1 space-y-2">
+          <Skeleton className="h-3.5 w-11/12" />
+          <Skeleton className="h-3.5 w-4/5" />
+          <Skeleton className="h-24 w-full rounded-xl" />
+        </div>
       </div>
     </div>
   );

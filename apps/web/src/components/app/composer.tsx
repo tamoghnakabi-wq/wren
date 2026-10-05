@@ -42,13 +42,38 @@ export function Composer({
   const [uploading, setUploading] = useState(0);
   const [pickAgent, setPickAgent] = useState(false);
   const [runtime, setRuntime] = useState<'cloud' | 'desktop' | undefined>(undefined);
+  const [dragging, setDragging] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const picker = useRef<HTMLDivElement>(null);
+
+  // The agent list closes on a click elsewhere or Escape (focus goes back to its button).
+  useEffect(() => {
+    if (!pickAgent) return;
+    const away = (e: PointerEvent) => !picker.current?.contains(e.target as Node) && setPickAgent(false);
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setPickAgent(false);
+      picker.current?.querySelector<HTMLElement>('[aria-haspopup]')?.focus();
+    };
+    document.addEventListener('pointerdown', away);
+    document.addEventListener('keydown', esc);
+    picker.current?.querySelector<HTMLElement>('[aria-selected="true"], [role="option"]')?.focus();
+    return () => {
+      document.removeEventListener('pointerdown', away);
+      document.removeEventListener('keydown', esc);
+    };
+  }, [pickAgent]);
 
   useEffect(() => {
     if (autoFocus) ta.current?.focus();
   }, [autoFocus]);
-  useEffect(() => setRuntime(undefined), [agent?.id]);
+  // A different agent starts from its own default runtime.
+  const [runtimeFor, setRuntimeFor] = useState(agent?.id);
+  if (runtimeFor !== agent?.id) {
+    setRuntimeFor(agent?.id);
+    setRuntime(undefined);
+  }
 
   useEffect(() => {
     const el = ta.current;
@@ -99,17 +124,27 @@ export function Composer({
 
   return (
     <div
-      className={cx('rounded-[22px] border border-border bg-surface shadow-card transition focus-within:border-border-strong focus-within:shadow-pop', compact ? 'p-2' : 'p-3')}
-      onDragOver={(e) => e.preventDefault()}
+      className={cx(
+        'rounded-[22px] border bg-surface shadow-card transition-[border-color,box-shadow] duration-200 focus-within:border-border-strong focus-within:shadow-pop',
+        dragging ? 'border-brand ring-4 ring-[var(--ring)]' : 'border-border',
+        compact ? 'p-2' : 'p-3',
+      )}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (e.dataTransfer.types.includes('Files')) setDragging(true);
+      }}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setDragging(false)}
       onDrop={(e) => {
         e.preventDefault();
+        setDragging(false);
         upload(e.dataTransfer.files);
       }}
     >
+      {dragging && <p className="px-2 pb-1 text-[12.5px] font-medium text-brand-ink">Drop to attach</p>}
       {!!files.length && (
         <div className="mb-2 flex flex-wrap gap-1.5 px-1">
           {files.map((f) => (
-            <span key={f.artifactId} className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-subtle py-1 pr-1.5 pl-2.5 text-[12.5px]">
+            <span key={f.artifactId} className="pop-in inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-subtle py-1 pr-1.5 pl-2.5 text-[12.5px]">
               <span className="max-w-[160px] truncate">{f.name}</span>
               <span className="text-faint">{formatBytes(f.size)}</span>
               <button onClick={() => setFiles((c) => c.filter((x) => x !== f))} className="text-faint hover:text-text" aria-label={`Remove ${f.name}`}>
@@ -137,22 +172,44 @@ export function Composer({
       />
       <div className="mt-1 flex items-center gap-1.5">
         {!sessionId && onAgentChange && (
-          <div className="relative">
-            <button onClick={() => setPickAgent((v) => !v)} className="flex h-8 items-center gap-1.5 rounded-full border border-border px-1.5 pr-2.5 text-[13px] font-medium whitespace-nowrap hover:bg-bg-subtle" disabled={!agents.length}>
+          <div className="relative" ref={picker}>
+            <button
+              type="button"
+              onClick={() => setPickAgent((v) => !v)}
+              aria-haspopup="listbox"
+              aria-expanded={pickAgent}
+              aria-label={agent ? `Agent: ${agent.name}. Change agent` : 'Choose agent'}
+              className="flex h-8 items-center gap-1.5 rounded-full border border-border px-1.5 pr-2.5 text-[13px] font-medium whitespace-nowrap transition-colors hover:bg-bg-subtle"
+              disabled={!agents.length}
+            >
               {agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={22} seed={agent.id} /> : null}
               <span className="max-w-[90px] truncate sm:max-w-[140px]">{agent?.name ?? 'Choose agent'}</span>
-              <ChevronDown className="h-3.5 w-3.5 text-faint" />
+              <ChevronDown className={cx('h-3.5 w-3.5 text-faint transition-transform', pickAgent && 'rotate-180')} aria-hidden />
             </button>
             {pickAgent && (
-              <div className="animate-in absolute bottom-10 left-0 z-20 w-64 rounded-xl border border-border bg-surface p-1 shadow-pop">
+              <div
+                role="listbox"
+                aria-label="Choose an agent"
+                onKeyDown={(e) => {
+                  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+                  e.preventDefault();
+                  const list = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="option"]'));
+                  const i = list.indexOf(document.activeElement as HTMLElement);
+                  list[(i + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length]?.focus();
+                }}
+                className="pop-in absolute bottom-10 left-0 z-20 max-h-80 w-64 origin-bottom-left overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-pop scrollbar-thin"
+              >
                 {agents.map((a) => (
                   <button
                     key={a.id}
+                    type="button"
+                    role="option"
+                    aria-selected={a.id === agent?.id}
                     onClick={() => {
                       onAgentChange(a);
                       setPickAgent(false);
                     }}
-                    className={cx('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-bg-subtle', a.id === agent?.id && 'bg-bg-subtle')}
+                    className={cx('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors hover:bg-bg-subtle focus:outline-none focus-visible:bg-bg-subtle', a.id === agent?.id && 'bg-bg-subtle')}
                   >
                     <AgentAvatar icon={a.icon} color={a.color} size={28} seed={a.id} />
                     <span className="min-w-0 flex-1">
@@ -167,25 +224,28 @@ export function Composer({
         )}
         {!sessionId && agent && (
           <button
+            type="button"
             onClick={() => !desktopOnly && setRuntime(effectiveRuntime === 'cloud' ? 'desktop' : 'cloud')}
             title={desktopOnly ? 'This model only runs on your computer' : 'Where this task runs'}
-            className="flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-[13px] whitespace-nowrap text-muted hover:bg-bg-subtle"
+            aria-label={desktopOnly ? `Runs on ${device?.name ?? 'your computer'} (this model only runs there)` : `Runs on ${effectiveRuntime === 'cloud' ? 'the cloud computer' : device?.name ?? 'your computer'}. Switch to ${effectiveRuntime === 'cloud' ? 'your computer' : 'the cloud'}`}
+            className="flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-[13px] whitespace-nowrap text-muted transition-colors hover:bg-bg-subtle hover:text-text"
           >
             {effectiveRuntime === 'cloud' ? <Cloud className="h-3.5 w-3.5 shrink-0" /> : <Laptop className="h-3.5 w-3.5 shrink-0" />}
             <span className="max-w-[110px] truncate sm:max-w-[180px]">{effectiveRuntime === 'cloud' ? 'Cloud' : device?.name ?? 'Computer'}</span>
             {effectiveRuntime === 'desktop' && <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', deviceOnline ? 'bg-success' : 'bg-border-strong')} />}
           </button>
         )}
-        <button onClick={() => fileInput.current?.click()} className="flex h-8 w-8 items-center justify-center rounded-full text-faint hover:bg-bg-subtle hover:text-text" aria-label="Attach files" title="Attach files">
+        <button type="button" onClick={() => fileInput.current?.click()} className="flex h-8 w-8 items-center justify-center rounded-full text-faint transition-colors hover:bg-bg-subtle hover:text-text" aria-label={uploading ? 'Uploading files' : 'Attach files'} title="Attach files">
           {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
         </button>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => upload(e.target.files)} />
         <div className="flex-1" />
         <button
+          type="button"
           onClick={send}
           disabled={!agent || busy || (!text.trim() && !files.length) || !!uploading}
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-primary-fg transition hover:opacity-90 disabled:opacity-30"
-          aria-label="Send"
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-primary-fg transition-[opacity,transform] duration-150 hover:opacity-90 enabled:active:scale-90 disabled:opacity-30"
+          aria-label={busy ? 'Sending' : 'Send'}
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4.5 w-4.5" strokeWidth={2.4} />}
         </button>

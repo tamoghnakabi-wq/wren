@@ -4,14 +4,14 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
 import { AgentForm, emptyDraft, toPayload, type AgentDraft } from '@/components/app/agent-form';
 import { AgentAvatar } from '@/components/agent-avatar';
-import { Button, cx, PageHeader, Spinner, useToast } from '@/components/ui';
+import { Button, cx, PageHeader, SkeletonList, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { TEMPLATES } from '@/lib/client/templates';
 import type { Agent } from '@/lib/client/types';
 
 export default function NewAgentPage() {
   return (
-    <Suspense fallback={<Spinner className="mx-auto mt-24" />}>
+    <Suspense fallback={<SkeletonList rows={3} avatar={false} className="mt-16" />}>
       <NewAgent />
     </Suspense>
   );
@@ -64,7 +64,7 @@ function NewAgent() {
         ))}
       </div>
       <AgentForm draft={draft} onChange={setDraft} />
-      <div className="sticky bottom-20 mt-10 flex justify-end gap-2 rounded-2xl border border-border bg-surface/90 p-3 shadow-pop backdrop-blur lg:bottom-4">
+      <div className="sticky bottom-[calc(5rem+env(safe-area-inset-bottom))] mt-10 flex justify-end gap-2 rounded-2xl border border-border bg-surface/90 p-3 shadow-pop backdrop-blur lg:bottom-4">
         <Button variant="ghost" onClick={() => router.back()}>
           Cancel
         </Button>

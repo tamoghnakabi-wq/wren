@@ -11,11 +11,17 @@
   --border-strong: #d6d0c7;
   --text: #1c1917;
   --text-muted: #5f5953;
-  --text-faint: #948c84;
+  --text-faint: #706860; /* ≥4.5:1 on bg, bg-subtle and surface */
   --primary: #1c1917;
   --primary-fg: #ffffff;
   --brand: #d9622b;
   --brand-soft: #fbe9df;
+  /* Filled brand surfaces (badges, brand buttons) and the text on them: 4.5:1 or better. */
+  --brand-solid: #c2531f;
+  /* Brand-coloured small text: ≥4.5:1 on surface and brand-soft. */
+  --brand-ink: #b04a17;
+  --brand-fg: #ffffff;
+  --danger-fg: #ffffff;
   --success: #15803d;
   --success-soft: #dcfce7;
   --warning: #b45309;
@@ -39,11 +45,15 @@
   --border-strong: #403d39;
   --text: #f3f1ee;
   --text-muted: #b3ada6;
-  --text-faint: #7d7770;
+  --text-faint: #908a82; /* ≥4.5:1 on bg, surface and surface-2 */
   --primary: #f3f1ee;
   --primary-fg: #121110;
   --brand: #f07b43;
   --brand-soft: #3a2418;
+  --brand-solid: #f07b43;
+  --brand-ink: #f08a59;
+  --brand-fg: #1a0f08;
+  --danger-fg: #1f0a0a;
   --success: #4ade80;
   --success-soft: #14301f;
   --warning: #fbbf24;
@@ -72,6 +82,10 @@
   --color-primary-fg: var(--primary-fg);
   --color-brand: var(--brand);
   --color-brand-soft: var(--brand-soft);
+  --color-brand-solid: var(--brand-solid);
+  --color-brand-ink: var(--brand-ink);
+  --color-brand-fg: var(--brand-fg);
+  --color-danger-fg: var(--danger-fg);
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
@@ -106,6 +120,18 @@ body {
 :focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+/* No grey flash when tapping buttons and links on phones; press feedback comes from the styles. */
+a,
+button {
+  -webkit-tap-highlight-color: transparent;
 }
 
 ::selection {
@@ -260,8 +286,98 @@ body {
   }
 }
 
-.pb-safe {
-  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+/* A utility (not plain CSS) so a pb-* class next to it still wins: pb-safe only adds the
+   phone's home-indicator inset where there is one. */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Loading placeholders */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-subtle) 0%, var(--border) 50%, var(--bg-subtle) 100%);
+  background-size: 200% 100%;
+  animation: wren-shimmer 1.6s ease-in-out infinite;
+}
+
+/* Small entrances: menus/popovers, dialogs, toasts, the mobile drawer */
+@keyframes wren-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.pop-in {
+  animation: wren-pop 0.14s ease-out both;
+}
+@keyframes wren-dialog {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes wren-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+dialog[open].dialog-in {
+  animation: wren-dialog 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+dialog[open].dialog-in::backdrop {
+  animation: wren-fade 0.2s ease-out both;
+}
+@keyframes wren-toast {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.toast-in {
+  animation: wren-toast 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes wren-slide-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: none;
+  }
+}
+.drawer-in {
+  animation: wren-slide-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.fade-in {
+  animation: wren-fade 0.2s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton,
+  .pop-in,
+  .toast-in,
+  .drawer-in,
+  .fade-in,
+  dialog[open].dialog-in,
+  dialog[open].dialog-in::backdrop {
+    animation: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
 }
 
 /* ------------------------------------------------------------------ Agent characters

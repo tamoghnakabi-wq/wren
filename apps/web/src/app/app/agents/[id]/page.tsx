@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Brain, CalendarClock, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -10,7 +9,7 @@ import { AgentForm, draftFromAgent, toPayload, type AgentDraft } from '@/compone
 import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
 import { SessionList } from '@/components/app/session-list';
-import { Button, EmptyState, Spinner, Tabs, timeAgo, useToast } from '@/components/ui';
+import { Button, ButtonLink, EmptyState, Skeleton, SkeletonList, Tabs, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { modelLabel } from '@/lib/client/sources';
@@ -23,10 +22,28 @@ export default function AgentPage() {
   const router = useRouter();
   const agent = agentById(id);
   const [tab, setTab] = useState<'tasks' | 'settings' | 'memory' | 'schedules'>('tasks');
+  const [shown, setShown] = useState(15);
   const sessions = useLive<Session>({ table: 'sessions', eq: { agent_id: id }, is: { archived_at: null }, order: { column: 'last_event_at' }, limit: 50, realtimeFilter: { column: 'agent_id', value: id } });
 
-  if (agentsLoading) return <Spinner className="mx-auto mt-24" />;
-  if (!agent) return <EmptyState title="Agent not found" action={<Link href="/app/agents"><Button variant="secondary">All agents</Button></Link>} />;
+  if (agentsLoading)
+    return (
+      <div aria-busy="true">
+        <div className="mb-6 flex items-center gap-4">
+          <Skeleton className="h-16 w-16 rounded-full" />
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-3.5 w-28" />
+          </div>
+        </div>
+        <SkeletonList rows={4} avatar={false} />
+      </div>
+    );
+  if (!agent)
+    return (
+      <EmptyState title="Agent not found" action={<ButtonLink href="/app/agents" variant="secondary">All agents</ButtonLink>}>
+        It may have been deleted.
+      </EmptyState>
+    );
 
   return (
     <div>
@@ -51,7 +68,20 @@ export default function AgentPage() {
         {tab === 'tasks' && (
           <div className="space-y-6">
             <Composer agent={agent} onSent={(r) => router.push(`/app/s/${r.sessionId}`)} />
-            {sessions.loading ? <Spinner /> : <SessionList sessions={sessions.rows} showAgent={false} empty={<p className="py-8 text-center text-sm text-muted">No tasks yet. Give {agent.name} something to do.</p>} />}
+            {sessions.loading ? (
+              <SkeletonList rows={4} avatar={false} />
+            ) : (
+              <div className="space-y-3">
+                <SessionList sessions={sessions.rows.slice(0, shown)} showAgent={false} empty={<p className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted">No tasks yet. Give {agent.name} something to do.</p>} />
+                {sessions.rows.length > shown && (
+                  <div className="text-center">
+                    <Button variant="ghost" size="sm" onClick={() => setShown((n) => n + 15)}>
+                      Show more tasks
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
         {tab === 'settings' && <AgentSettings key={agent.id} />}
@@ -68,6 +98,7 @@ function AgentSettings() {
   const agent = agentById(id)!;
   const router = useRouter();
   const toast = useToast();
+  const confirm = useConfirm();
   const [draft, setDraft] = useState<AgentDraft>(() => draftFromAgent(agent));
   const [saving, setSaving] = useState(false);
   const dirty = JSON.stringify(toPayload(draft)) !== JSON.stringify(toPayload(draftFromAgent(agent)));
@@ -79,9 +110,11 @@ function AgentSettings() {
           variant="ghost"
           className="text-danger"
           onClick={async () => {
-            if (!confirm(`Delete ${agent.name}? Its cloud computer and schedules are removed; past tasks stay in history.`)) return;
+            const ok = await confirm({ title: `Delete ${agent.name}?`, body: 'Its cloud computer and schedules are removed. Past tasks stay in your history.', confirmLabel: 'Delete agent', danger: true });
+            if (!ok) return;
             try {
               await api(`/api/agents/${agent.id}`, { method: 'DELETE' });
+              toast(`${agent.name} was deleted`, 'success');
               router.replace('/app/agents');
             } catch (e) {
               toast((e as Error).message, 'error');
@@ -115,7 +148,7 @@ function AgentSettings() {
 function MemoryTab({ agentId, userId }: { agentId: string; userId: string }) {
   const toast = useToast();
   const mem = useLive<{ id: string; content: string; created_at: string }>({ table: 'agent_memories', eq: { agent_id: agentId, user_id: userId }, order: { column: 'created_at' } });
-  if (mem.loading) return <Spinner />;
+  if (mem.loading) return <SkeletonList rows={3} avatar={false} />;
   if (!mem.rows.length)
     return (
       <EmptyState icon={<Brain className="h-6 w-6" />} title="Nothing remembered yet">
@@ -133,9 +166,14 @@ function MemoryTab({ agentId, userId }: { agentId: string; userId: string }) {
           </div>
           <button
             className="rounded-md p-1 text-faint hover:bg-bg-subtle hover:text-danger"
-            aria-label="Forget"
+            aria-label={`Forget: ${m.content.slice(0, 60)}`}
             onClick={async () => {
-              await api(`/api/agents/${agentId}/memories/${m.id}`, { method: 'DELETE' }).catch((e) => toast(e.message, 'error'));
+              try {
+                await api(`/api/agents/${agentId}/memories/${m.id}`, { method: 'DELETE' });
+                toast('Forgotten', 'success');
+              } catch (e) {
+                toast((e as Error).message, 'error');
+              }
               mem.reload();
             }}
           >
@@ -155,7 +193,7 @@ function AgentSchedules({ agentId }: { agentId: string }) {
     const t = setInterval(() => force((n) => n + 1), 30000);
     return () => clearInterval(t);
   }, []);
-  if (s.loading) return <Spinner />;
+  if (s.loading) return <SkeletonList rows={2} avatar={false} />;
   return (
     <div className="space-y-3">
       {s.rows.map((x) => (
@@ -169,11 +207,9 @@ function AgentSchedules({ agentId }: { agentId: string }) {
           </div>
         </div>
       ))}
-      <Link href={`/app/schedules?agent=${agentId}`}>
-        <Button variant="secondary">
-          <CalendarClock className="h-4 w-4" /> {s.rows.length ? 'Manage schedules' : 'Add a schedule'}
-        </Button>
-      </Link>
+      <ButtonLink href={`/app/schedules?agent=${agentId}`} variant="secondary">
+        <CalendarClock className="h-4 w-4" aria-hidden /> {s.rows.length ? 'Manage schedules' : 'Add a schedule'}
+      </ButtonLink>
     </div>
   );
 }

@@ -3,12 +3,12 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowRight, Check, KeyRound, Laptop, Sparkles } from 'lucide-react';
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { ApprovalCard } from '@/components/app/approval-card';
 import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
 import { SessionList } from '@/components/app/session-list';
-import { Card, cx, Spinner } from '@/components/ui';
+import { Card, cx, Skeleton, SkeletonList } from '@/components/ui';
 import { useLive } from '@/lib/client/live';
 import type { Agent, Connection, Session } from '@/lib/client/types';
 import { TEMPLATES } from '@/lib/client/templates';
@@ -16,7 +16,7 @@ import { AgentAvatar } from '@/components/agent-avatar';
 
 export default function HomePage() {
   return (
-    <Suspense fallback={<Spinner className="mx-auto mt-24" />}>
+    <Suspense fallback={<HomeSkeleton />}>
       <Home />
     </Suspense>
   );
@@ -31,22 +31,23 @@ function Home() {
   const { agents, agentsLoading, approvals, active, profile, userId, devices } = useApp();
   const router = useRouter();
   const params = useSearchParams();
-  const [agent, setAgent] = useState<Agent | undefined>();
+  const [picked, setAgent] = useState<Agent | undefined>();
   const recent = useLive<Session>({ table: 'sessions', eq: { user_id: userId }, is: { archived_at: null }, order: { column: 'last_event_at' }, limit: 15, realtimeFilter: { column: 'user_id', value: userId } });
   const connections = useLive<Connection>({ table: 'connections', eq: { user_id: userId } });
 
-  useEffect(() => {
-    if (agent && agents.some((a) => a.id === agent.id)) return;
+  // The agent you picked, else the one named in the URL, else the most recently active one.
+  const fallback = useMemo(() => {
     const pref = params.get('agent');
     const byLast = [...agents].sort((a, b) => String(b.last_active_at ?? b.created_at).localeCompare(String(a.last_active_at ?? a.created_at)));
-    setAgent(agents.find((a) => a.id === pref) ?? byLast[0]);
-  }, [agents, agent, params]);
+    return agents.find((a) => a.id === pref) ?? byLast[0];
+  }, [agents, params]);
+  const agent = picked && agents.some((a) => a.id === picked.id) ? picked : fallback;
 
   const name = profile?.display_name?.split(' ')[0];
   const waitingNoApproval = active.filter((s) => s.status === 'waiting' && !approvals.some((a) => a.session_id === s.id));
   const hasModel = connections.rows.some((c) => c.kind === 'model') || devices.length > 0 || agents.some((a) => ['platform', 'test'].includes(a.model?.source as string));
 
-  if (agentsLoading) return <Spinner className="mx-auto mt-24" />;
+  if (agentsLoading) return <HomeSkeleton />;
 
   return (
     <div className="space-y-10">
@@ -92,7 +93,7 @@ function Home() {
         <section>
           <SectionTitle action={<Link href="/app/agents" className="text-[13px] text-muted hover:text-text">All agents →</Link>}>Recent tasks</SectionTitle>
           {recent.loading ? (
-            <Spinner />
+            <SkeletonList rows={5} />
           ) : (
             <SessionList
               sessions={recent.rows.filter((s) => !['queued', 'running', 'waiting', 'paused'].includes(s.status))}
@@ -101,6 +102,23 @@ function Home() {
           )}
         </section>
       )}
+    </div>
+  );
+}
+
+/** Same shape as the page, so nothing jumps when it loads. */
+function HomeSkeleton() {
+  return (
+    <div className="space-y-10" aria-busy="true">
+      <section className="pt-2 lg:pt-6">
+        <Skeleton className="h-10 w-72 max-w-full sm:h-12" />
+        <Skeleton className="mt-3 h-4 w-96 max-w-full" />
+        <Skeleton className="mt-6 h-[118px] w-full rounded-[22px]" />
+      </section>
+      <section>
+        <Skeleton className="mb-3 h-3.5 w-28" />
+        <SkeletonList rows={5} />
+      </section>
     </div>
   );
 }

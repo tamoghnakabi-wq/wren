@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { MailCheck } from 'lucide-react';
+import { Eye, EyeOff, MailCheck } from 'lucide-react';
 import { useState } from 'react';
 import { supabase } from '@/lib/client/supabase';
 import { Logo } from './brand';
@@ -32,6 +32,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(params.get('error'));
   const [sent, setSent] = useState<'confirm' | 'reset' | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
   const sb = supabase();
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
@@ -76,8 +77,8 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
 
   if (sent)
     return (
-      <div className="text-center">
-        <MailCheck className="mx-auto h-10 w-10 text-brand" />
+      <div className="animate-in text-center" role="status">
+        <MailCheck className="mx-auto h-10 w-10 text-brand" aria-hidden />
         <h1 className="mt-4 text-xl font-semibold">Check your email</h1>
         <p className="mt-2 text-sm text-muted">
           {sent === 'confirm' ? 'We sent a confirmation link to ' : 'We sent a password reset link to '}
@@ -103,21 +104,51 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
       )}
       <div>
         <Label htmlFor="email">Email</Label>
-        <Input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Input id="email" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} required value={email} onChange={(e) => setEmail(e.target.value)} aria-invalid={!!error || undefined} aria-describedby={error ? 'auth-error' : undefined} />
       </div>
       <div>
         <Label htmlFor="password">Password</Label>
-        <Input id="password" type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required minLength={mode === 'signup' ? 8 : 1} value={password} onChange={(e) => setPassword(e.target.value)} />
-        {mode === 'signup' && <p className="mt-1 text-[12px] text-faint">At least 8 characters.</p>}
+        <div className="relative">
+          <Input
+            id="password"
+            type={showPassword ? 'text' : 'password'}
+            autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+            required
+            minLength={mode === 'signup' ? 8 : 1}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="pr-11"
+            aria-invalid={!!error || undefined}
+            aria-describedby={[mode === 'signup' ? 'password-hint' : '', error ? 'auth-error' : ''].filter(Boolean).join(' ') || undefined}
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword((v) => !v)}
+            className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-xl text-faint transition-colors hover:text-text"
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
+            aria-pressed={showPassword}
+          >
+            {showPassword ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+          </button>
+        </div>
+        {mode === 'signup' && (
+          <p id="password-hint" className="mt-1 text-[12px] text-faint">
+            At least 8 characters.
+          </p>
+        )}
       </div>
-      {error && <p className="rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
+      {error && (
+        <p id="auth-error" role="alert" className="animate-in rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">
+          {error}
+        </p>
+      )}
       <Button type="submit" className="w-full" size="lg" loading={busy}>
         {mode === 'signup' ? 'Create account' : 'Sign in'}
       </Button>
       <div className="flex items-center justify-between text-[13px] text-muted">
         {mode === 'login' ? (
           <>
-            <button type="button" onClick={reset} className="hover:text-text">
+            <button type="button" onClick={reset} disabled={busy} className="transition-colors hover:text-text disabled:opacity-50">
               Forgot password?
             </button>
             <Link href={`/signup${next !== '/app' ? `?next=${encodeURIComponent(next)}` : ''}`} className="font-medium text-text">

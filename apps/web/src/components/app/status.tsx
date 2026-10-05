@@ -19,7 +19,7 @@ export function StatusPill({ status, className }: { status: SessionStatus; class
   const m = MAP[status] ?? MAP.idle;
   return (
     <span className={cx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium whitespace-nowrap', m.cls, className)}>
-      <m.Icon className={cx('h-3.5 w-3.5', status === 'running' && 'animate-spin')} />
+      <m.Icon className={cx('h-3.5 w-3.5', status === 'running' && 'motion-safe:animate-spin')} aria-hidden />
       {m.label}
     </span>
   );

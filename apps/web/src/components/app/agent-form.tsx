@@ -10,7 +10,7 @@ import type { Agent, Connection } from '@/lib/client/types';
 import { AGENT_COLORS } from '../agent-avatar';
 import { CHARACTER_KEYS, CHARACTERS, characterFor, MOOD_LABEL, type CharacterKey, type Mood } from '@/lib/characters';
 import { AgentCharacter } from '../agent-character';
-import { Badge, Card, cx, Input, Label, Select, Spinner, Switch, Textarea } from '../ui';
+import { Badge, Card, cx, Input, Label, Select, Skeleton, Spinner, Switch, Textarea } from '../ui';
 import { useApp } from './provider';
 
 export interface AgentDraft {
@@ -203,22 +203,19 @@ export function AgentForm({ draft, onChange }: { draft: AgentDraft; onChange: (d
 
 function ChoiceCard({ on, onClick, icon, title, body, disabled }: { on: boolean; onClick: () => void; icon?: React.ReactNode; title: string; body: string; disabled?: boolean }) {
   return (
-    <button type="button" disabled={disabled} onClick={onClick} className={cx('relative flex items-start gap-3 rounded-2xl border p-3.5 text-left transition disabled:opacity-40', on ? 'border-text bg-surface shadow-card' : 'border-border hover:border-border-strong')}>
+    <button type="button" disabled={disabled} aria-pressed={on} onClick={onClick} className={cx('relative flex items-start gap-3 rounded-2xl border p-3.5 text-left transition-[border-color,box-shadow,background-color] duration-150 disabled:cursor-not-allowed disabled:opacity-40', on ? 'border-text bg-surface shadow-card' : 'border-border hover:border-border-strong hover:bg-surface/60')}>
       {icon && <span className="mt-0.5 text-muted">{icon}</span>}
       <span>
         <span className="block text-sm font-semibold">{title}</span>
         <span className="mt-0.5 block text-[12.5px] leading-snug text-muted">{body}</span>
       </span>
-      {on && <Check className="absolute top-3 right-3 h-4 w-4" />}
+      {on && <Check className="pop-in absolute top-3 right-3 h-4 w-4" aria-hidden />}
     </button>
   );
 }
 
 function ModelPicker({ draft, onChange, connections, loadingConnections }: { draft: AgentDraft; onChange: (d: AgentDraft) => void; connections: Connection[]; loadingConnections: boolean }) {
   const { devices, desktop: desk, profile, flags } = useApp();
-  const [models, setModels] = useState<{ id: string; name: string }[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
   const source = draft.model.source;
   const keyFor = (p: string) => connections.find((c) => c.provider === p && c.kind === 'model');
   const chatgptModels = useMemo(() => devices.flatMap((d) => d.capabilities?.chatgpt?.models ?? []), [devices]);
@@ -231,21 +228,15 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
     return true;
   });
 
+  // Engines and local servers list their models right here; other providers are asked.
+  const known = !source ? [] : ENGINE_MODELS[source] ?? (source === 'local' ? localModels : null);
+  const knownNote = source === 'local' && !localModels.length ? 'No local models found. Start LM Studio or Ollama on your computer, then check Settings in the desktop app.' : null;
+  const fetchKey = known ? null : JSON.stringify([source, draft.model.connectionId, connections.length, chatgptModels.length]);
+  const [fetched, setFetched] = useState<{ key: string; models: { id: string; name: string }[]; note: string | null } | null>(null);
+
   useEffect(() => {
+    if (!fetchKey) return;
     let cancel = false;
-    setNote(null);
-    if (!source) return;
-    const engines = ENGINE_MODELS[source];
-    if (engines) {
-      setModels(engines);
-      return;
-    }
-    if (source === 'local') {
-      setModels(localModels);
-      if (!localModels.length) setNote('No local models found. Start LM Studio or Ollama on your computer, then check Settings in the desktop app.');
-      return;
-    }
-    setLoading(true);
     const params = new URLSearchParams({ source: source === 'openai' && !keyFor('openai') ? 'openai' : source });
     if (draft.model.connectionId) params.set('connectionId', draft.model.connectionId);
     const wantApi = source !== 'openai' || keyFor('openai');
@@ -258,16 +249,19 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
           list = [...chatgptModels.filter((m) => !seen.has(m.id)), ...list];
           if (!list.length) list = [{ id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }, { id: 'gpt-6-astra', name: 'GPT-6 Astra' }, { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' }];
         }
-        setModels(list);
-        if (r.error) setNote(r.error);
-        else if (r.needsConnection && source !== 'openai') setNote('Add an API key for this provider in Connections to load its models.');
+        const note = r.error ?? (r.needsConnection && source !== 'openai' ? 'Add an API key for this provider in Connections to load its models.' : null);
+        setFetched({ key: fetchKey, models: list, note });
       })
-      .catch((e) => !cancel && setNote((e as Error).message))
-      .finally(() => !cancel && setLoading(false));
+      .catch((e) => !cancel && setFetched({ key: fetchKey, models: [], note: (e as Error).message }));
     return () => {
       cancel = true;
     };
-  }, [source, draft.model.connectionId, connections.length, chatgptModels.length, localModels.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const current = fetched?.key === fetchKey ? fetched : null;
+  const models = known ?? current?.models ?? [];
+  const note = known ? knownNote : current?.note ?? null;
+  const loading = !!fetchKey && !current;
 
   const status = (id: string): { tone: 'success' | 'warning' | 'neutral'; text: string } => {
     switch (id) {
@@ -297,7 +291,11 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   return (
     <div className="space-y-3">
       {loadingConnections ? (
-        <Spinner />
+        <div className="grid gap-2 sm:grid-cols-2" aria-busy="true">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-[74px] rounded-xl" />
+          ))}
+        </div>
       ) : (
         <div className="grid gap-2 sm:grid-cols-2">
           {available.map((s) => {
@@ -443,6 +441,8 @@ function CharacterStudio({
                   onClick={() => onCharacter(k)}
                   onMouseEnter={() => setHover(k)}
                   onMouseLeave={() => setHover(null)}
+                  onFocus={() => setHover(k)}
+                  onBlur={() => setHover(null)}
                   className={cx('flex flex-col items-center rounded-xl border px-1 pt-1.5 pb-1 transition', character === k ? 'border-text bg-surface shadow-sm' : 'border-transparent hover:bg-bg-subtle')}
                 >
                   <AgentCharacter character={k} color={color} size={44} mood={hover === k ? 'hello' : 'idle'} still={hover !== k && character !== k} seed={k} />
@@ -455,7 +455,7 @@ function CharacterStudio({
             <p className="mb-1.5 text-sm font-medium text-text">Colour</p>
             <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Colour">
               {Object.entries(AGENT_COLORS).map(([k, c]) => (
-                <button key={k} type="button" role="radio" aria-checked={color === k} onClick={() => onColor(k)} className={cx('h-7 w-7 rounded-full ring-offset-2 ring-offset-bg transition', color === k && 'ring-2')} style={{ background: c.bg, ['--tw-ring-color' as string]: c.ring }} aria-label={k} />
+                <button key={k} type="button" role="radio" aria-checked={color === k} onClick={() => onColor(k)} className={cx('h-7 w-7 rounded-full ring-offset-2 ring-offset-bg transition-[box-shadow,transform] duration-150 hover:scale-110', color === k && 'ring-2')} style={{ background: c.bg, ['--tw-ring-color' as string]: c.ring }} aria-label={k[0].toUpperCase() + k.slice(1)} />
               ))}
             </div>
           </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import { ExternalLink } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api } from '@/lib/client/api';
 import { isLiveDevice, type Agent } from '@/lib/client/types';
 import { Button, Dialog } from '../ui';
@@ -33,13 +33,11 @@ export function ChatGPTPlanBadge() {
 /** One-time confirmation after the first Sign in with ChatGPT with plan usage (OpenAI UI guidelines). */
 export function ChatGPTWelcome() {
   const { desktop, profile } = useApp();
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (desktop?.chatgpt.signedIn && desktop.chatgpt.planUsage && profile && !profile.settings?.chatgptWelcomed) setOpen(true);
-  }, [desktop?.chatgpt.signedIn, desktop?.chatgpt.planUsage, profile]);
+  const [dismissed, setDismissed] = useState(false);
+  const open = !dismissed && !!desktop?.chatgpt.signedIn && !!desktop.chatgpt.planUsage && !!profile && !profile.settings?.chatgptWelcomed;
   if (!open) return null;
   const done = () => {
-    setOpen(false);
+    setDismissed(true);
     api('/api/account/settings', { body: { settings: { chatgptWelcomed: true } } }).catch(() => {});
   };
   return (

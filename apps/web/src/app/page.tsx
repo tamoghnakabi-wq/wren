@@ -1,5 +1,6 @@
 import Image from 'next/image';
 import Link from 'next/link';
+import { cx } from '@/lib/cx';
 import { ArrowRight, Check, Cloud, KeyRound, Laptop, ListChecks, Lock, MonitorSmartphone, Repeat, ShieldCheck, Smartphone, Terminal, Globe, FileText } from 'lucide-react';
 import { GithubMark as Github } from '@/components/brand';
 import { AgentAvatar } from '@/components/agent-avatar';
@@ -31,7 +32,7 @@ function Hero() {
   return (
     <section className="relative">
       <div className="pointer-events-none absolute inset-x-0 -top-24 -z-10 h-[620px] bg-[radial-gradient(60%_50%_at_50%_0%,var(--brand-soft),transparent_70%)]" />
-      <div className="mx-auto grid max-w-6xl items-center gap-12 px-4 pt-14 pb-20 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:pt-24">
+      <div className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)] items-center gap-12 px-4 pt-14 pb-20 sm:px-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:pt-24">
         <div>
           <span className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-[12.5px] text-muted shadow-sm">
             <span className="h-1.5 w-1.5 rounded-full bg-success" /> Web · macOS · Windows
@@ -74,16 +75,16 @@ function HeroMock() {
             <p className="truncate text-sm font-semibold">Find a 2-bed rental near the CBD</p>
             <p className="text-[12px] text-faint">Scout · Cloud computer</p>
           </div>
-          <span className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-[12px] font-medium text-success">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-[12px] font-medium text-success">
             <span className="h-1.5 w-1.5 animate-wren-pulse rounded-full bg-success" /> Working
           </span>
         </div>
         <div className="mt-3 space-y-1.5">
           {steps.map((s, i) => (
             <div key={i} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13px]">
-              <s.icon className="h-4 w-4 text-faint" />
-              <span className={s.done ? 'text-muted' : 'text-shimmer font-medium'}>{s.text}</span>
-              <span className="ml-auto">{s.done ? <Check className="h-3.5 w-3.5 text-success" /> : <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-success border-t-transparent" />}</span>
+              <s.icon className="h-4 w-4 shrink-0 text-faint" aria-hidden />
+              <span className={cx('min-w-0 truncate', s.done ? 'text-muted' : 'text-shimmer font-medium')}>{s.text}</span>
+              <span className="ml-auto shrink-0">{s.done ? <Check className="h-3.5 w-3.5 text-success" aria-hidden /> : <span className="block h-3.5 w-3.5 rounded-full border-2 border-success border-t-transparent motion-safe:animate-spin" />}</span>
             </div>
           ))}
         </div>
@@ -195,7 +196,7 @@ function Crew() {
             <div key={m.c} className="flex flex-col items-center rounded-2xl border border-border bg-surface px-3 pt-5 pb-4 text-center shadow-card">
               <AgentCharacter character={m.c} color={m.color} mood={m.mood} size={76} seed={m.c} title={`${CHARACTERS[m.c].name}, ${m.label.toLowerCase()}`} />
               <p className="mt-2 text-sm font-semibold">{CHARACTERS[m.c].name}</p>
-              <p className="text-[12px] font-medium text-brand">{m.label}</p>
+              <p className="text-[12px] font-medium text-brand-ink">{m.label}</p>
               <p className="mt-1 text-[12px] leading-snug text-muted">{m.line}</p>
             </div>
           ))}
@@ -208,7 +209,7 @@ function Crew() {
 function RemoteControl() {
   return (
     <section className="bg-primary text-primary-fg">
-      <div className="mx-auto grid max-w-6xl items-center gap-12 px-4 py-24 sm:px-6 lg:grid-cols-2">
+      <div className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)] items-center gap-12 px-4 py-24 sm:px-6 lg:grid-cols-2">
         <div>
           <Smartphone className="h-8 w-8 opacity-80" />
           <h2 className="mt-4 font-display text-[36px] leading-tight tracking-tight sm:text-[44px]">Your agents, in your pocket.</h2>

@@ -4,7 +4,7 @@ import { ExternalLink } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
 import { useApp } from '@/components/app/provider';
-import { Card, formatTokens, PageHeader, Spinner } from '@/components/ui';
+import { Card, formatTokens, PageHeader, Skeleton } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { sourceInfo } from '@/lib/client/sources';
@@ -34,6 +34,8 @@ const BILLED_BY: Record<string, string> = {
   test: 'Test model',
 };
 
+const fmtDay = (d: string) => new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
 export default function UsagePage() {
   const { userId, agentById } = useApp();
   // The newest usage row (live) only tells us when to re-fetch the totals.
@@ -51,15 +53,18 @@ export default function UsagePage() {
   }, [changeKey]);
   const rows = { loading: recent === null };
 
+  // "Today" as of when the page opened (read once, not on every render).
+  const [now] = useState(() => Date.now());
   const byDay = useMemo(() => {
     const m = new Map<string, number>();
-    for (let i = 29; i >= 0; i--) m.set(new Date(Date.now() - i * 86400_000).toISOString().slice(0, 10), 0);
+    for (let i = 29; i >= 0; i--) m.set(new Date(now - i * 86400_000).toISOString().slice(0, 10), 0);
     for (const r of recent ?? []) {
       const k = r.day;
       if (m.has(k)) m.set(k, m.get(k)! + r.input_tokens + r.output_tokens);
     }
     return [...m.entries()];
-  }, [recent]);
+  }, [recent, now]);
+  const peak = byDay.reduce((p, d) => (d[1] > p[1] ? d : p), ['', 0] as [string, number]);
   const max = Math.max(1, ...byDay.map(([, v]) => v));
   const group = (key: (r: UsageRow) => string) => {
     const m = new Map<string, { input: number; output: number; cached: number; calls: number }>();
@@ -77,7 +82,19 @@ export default function UsagePage() {
   const list = recent ?? [];
   const total = list.reduce((n, r) => n + r.input_tokens + r.output_tokens, 0);
 
-  if (rows.loading) return <Spinner className="mx-auto mt-24" />;
+  if (rows.loading)
+    return (
+      <div aria-busy="true">
+        <Skeleton className="h-7 w-28" />
+        <Skeleton className="mt-2 mb-6 h-4 w-96 max-w-full" />
+        <div className="grid gap-4 sm:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-24 rounded-2xl" />
+          ))}
+        </div>
+        <Skeleton className="mt-4 h-52 rounded-2xl" />
+      </div>
+    );
   return (
     <div>
       <PageHeader title="Usage" subtitle="Model usage by your agents over the last 30 days. Each provider bills you directly; Wren adds nothing on top." />
@@ -88,8 +105,15 @@ export default function UsagePage() {
       </div>
 
       <Card className="mt-4 p-5">
-        <p className="mb-3 text-sm font-medium">Daily tokens</p>
-        <div className="flex h-32 items-end gap-[3px]" role="img" aria-label="Daily token usage chart">
+        <div className="mb-3 flex items-baseline justify-between gap-3">
+          <p className="text-sm font-medium">Daily tokens</p>
+          {peak[1] > 0 && <p className="text-[12px] text-faint">Busiest: {fmtDay(peak[0])} · {formatTokens(peak[1])}</p>}
+        </div>
+        <div
+          className="flex h-32 items-end gap-[3px]"
+          role="img"
+          aria-label={`Tokens per day over the last ${byDay.length} days. Total ${formatTokens(byDay.reduce((n, [, v]) => n + v, 0))}${peak[1] ? `, busiest day ${fmtDay(peak[0])} with ${formatTokens(peak[1])}` : ''}.`}
+        >
           {byDay.map(([d, v]) => (
             <div key={d} className="group relative flex-1">
               <div className="w-full rounded-t-[3px] bg-brand/80 transition group-hover:bg-brand" style={{ height: `${Math.max(v ? 3 : 1, (v / max) * 120)}px`, opacity: v ? 1 : 0.25 }} />
@@ -99,6 +123,12 @@ export default function UsagePage() {
             </div>
           ))}
         </div>
+        {byDay.length > 0 && (
+          <div className="mt-2 flex justify-between text-[11px] text-faint tabular-nums" aria-hidden>
+            <span>{fmtDay(byDay[0][0])}</span>
+            <span>Today</span>
+          </div>
+        )}
       </Card>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">

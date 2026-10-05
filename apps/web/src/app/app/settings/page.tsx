@@ -2,10 +2,10 @@
 
 import { useRouter } from 'next/navigation';
 import { BellRing, Check, ExternalLink, FolderPlus, Laptop, Moon, RefreshCw, Sun, SunMoon, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { enablePush, pushState, type PushState } from '@/components/app/push';
 import { useApp } from '@/components/app/provider';
-import { Badge, Button, Card, cx, Input, Label, PageHeader, Select, Switch, useToast } from '@/components/ui';
+import { Badge, Button, Card, cx, Input, Label, PageHeader, Select, Switch, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useDesktop, type DesktopPolicy, type WrenDesktop } from '@/lib/client/desktop';
 import { supabase } from '@/lib/client/supabase';
@@ -54,10 +54,14 @@ function Profile() {
   const toast = useToast();
   const [name, setName] = useState(profile?.display_name ?? '');
   const [tz, setTz] = useState(profile?.timezone ?? 'UTC');
-  useEffect(() => {
+  // When the saved profile changes (it loads, or another tab saves), show it.
+  const saved = `${profile?.display_name ?? ''}|${profile?.timezone ?? 'UTC'}`;
+  const [shownFor, setShownFor] = useState(saved);
+  if (shownFor !== saved) {
+    setShownFor(saved);
     setName(profile?.display_name ?? '');
     setTz(profile?.timezone ?? 'UTC');
-  }, [profile?.display_name, profile?.timezone]);
+  }
   const zones = [...new Set([tz, 'UTC', ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [])])];
   const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const save = async (body: object) => {
@@ -193,8 +197,10 @@ function ModelAccess() {
 function Notifications() {
   const toast = useToast();
   const d = useDesktop();
-  const [state, setState] = useState<PushState>('unsupported');
-  useEffect(() => setState(pushState()), []);
+  // The browser's permission (read after hydration), unless this page just changed it.
+  const current = useSyncExternalStore(noSubscribe, pushState, () => 'unsupported' as PushState);
+  const [changed, setState] = useState<PushState | null>(null);
+  const state = changed ?? current;
   return (
     <Section title="Notifications" subtitle="Get told when agents finish, ask a question, or need approval.">
       <Row
@@ -313,31 +319,57 @@ function ThisComputer({ d }: { d: WrenDesktop }) {
   );
 }
 
+const THEME_EVENT = 'wren-theme';
+const readTheme = () => {
+  try {
+    return localStorage.getItem('wren-theme') ?? 'system';
+  } catch {
+    return 'system';
+  }
+};
+const subscribeTheme = (cb: () => void) => {
+  window.addEventListener('storage', cb);
+  window.addEventListener(THEME_EVENT, cb);
+  return () => {
+    window.removeEventListener('storage', cb);
+    window.removeEventListener(THEME_EVENT, cb);
+  };
+};
+function noSubscribe() {
+  return () => {};
+}
+
 function Appearance() {
-  const [theme, setTheme] = useState('system');
-  useEffect(() => {
-    try {
-      setTheme(localStorage.getItem('wren-theme') ?? 'system');
-    } catch {}
-  }, []);
+  const theme = useSyncExternalStore(subscribeTheme, readTheme, () => 'system');
   const apply = (t: string) => {
-    setTheme(t);
     try {
       localStorage.setItem('wren-theme', t);
     } catch {}
     const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
     document.documentElement.classList.toggle('dark', dark);
+    window.dispatchEvent(new Event(THEME_EVENT));
   };
   return (
     <Section title="Appearance">
-      <div className="flex gap-2 px-4 py-4">
+      <div className="grid grid-cols-3 gap-2 px-4 py-4" role="radiogroup" aria-label="Theme">
         {[
           { id: 'system', label: 'System', Icon: SunMoon },
           { id: 'light', label: 'Light', Icon: Sun },
           { id: 'dark', label: 'Dark', Icon: Moon },
         ].map((o) => (
-          <button key={o.id} onClick={() => apply(o.id)} className={cx('flex flex-1 flex-col items-center gap-1.5 rounded-xl border py-3 text-sm', theme === o.id ? 'border-text bg-surface' : 'border-border text-muted')}>
-            <o.Icon className="h-5 w-5" /> {o.label}
+          <button
+            key={o.id}
+            type="button"
+            role="radio"
+            aria-checked={theme === o.id}
+            onClick={() => apply(o.id)}
+            className={cx(
+              'relative flex flex-col items-center gap-1.5 rounded-xl border py-3 text-sm transition-[border-color,box-shadow,color,background-color] duration-150',
+              theme === o.id ? 'border-brand bg-brand-soft/40 font-medium text-text ring-4 ring-[var(--ring)]' : 'border-border text-muted hover:border-border-strong hover:text-text',
+            )}
+          >
+            <o.Icon className="h-5 w-5" aria-hidden /> {o.label}
+            {theme === o.id && <Check className="absolute top-2 right-2 h-3.5 w-3.5 text-brand" aria-hidden />}
           </button>
         ))}
       </div>
@@ -348,6 +380,8 @@ function Appearance() {
 function Account() {
   const router = useRouter();
   const toast = useToast();
+  const confirm = useConfirm();
+  const [deleting, setDeleting] = useState(false);
   return (
     <Section title="Account">
       <Row title="Sign out" body="Signs out of this browser.">
@@ -367,15 +401,24 @@ function Account() {
         <Button
           size="sm"
           variant="danger"
+          loading={deleting}
           onClick={async () => {
-            const v = prompt('This cannot be undone. Type DELETE to permanently delete your account.');
-            if (v !== 'DELETE') return;
+            const ok = await confirm({
+              title: 'Delete your account?',
+              body: 'This permanently deletes your agents, tasks, files, connections and linked computers. It can’t be undone.',
+              confirmLabel: 'Delete account',
+              danger: true,
+              typeToConfirm: 'DELETE',
+            });
+            if (!ok) return;
+            setDeleting(true);
             try {
               await api('/api/account/settings', { method: 'DELETE', body: { confirm: 'DELETE' } });
               await supabase().auth.signOut();
               router.replace('/');
             } catch (e) {
               toast((e as Error).message, 'error');
+              setDeleting(false);
             }
           }}
         >

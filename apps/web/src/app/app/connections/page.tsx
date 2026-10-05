@@ -1,11 +1,10 @@
 'use client';
 
-import Link from 'next/link';
 import { CheckCircle2, Circle, Cpu, Download, ExternalLink, KeyRound, Laptop, Monitor, Plug, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { GithubMark as Github } from '@/components/brand';
 import { useState } from 'react';
 import { useApp } from '@/components/app/provider';
-import { Badge, Button, Card, cx, Dialog, Input, Label, PageHeader, Spinner, timeAgo, useToast } from '@/components/ui';
+import { Badge, Button, ButtonLink, Card, cx, Dialog, Input, Label, PageHeader, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useDesktop } from '@/lib/client/desktop';
 import { useLive } from '@/lib/client/live';
@@ -39,7 +38,11 @@ export default function ConnectionsPage() {
           Wren uses your existing subscriptions wherever the provider officially allows it — today that means on your own computer. Cloud agents need an API key because no provider currently lets third-party clouds use consumer plans.
         </p>
         {conns.loading ? (
-          <Spinner />
+          <div className="grid gap-4 lg:grid-cols-2" aria-busy="true">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-56 rounded-2xl" />
+            ))}
+          </div>
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
             <ProviderCard
@@ -160,18 +163,20 @@ function ProviderCard({ name, plan, keys, keyLabel, onAdd, reload }: { name: str
 
 function KeyRow({ c, reload }: { c: Connection; reload: () => void }) {
   const toast = useToast();
+  const confirm = useConfirm();
   const [busy, setBusy] = useState(false);
   return (
     <div className="mt-1 flex items-center gap-2 text-[12.5px]">
-      <span className={cx('h-1.5 w-1.5 rounded-full', c.status === 'active' ? 'bg-success' : 'bg-danger')} />
+      <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', c.status === 'active' ? 'bg-success' : 'bg-danger')} aria-hidden />
+      <span className="sr-only">{c.status === 'active' ? 'Working:' : 'Not working:'}</span>
       <span className="truncate">{c.label}</span>
       <span className="font-mono text-faint">{c.secret_hint}</span>
       {c.status === 'error' && <span className="truncate text-danger">{c.last_error}</span>}
       <span className="flex-1" />
       <button
-        className="rounded p-1 text-faint hover:text-text"
+        className="rounded p-1 text-faint transition-colors hover:text-text"
         title="Test"
-        aria-label="Test connection"
+        aria-label={`Test ${c.label}`}
         onClick={async () => {
           setBusy(true);
           const r = await api<{ ok: boolean; error?: string }>(`/api/connections/${c.id}`, { body: {} }).catch((e) => ({ ok: false, error: (e as Error).message }));
@@ -183,11 +188,17 @@ function KeyRow({ c, reload }: { c: Connection; reload: () => void }) {
         <RefreshCw className={cx('h-3.5 w-3.5', busy && 'animate-spin')} />
       </button>
       <button
-        className="rounded p-1 text-faint hover:text-danger"
-        aria-label="Remove"
+        className="rounded p-1 text-faint transition-colors hover:text-danger"
+        aria-label={`Remove ${c.label}`}
         onClick={async () => {
-          if (!confirm(`Remove ${c.label}? Agents using it will stop working until you add another.`)) return;
-          await api(`/api/connections/${c.id}`, { method: 'DELETE' });
+          const ok = await confirm({ title: `Remove ${c.label}?`, body: 'Agents using it stop working until you add another way to reach that model.', confirmLabel: 'Remove', danger: true });
+          if (!ok) return;
+          try {
+            await api(`/api/connections/${c.id}`, { method: 'DELETE' });
+            toast(`${c.label} removed`, 'success');
+          } catch (e) {
+            toast((e as Error).message, 'error');
+          }
           reload();
         }}
       >
@@ -274,6 +285,7 @@ function EngineAction({ engine, install }: { engine: 'claude-code' | 'grok-build
 }
 
 function Devices() {
+  const confirm = useConfirm();
   const { devices } = useApp();
   const d = useDesktop();
   const toast = useToast();
@@ -283,12 +295,15 @@ function Devices() {
         const online = isLiveDevice(dev);
         const caps = dev.capabilities ?? {};
         return (
-          <Card key={dev.id} className="flex flex-wrap items-center gap-3 p-4">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-bg-subtle">{dev.platform === 'darwin' ? <Laptop className="h-5 w-5" /> : <Monitor className="h-5 w-5" />}</span>
+          <Card key={dev.id} className="flex items-start gap-3 p-4">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-bg-subtle">{dev.platform === 'darwin' ? <Laptop className="h-5 w-5" aria-hidden /> : <Monitor className="h-5 w-5" aria-hidden />}</span>
             <div className="min-w-0 flex-1">
-              <p className="flex items-center gap-2 font-medium">
-                {dev.name} <span className={cx('h-2 w-2 rounded-full', online ? 'bg-success' : 'bg-border-strong')} />
-                <span className="text-[12px] font-normal text-faint">{online ? 'Online' : `Last seen ${timeAgo(dev.last_seen_at)}`}</span>
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="min-w-0 truncate font-medium">{dev.name}</span>
+                <span className="inline-flex items-center gap-1.5 text-[12px] text-faint">
+                  <span className={cx('h-2 w-2 rounded-full', online ? 'bg-success' : 'bg-border-strong')} aria-hidden />
+                  {online ? 'Online' : `Last seen ${timeAgo(dev.last_seen_at)}`}
+                </span>
               </p>
               <p className="text-[12.5px] text-muted">
                 {dev.platform === 'darwin' ? 'macOS' : dev.platform === 'win32' ? 'Windows' : dev.platform} · Wren {dev.app_version ?? '?'}
@@ -310,8 +325,14 @@ function Devices() {
               variant="ghost"
               className="text-danger"
               onClick={async () => {
-                if (!confirm(`Unlink ${dev.name}? It stops receiving tasks immediately.`)) return;
-                await api(`/api/devices/${dev.id}`, { method: 'DELETE' }).catch((e) => toast((e as Error).message, 'error'));
+                const ok = await confirm({ title: `Unlink ${dev.name}?`, body: 'It stops receiving tasks right away. You can link it again from the Wren app on that computer.', confirmLabel: 'Unlink', danger: true });
+                if (!ok) return;
+                try {
+                  await api(`/api/devices/${dev.id}`, { method: 'DELETE' });
+                  toast(`${dev.name} unlinked`, 'success');
+                } catch (e) {
+                  toast((e as Error).message, 'error');
+                }
               }}
             >
               Unlink
@@ -323,11 +344,9 @@ function Devices() {
         <Download className="h-5 w-5 text-muted" />
         <p className="flex-1 text-sm text-muted">{d ? 'This computer is running Wren. Manage its permissions in Settings.' : 'Install Wren for macOS or Windows, sign in, and it links automatically.'}</p>
         {!d && (
-          <Link href="/download">
-            <Button size="sm" variant="secondary">
-              Download
-            </Button>
-          </Link>
+          <ButtonLink href="/download" size="sm" variant="secondary">
+            Download
+          </ButtonLink>
         )}
       </Card>
     </div>

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { Inter, Instrument_Serif, JetBrains_Mono } from 'next/font/google';
 import Script from 'next/script';
 import './globals.css';
+import { ThemeWatcher } from '@/components/theme-watcher';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
 const serif = Instrument_Serif({ subsets: ['latin'], weight: '400', variable: '--font-display-serif', display: 'swap' });
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Script id="wren-theme" strategy="beforeInteractive">
           {themeScript}
         </Script>
+        <ThemeWatcher />
         {children}
       </body>
     </html>
