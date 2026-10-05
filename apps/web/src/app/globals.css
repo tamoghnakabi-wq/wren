@@ -1,6 +1,10 @@
 @import 'tailwindcss';
 
 @custom-variant dark (&:where(.dark, .dark *));
+/* Collapsed panes (lib/client/layout.ts): rail: styles the desktop sidebar as an icon rail,
+   details-off: applies while the task details panel is hidden. */
+@custom-variant rail (&:where(:root[data-sidebar='collapsed'] .wren-sidebar, :root[data-sidebar='collapsed'] .wren-sidebar *));
+@custom-variant details-off (&:where(:root[data-details='hidden'] *));
 
 :root {
   --bg: #f7f5f2;

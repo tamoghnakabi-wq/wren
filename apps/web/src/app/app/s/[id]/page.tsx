@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Archive, Cloud, Download, FileText, Laptop, MoreHorizontal, Pause, Play, Square, Trash2 } from 'lucide-react';
+import { ArrowLeft, Archive, Cloud, Download, FileText, Laptop, MoreHorizontal, PanelRightClose, PanelRightOpen, Pause, Play, Square, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { AgentAvatar } from '@/components/agent-avatar';
@@ -10,6 +10,8 @@ import type { Mood } from '@/lib/characters';
 import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
 import { StatusPill } from '@/components/app/status';
+import { useIsMac } from '@/components/app/shell';
+import { togglePane, usePaneCollapsed } from '@/lib/client/layout';
 import { PlanCard, Timeline } from '@/components/app/timeline';
 import { AgentCharacter } from '@/components/agent-character';
 import { Button, ButtonLink, cx, EmptyState, formatBytes, formatTokens, Menu, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
@@ -228,6 +230,7 @@ export default function SessionPage() {
             <span className="hidden sm:inline">Stop</span>
           </Button>
         )}
+        <DetailsToggle />
         <Menu
           trigger={(p) => (
             <button type="button" {...p} className="rounded-lg p-1.5 text-muted transition-colors hover:bg-bg-subtle hover:text-text" aria-label="More actions">
@@ -293,7 +296,7 @@ export default function SessionPage() {
             }}
             className="flex-1 overflow-y-auto px-3 py-6 scrollbar-thin sm:px-6"
           >
-            <div className="mx-auto max-w-3xl">
+            <div className="mx-auto max-w-3xl lg:details-off:max-w-4xl">
               {hasOlder && (
                 <div className="mb-6 text-center">
                   <Button variant="secondary" size="sm" onClick={loadOlder} loading={loadingOlder}>
@@ -310,7 +313,7 @@ export default function SessionPage() {
             </div>
           </div>
           <div className="border-t border-border bg-bg px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
-            <div className="mx-auto max-w-3xl">
+            <div className="mx-auto max-w-3xl lg:details-off:max-w-4xl">
               {agent ? (
                 <Composer
                   agent={agent}
@@ -327,7 +330,7 @@ export default function SessionPage() {
             </div>
           </div>
         </div>
-        <aside className={cx('w-full shrink-0 overflow-y-auto border-l border-border p-4 scrollbar-thin lg:block lg:w-[360px] xl:w-[400px]', panel === 'activity' ? 'hidden' : 'block')}>
+        <aside id="task-details" aria-label="Task details" className={cx('w-full shrink-0 overflow-y-auto border-l border-border p-4 scrollbar-thin lg:block lg:w-[360px] xl:w-[400px] details-off:lg:hidden', panel === 'activity' ? 'hidden' : 'block')}>
           {panel === 'files' ? (
             shareable.length ? (
               sidePanel
@@ -378,5 +381,26 @@ function TimelineSkeleton() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Shows or hides the details panel beside the conversation (wide screens; phones use the tabs). */
+function DetailsToggle() {
+  const hidden = usePaneCollapsed('details');
+  const mac = useIsMac();
+  const label = hidden ? 'Show details' : 'Hide details';
+  return (
+    <button
+      type="button"
+      onClick={() => togglePane('details')}
+      aria-label={label}
+      aria-expanded={!hidden}
+      aria-controls="task-details"
+      title={`${label} (${mac ? '⇧⌘' : 'Ctrl+Shift+'}\\)`}
+      className="hidden rounded-lg p-1.5 text-muted transition-colors hover:bg-bg-subtle hover:text-text lg:inline-flex"
+    >
+      <PanelRightClose className="h-5 w-5 details-off:hidden" aria-hidden />
+      <PanelRightOpen className="hidden h-5 w-5 details-off:block" aria-hidden />
+    </button>
   );
 }
