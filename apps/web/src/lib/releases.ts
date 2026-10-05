@@ -45,10 +45,11 @@ export async function latestRelease(): Promise<Release | null> {
       html_url: string;
       assets: { name: string; browser_download_url: string; size: number }[];
     }[];
-    // Stable channel only: GitHub prereleases (and tags that aren't plain x.y.z) are never offered,
-    // and the highest version wins rather than the most recently published.
+    // Stable channel: plain x.y.z versions only (a semver prerelease such as 0.2.0-beta.1 is never
+    // offered), and the highest version wins rather than the most recently published. GitHub's
+    // "pre-release" flag isn't used: every 0.x build is published with it.
     const r = list
-      .filter((x) => !x.draft && !x.prerelease && /^v?\d+\.\d+\.\d+$/.test(x.tag_name) && x.assets.some((a) => a.name === 'wren-update.json'))
+      .filter((x) => !x.draft && /^v?\d+\.\d+\.\d+$/.test(x.tag_name) && x.assets.some((a) => a.name === 'wren-update.json'))
       .sort((a, b) => compareVersions(b.tag_name, a.tag_name))[0];
     if (!r) return null;
     const find = (re: RegExp) => {
