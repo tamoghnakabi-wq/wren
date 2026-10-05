@@ -9,9 +9,10 @@ import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcom
 import type { RemoteStore } from '../main/remote';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
-import { killTree, treeAlive } from '../main/proctree';
+import { killTree, tracked, treeAlive } from '../main/proctree';
 import { engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
 import { toolEnv } from '../main/shellenv';
+import { currentProgramTrust } from '../main/trust';
 
 // Shared plumbing for external agent engines (Claude Code, Grok Build): they
 // run their own loop, Wren mirrors what they do into the task timeline and
@@ -77,9 +78,11 @@ export async function spawnEngine(engine: Engine, cli: string, args: string[], r
 const engines = new Set<ChildProcess>();
 
 function track<P extends ChildProcess>(p: P): P {
-  engines.add(p);
+  engines.add(tracked(p));
   p.on('close', () => {
-    if (!treeAlive(p)) engines.delete(p);
+    void treeAlive(p).then((alive) => {
+      if (!alive) engines.delete(p);
+    });
   });
   return p;
 }
@@ -273,7 +276,7 @@ export async function decide(
   if (call.name.startsWith('browser.') && !run.allow.browser) return { allow: false, message: 'Blocked by Wren: browser use is turned off on this computer.' };
   if (call.name.startsWith('screen.') && !run.allow.screen) return { allow: false, message: 'Blocked by Wren: screen capture is turned off on this computer.' };
   // On macOS the engine (and everything it runs) is inside Wren's sandbox; elsewhere it isn't.
-  const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: !hasSeatbelt() });
+  const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: !hasSeatbelt(), trustedProgram: call.name === 'computer.shell' ? await currentProgramTrust(allowedRoots(run.folders)) : undefined });
   if (a.blocked) return { allow: false, message: a.blocked };
   if (!needsApproval(a.risk as Risk, run.autonomy)) return { allow: true };
   let t = writer.tools.get(call.callId);

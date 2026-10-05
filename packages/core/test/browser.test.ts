@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { BrowserController } from '../src/browser/controller';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { BrowserController, registerSelectors } from '../src/browser/controller';
 
 // Drives a real Chrome (set WREN_BROWSER_TEST=1; needs Google Chrome installed).
 describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
+  beforeAll(async () => registerSelectors((await import('playwright-core')).selectors));
   it('never reveals sensitive field values, and describes the focused element', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -149,6 +150,134 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
       await page.goto('data:text/html,<p>another document</p>');
       const press = await ctl.act({ action: 'press', key: 'Enter', tab: 'T', expect: pageTarget });
       expect(press.ok).toBe(false);
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
+  it('W-75: a page that rewrites Array, eval or iterators cannot give one element another\'s identity', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const page = context.pages()[0];
+      await page.setContent(`<button onclick="document.title='A'">Send</button><button onclick="document.title='B'">Send</button>`);
+      const snap = (await ctl.act({ action: 'snapshot', tab: 'T' })).snapshot ?? '';
+      const [refA, refB] = [...snap.matchAll(/\[(e\d+)\] button "Send"/g)].map((m) => m[1]);
+      const a = (await ctl.act({ action: 'describe', ref: refA, tab: 'T' })).target!;
+      // Now the page sabotages everything Playwright's in-page helpers use.
+      await page.evaluate(() => {
+        Array.prototype.indexOf = () => 0;
+        Array.prototype.slice = function () { return [] as never; };
+        Array.prototype[Symbol.iterator] = function* () {} as never;
+        window.eval = (() => () => 'hijacked') as never;
+      });
+      const b = (await ctl.act({ action: 'describe', ref: refB, tab: 'T' })).target!;
+      expect(b.elementId).not.toBe(a.elementId);
+      const clicked = await ctl.act({ action: 'click', ref: refB, tab: 'T', expect: b });
+      expect(clicked.ok, clicked.error).toBe(true);
+      expect(await page.title()).toBe('B');
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
+  it('W-77: typing and key presses reach the checked element or nothing', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const page = context.pages()[0];
+      await page.setContent(`
+        <div id=note contenteditable aria-label="Note">x</div>
+        <div id=trap contenteditable aria-label="Comment">y</div>
+        <input id=pw type=password>
+        <label id=lab for=pw role=textbox>Search</label>
+        <input id=q aria-label="Query"><input id=r aria-label="Other">
+        <button id=ok onclick="document.title='ok'">OK</button><button id=bad onclick="document.title='bad'">Delete all</button>
+        <script>
+          document.getElementById('trap').addEventListener('focus', () => document.getElementById('pw').focus());
+          document.getElementById('note').addEventListener('beforeinput', () => document.getElementById('pw').focus());
+        </script>`);
+      const snap = (await ctl.act({ action: 'snapshot', tab: 'T' })).snapshot ?? '';
+      const ref = (label: string) => new RegExp(`\\[(e\\d+)\\] \\w+ "${label}"`).exec(snap)![1];
+      const pw = () => page.locator('#pw').inputValue();
+      const typeInto = async (label: string, text: string) => {
+        const r = ref(label);
+        const t = (await ctl.act({ action: 'describe', ref: r, tab: 'T' })).target!;
+        return ctl.act({ action: 'type', ref: r, text, tab: 'T', expect: t });
+      };
+
+      // A field that hands focus to the password box when clicked into: nothing is typed.
+      const trapped = await typeInto('Comment', 'secret-1');
+      expect(trapped.ok).toBe(false);
+      expect(trapped.error).toMatch(/Focus moved/);
+      expect(await pw()).toBe('');
+      // A handler that moves focus while the text goes in can't take the text with it.
+      const note = await typeInto('Note', 'hello');
+      expect(note.ok, note.error).toBe(true);
+      expect(await page.locator('#note').textContent()).toBe('hello');
+      expect(await pw()).toBe('');
+      // A label is not its field: no typing through it into the password box.
+      const viaLabel = await typeInto('Search', 'secret-2');
+      expect(viaLabel.ok).toBe(false);
+      expect(await pw()).toBe('');
+      // Plain inputs still work, and only the checked one changes.
+      expect((await typeInto('Query', 'weather')).ok).toBe(true);
+      expect(await page.locator('#q').inputValue()).toBe('weather');
+      expect(await page.locator('#r').inputValue()).toBe('');
+
+      // Enter approved for OK, while the page keeps moving focus to "Delete all": OK is pressed.
+      await page.focus('#ok');
+      const okTarget = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+      await page.evaluate(() => { setInterval(() => (document.getElementById('bad') as HTMLElement).focus(), 0); });
+      await page.waitForTimeout(50);
+      await page.focus('#ok');
+      const pressed = await ctl.act({ action: 'press', key: 'Enter', tab: 'T', expect: okTarget });
+      if (pressed.ok) expect(await page.title()).toBe('ok');
+      else expect(pressed.error).toMatch(/Focus is no longer|moved focus/);
+      expect(await page.title()).not.toBe('bad');
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
+  it('W-80: closing a task closes its popups too, and says so when it can\'t', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      await ctl.act({ action: 'snapshot', tab: 'U' }); // another task keeps the browser in use
+      const opener = context.pages()[0];
+      const first = context.waitForEvent('page');
+      await opener.evaluate(() => { window.open('about:blank#popup1'); });
+      const popup = await first;
+      const second = context.waitForEvent('page');
+      await popup.evaluate(() => { window.open('about:blank#popup2'); });
+      const popup2 = await second;
+      // The task's actions now go to its newest page.
+      expect((await ctl.act({ action: 'snapshot', tab: 'T' })).url).toContain('popup2');
+
+      // A page that refuses to close: the task isn't reported closed, and stays on record.
+      const realClose = popup.close.bind(popup);
+      popup.close = async () => { throw new Error('stuck'); };
+      const failed = await ctl.act({ action: 'close', tab: 'T' });
+      expect(failed.ok).toBe(false);
+      expect(opener.isClosed()).toBe(true);
+      expect(popup2.isClosed()).toBe(true);
+      expect(popup.isClosed()).toBe(false);
+      popup.close = realClose;
+      const retried = await ctl.act({ action: 'close', tab: 'T' });
+      expect(retried.ok).toBe(true);
+      expect(popup.isClosed()).toBe(true);
+      // The other task's tab is untouched.
+      expect(context.pages().length).toBe(1);
     } finally {
       await browser.close();
     }

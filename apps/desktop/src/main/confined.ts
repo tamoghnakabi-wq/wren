@@ -13,9 +13,13 @@ import { fileOpsProfile, hasSeatbelt } from './sandbox';
 // has no handle-relative file API, so every folder on the way is checked not to
 // be a link or junction, nothing is created until its parent has been checked,
 // and what was opened or created is checked afterwards to be inside the allowed
-// folders (and removed again if it isn't). A folder swapped at exactly the wrong
-// moment can still slip between a check and the next step there; agent commands
-// on Windows always need approval, which keeps such a swap from running unasked.
+// folders (and removed again if it isn't). Each check and the step after it are
+// still separate operations there: a folder swapped for a junction at exactly the
+// wrong moment can get an empty file or folder created outside (nothing is ever
+// written into it: the opened file is checked first), and a listing can show the
+// names in the swapped-in folder. Only a process running at the same time can do
+// that swap, and on Windows such a process (an agent command, which always needs
+// approval there) already has the user's full access, so it gains nothing.
 
 export class TooLarge extends Error {}
 

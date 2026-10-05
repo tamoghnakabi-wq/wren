@@ -5,7 +5,7 @@ import { env } from '@/lib/env';
 import { json, route } from '@/lib/http';
 import { notifyUser } from '@/lib/notify';
 import { cleanUpCloudRun, kickRun, kickTick, startTask } from '@/lib/runs';
-import { nextRun } from '@/lib/schedules';
+import { nextRunAfter } from '@/lib/schedules';
 
 // Called every minute by pg_cron (Supabase) with the cron secret:
 //  1. re-kick cloud runs whose tick died (lease expired) or whose retry is due
@@ -46,7 +46,7 @@ export const POST = route(async (req) => {
   // interrupted invocation can at worst skip one occurrence, never stall a schedule.
   const due = await sql.begin(async (tx) => {
     const rows = await tx`select * from public.schedules where enabled and next_run_at <= now() order by next_run_at limit 10 for update skip locked`;
-    for (const s of rows) await tx`update public.schedules set next_run_at = ${nextRun(s.cron, s.timezone)} where id = ${s.id}`;
+    for (const s of rows) await tx`update public.schedules set next_run_at = ${nextRunAfter(s.cron, s.timezone, new Date(s.next_run_at))} where id = ${s.id}`;
     return rows;
   });
   await Promise.allSettled(

@@ -5,14 +5,17 @@ import { existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { fetchReadable } from '@wren/core/net';
-import { BrowserController } from '@wren/core/browser/controller';
+import { BrowserController, registerSelectors } from '@wren/core/browser/controller';
 import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
 import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
-import { killTree } from './proctree';
+import { tracked } from './proctree';
+import { jobs, kill, release, type Job } from './jobs';
+import { spawnContained } from './winjob';
 import { hasSeatbelt, seatbeltProfile } from './sandbox';
 import { absolutePath, toolEnv } from './shellenv';
+import { currentProgramTrust } from './trust';
 
 // Tool host for runs on this computer. Everything is confined to the folders
 // the user allowed in this app's Settings (a policy the server can't change),
@@ -23,18 +26,6 @@ import { absolutePath, toolEnv } from './shellenv';
 
 const MAX_OUT = 60_000;
 
-interface Job {
-  proc: ChildProcess;
-  out: string;
-  exit: number | null;
-  started: number;
-  /** The run that started it: its jobs (background ones included) end with it. */
-  runId: string;
-  /** Being stopped; forgotten once it has exited. */
-  stopping?: boolean;
-}
-
-const jobs = new Map<string, Job>();
 let browserCtl: { controller: BrowserController; close: () => Promise<void> } | null = null;
 
 export class LocalHost implements ToolHost {
@@ -72,7 +63,7 @@ export class LocalHost implements ToolHost {
 
   async riskContext(name: string, args: Record<string, unknown>) {
     const unsandboxed = !hasSeatbelt();
-    if (name === 'computer.shell') return { unsandboxed };
+    if (name === 'computer.shell') return { unsandboxed, trustedProgram: await currentProgramTrust(this.roots()) };
     if ((name === 'browser.click' || name === 'browser.type' || name === 'browser.press') && browserCtl) {
       // A key press acts on whatever has focus, so describe that element.
       const ref = name === 'browser.press' ? '@focused' : typeof args.ref === 'string' ? args.ref : '';
@@ -180,14 +171,15 @@ export class LocalHost implements ToolHost {
     if (process.platform === 'win32') {
       // Programs are only looked up in absolute PATH folders, never relative to the project.
       for (const k of Object.keys(env)) if (/^path$/i.test(k)) env[k] = absolutePath(env[k] ?? '');
-      return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { cwd, env, windowsHide: true });
+      // The command first puts itself in a Job Object, so whatever it starts ends with it (winjob.ts).
+      return spawnContained(command, cwd, env);
     }
     if (hasSeatbelt()) {
       // Not a login shell: startup files stay unread (and unreadable); PATH and toolchain
       // variables come from toolEnv() instead.
-      return spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-c', command], { cwd, env: { ...env, ...(await toolEnv()) }, detached: true });
+      return tracked(spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-c', command], { cwd, env: { ...env, ...(await toolEnv()) }, detached: true }));
     }
-    return spawn('/bin/bash', ['-lc', command], { cwd, env, detached: true });
+    return tracked(spawn('/bin/bash', ['-lc', command], { cwd, env, detached: true }));
   }
 
   private async shell(command: string, cwd: string, timeoutSec: number, background: boolean, ctx: ToolContext, resume?: ToolCallData['background']): Promise<ToolResult | { yield: true }> {
@@ -208,7 +200,7 @@ export class LocalHost implements ToolHost {
       proc.stderr?.on('data', add);
       proc.on('close', (code) => {
         j.exit = code ?? 1;
-        if (j.stopping) jobs.delete(id);
+        if (j.stopping) void release(id, j);
       });
       proc.on('error', (e) => {
         j.out += `\n${e.message}`;
@@ -222,7 +214,7 @@ export class LocalHost implements ToolHost {
     const limit = Math.min(Math.max(timeoutSec, 5), 1800) * 1000;
     for (;;) {
       if (job.exit !== null) {
-        jobs.delete(id);
+        void release(id, job);
         return { output: `exit code ${job.exit}\n${tail(job.out) || '(no output)'}`, isError: job.exit !== 0 };
       }
       if (Date.now() - job.started > limit) {
@@ -244,7 +236,7 @@ export class LocalHost implements ToolHost {
     const until = Math.min(Date.now() + waitSec * 1000, ctx.deadline - 3000);
     while (job.exit === null && Date.now() < until) await new Promise((r) => setTimeout(r, 500));
     if (job.exit !== null) {
-      jobs.delete(id);
+      void release(id, job);
       return { output: `Job ${id} finished with exit code ${job.exit}.\n${tail(job.out)}` };
     }
     return { output: `Job ${id} is still running.\n${tail(job.out, 6000)}` };
@@ -254,7 +246,8 @@ export class LocalHost implements ToolHost {
 
   private async controller(): Promise<BrowserController> {
     if (browserCtl) return browserCtl.controller;
-    const { chromium } = await import('playwright-core');
+    const { chromium, selectors } = await import('playwright-core');
+    await registerSelectors(selectors);
     const profile = join(dataDir(), 'agent-browser');
     const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chrome', 'msedge', 'chromium'];
     let lastErr: unknown;
@@ -322,50 +315,18 @@ function tail(s: string, n = 28_000) {
   return s.length > n ? '…' + s.slice(-n) : s;
 }
 
-/**
- * Stop a command and everything it started: its process group on macOS/Linux (it runs in its
- * own), the process tree on Windows. A polite stop first, then a forced one after `graceMs`
- * whether or not the first was obeyed (a command can ignore SIGTERM).
- */
-function kill(p: ChildProcess, graceMs = 3000): Promise<boolean> {
-  if (!p.pid) p.kill();
-  return killTree(p, graceMs).catch(() => false);
-}
+export { killRunJobs, stopAllJobs } from './jobs';
 
 export async function closeBrowser() {
   if (browserCtl) await browserCtl.close().catch(() => {});
   browserCtl = null;
 }
 
-/** Wren is quitting: end every command now. */
-export function killAllJobs() {
-  for (const j of jobs.values()) void kill(j.proc, 0);
-  jobs.clear();
-}
-
-/** Like killAllJobs, but resolves once every command (and what it started) is confirmed gone. */
-export async function stopAllJobs(): Promise<boolean> {
-  const all = [...jobs.values()];
-  jobs.clear();
-  const done = await Promise.all(all.map((j) => kill(j.proc, 0)));
-  return done.every(Boolean);
-}
-
-/** Stop the commands a run started (foreground or background); other runs' jobs keep going. */
-export function killRunJobs(runId?: string) {
-  for (const [id, j] of jobs) {
-    if (runId && j.runId !== runId) continue;
-    if (j.exit !== null) {
-      jobs.delete(id);
-      continue;
-    }
-    // Still tracked until it has really exited (so quitting can still reach it).
-    j.stopping = true;
-    void kill(j.proc);
-  }
-}
-
 /** Close a finished run's browser tab (other runs keep theirs). */
 export async function closeRunTab(runId: string) {
-  if (browserCtl) await browserCtl.controller.act({ action: 'close', tab: runId }).catch(() => {});
+  if (browserCtl) {
+    // A page the task opened that won't close (a popup included) must not keep running: close the browser.
+    const r = await browserCtl.controller.act({ action: 'close', tab: runId }).catch(() => ({ ok: false }));
+    if (!r.ok) await browserCtl.close().catch(() => {});
+  }
 }

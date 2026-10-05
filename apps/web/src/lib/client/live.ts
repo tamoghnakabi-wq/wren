@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { coalesce } from './coalesce';
 import { supabase } from './supabase';
 
 // Reads rows the user owns straight from Postgres (RLS) and keeps them fresh
@@ -81,7 +82,9 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
       return q;
     };
 
-    const load = async () => {
+    // One load at a time (initial, after subscribing, after the tab comes back): an older response
+    // can't land after a newer one and leave rows in between unfetched.
+    const load = coalesce(async () => {
       let q = query();
       if (opts.order) q = q.order(opts.order.column, { ascending: !!opts.order.ascending });
       if (opts.limit) q = q.limit(opts.limit);
@@ -125,7 +128,7 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
         setError(null);
       }
       setLoading(false);
-    };
+    });
 
     let channel: ReturnType<typeof sb.channel> | null = null;
     // Realtime applies RLS with the socket's token, so attach the session first.

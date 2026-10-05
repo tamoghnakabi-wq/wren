@@ -18,6 +18,8 @@ const LEASE_SECONDS = 320;
 const BUDGET_MS = 235_000;
 const MODEL_BUDGET_MS = 185_000;
 const MAX_CRASHES = 3;
+/** A "computers stopping" mark older than this is from a stop that crashed: ignore it. */
+const STOP_MARK_TTL_SECONDS = 180;
 
 export async function runTick(runId: string): Promise<string> {
   const sql = db();
@@ -45,6 +47,18 @@ export async function runTick(runId: string): Promise<string> {
   if (!agent) {
     await finishRun(runId, { kind: 'failed', error: 'The agent was deleted.', steps: run.step }, lease);
     return 'failed';
+  }
+  // The agent's computers are being stopped (another run just ended): wait for that to finish
+  // rather than start work on a computer that is shutting down. The stopper starts us again.
+  // First wait out a stopper deciding right now (it holds the agent's row, see
+  // stopComputersIfIdle), then read its mark in a new statement, which sees what it committed.
+  await sql`select 1 from public.agents where id = ${agent.id} for share`;
+  const [stopping] = await sql`select 1 from public.agent_computers
+    where agent_id = ${agent.id} and stopping is not null and stopping_since > now() - make_interval(secs => ${STOP_MARK_TTL_SECONDS})`;
+  if (stopping) {
+    // No lease and no wake time: the stopper's kick (or the cron, a minute later) picks it up.
+    await sql`update public.runs set lease_id = null, lease_until = null where id = ${runId} and lease_id = ${lease}`;
+    return 'waiting-for-computer';
   }
   await sql`update public.sessions set status = 'running' where id = ${run.session_id} and status <> 'running'`;
 
@@ -147,11 +161,35 @@ export async function runTick(runId: string): Promise<string> {
   // late message, or another worker owns it now) and no run of this agent, this one included,
   // is still active as recorded now.
   const finished = await finishRun(runId, outcome, lease);
-  if (finished === 'ended') {
-    const active = await sql`select 1 from public.runs where agent_id = ${agent.id} and runtime = 'cloud' and status in ('queued', 'running') limit 1`;
-    if (!active.length) await host.stop();
-  }
+  if (finished === 'ended') await stopComputersIfIdle(agent.id, host);
   return outcome.kind;
+}
+
+/**
+ * Stop the agent's computers if no cloud run of the agent is active. Deciding that and marking
+ * the computers as stopping happen under a lock on the agent's row; a tick that starts meanwhile
+ * checks the mark under the same lock, so either the decision sees that run as active or the run
+ * sees the mark and waits. The mark is removed (by its token) when the stop is done.
+ */
+async function stopComputersIfIdle(agentId: string, host: SandboxHost) {
+  const sql = db();
+  const token = randomUUID();
+  const marked = await sql.begin(async (tx) => {
+    await tx`select 1 from public.agents where id = ${agentId} for no key update`;
+    const active = await tx`select 1 from public.runs where agent_id = ${agentId} and runtime = 'cloud' and status in ('queued', 'running') limit 1`;
+    if (active.length) return false;
+    await tx`insert into public.agent_computers (agent_id, stopping, stopping_since) values (${agentId}, ${token}, now())
+      on conflict (agent_id) do update set stopping = excluded.stopping, stopping_since = excluded.stopping_since`;
+    return true;
+  });
+  if (!marked) return;
+  try {
+    await host.stop();
+  } finally {
+    await sql`update public.agent_computers set stopping = null, stopping_since = null where agent_id = ${agentId} and stopping = ${token}`;
+    const waiting = await sql`select id from public.runs where agent_id = ${agentId} and runtime = 'cloud' and status in ('queued', 'running') and lease_id is null`;
+    for (const r of waiting) await kickTick(r.id).catch(() => {});
+  }
 }
 
 export { notifyUser };

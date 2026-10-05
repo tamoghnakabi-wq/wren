@@ -39,6 +39,10 @@ jobs:
       - name: Self-test the packaged app
         run: |
           ./apps/desktop/release/mac-arm64/Wren.app/Contents/MacOS/Wren --selftest
+      # A command that leaves something running: it is found and stopped.
+      - name: Self-test process cleanup
+        run: |
+          WREN_DATA_DIR="$RUNNER_TEMP/wren-proctree-test" ./apps/desktop/release/mac-arm64/Wren.app/Contents/MacOS/Wren --selftest --proctree
       # Downloads the latest published release through the updater's own code path.
       - name: Self-test the updater download
         run: |
@@ -72,6 +76,16 @@ jobs:
           $out = & $app.FullName --selftest | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "Self-test failed" }
+      # A command that leaves something running: inside its Job Object it ends with the command;
+      # without one it is still found (by parent id) and stopped.
+      - name: Self-test process cleanup
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs') -Recurse -Filter Wren.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $env:WREN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'wren-proctree-test'
+          $out = & $app.FullName --selftest --proctree | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "Process cleanup self-test failed" }
       # Downloads the latest published release through the updater's own code path (it once failed on Windows only).
       - name: Self-test the updater download
         shell: pwsh

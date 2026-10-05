@@ -1,7 +1,7 @@
 import { app, net } from 'electron';
 import { spawn } from 'node:child_process';
 import { createHash, createPublicKey, verify, type Hash } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Readable, Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -123,11 +123,37 @@ export function verifySignature(u: UpdateInfo, platform = platformKey()): boolea
 export class Updater {
   state: UpdateState = { available: false };
   private busy = false;
+  /** Why the previous installation didn't happen; shown with the next ready update. */
+  private installFailure?: string;
 
   constructor(private readonly onChange: () => void) {}
 
-  /** Delete downloads of versions already installed (each one is a full ~130 MB build) and old install staging. */
+  /**
+   * At startup: report an update that was handed to the installer but isn't running now, then
+   * delete downloads of versions already installed (each one is a full ~130 MB build) and old
+   * install staging.
+   */
   cleanup() {
+    const pending = join(dataDir(), 'update-pending.json');
+    if (existsSync(pending)) {
+      try {
+        const { version } = JSON.parse(readFileSync(pending, 'utf8')) as { version: string };
+        let why = '';
+        try {
+          why = readFileSync(join(dataDir(), 'update-failed.txt'), 'utf8').trim();
+        } catch {
+          /* the installer left no reason */
+        }
+        if (compareVersions(app.getVersion(), version) < 0) {
+          this.installFailure = `The last attempt to install ${version} failed${why ? ` (${why})` : ''}.`;
+          this.state = { available: false, error: this.installFailure };
+        }
+      } catch {
+        /* no reason recorded */
+      }
+      rmSync(pending, { force: true });
+      rmSync(join(dataDir(), 'update-failed.txt'), { force: true });
+    }
     for (const d of readdirSync(dataDir())) if (/^install-/.test(d)) rmSync(join(dataDir(), d), { recursive: true, force: true });
     const root = join(dataDir(), 'updates');
     if (!existsSync(root)) return;
@@ -185,7 +211,7 @@ export class Updater {
     try {
       const file = await this.download(info);
       this.succeeded();
-      this.state = { available: true, version: info.version, ready: true, file, sha256: info.sha256, size: info.size };
+      this.state = { available: true, version: info.version, ready: true, file, sha256: info.sha256, size: info.size, ...(this.installFailure && { error: this.installFailure }) };
     } catch (e) {
       this.state = { available: true, version: info.version, downloading: false, error: (e as Error).message, retryAt: this.retryLater() };
     } finally {
@@ -341,50 +367,74 @@ export class Updater {
         this.onChange();
         return;
       }
-      handedOff = this.launchInstaller(copy);
+      handedOff = await this.launchInstaller(copy);
     } finally {
       this.installing = false;
       if (!handedOff) resumeAgents();
     }
   }
 
-  /** Start the installer for the verified copy and quit; false if that isn't possible here. */
-  private launchInstaller(copy: string): boolean {
+  /**
+   * Start the installer for the verified copy and quit once it is running. False (with the reason
+   * in `state.error`) if it couldn't be started, so Wren stays open and agents resume. Whether the
+   * installation itself worked is checked at the next start (see cleanup()).
+   */
+  private async launchInstaller(copy: string): Promise<boolean> {
+    const pending = join(dataDir(), 'update-pending.json');
+    let cmd: string;
+    let args: string[];
     if (process.platform === 'win32') {
-      spawn(copy, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
-      app.quit();
-      return true;
-    }
-    // macOS: <bundle>/Contents/MacOS/Wren -> swap the .app after this process exits.
-    const bundle = resolve(dirname(process.execPath), '..', '..');
-    if (!bundle.endsWith('.app')) return false;
-    // Script, archive copy and staging all live in the private folder; the script checks the
-    // archive once more right before extracting it, after this process has exited.
-    const priv = dirname(copy);
-    const staging = join(priv, 'staging');
-    const script = join(priv, 'install.sh');
-    // Paths are passed as arguments, never pasted into the script text.
-    writeFileSync(
-      script,
-      `#!/bin/bash
-set -e
-PID="$1"; FILE="$2"; STAGING="$3"; BUNDLE="$4"; SHA="$5"
+      cmd = copy;
+      args = ['/S', '--updated', '--force-run'];
+    } else {
+      // macOS: <bundle>/Contents/MacOS/Wren -> swap the .app after this process exits.
+      const bundle = resolve(dirname(process.execPath), '..', '..');
+      if (!bundle.endsWith('.app')) return false;
+      // Script, archive copy and staging all live in the private folder; the script checks the
+      // archive once more right before extracting it, after this process has exited. Any failure
+      // puts the old app back, reopens it and leaves the reason for the next start.
+      const priv = dirname(copy);
+      const script = join(priv, 'install.sh');
+      // Paths are passed as arguments, never pasted into the script text.
+      writeFileSync(
+        script,
+        `#!/bin/bash
+PID="$1"; FILE="$2"; STAGING="$3"; BUNDLE="$4"; SHA="$5"; REPORT="$6"
+fail() { echo "$1" > "$REPORT"; [ -d "$BUNDLE" ] || { [ -d "$BUNDLE.old" ] && mv "$BUNDLE.old" "$BUNDLE"; }; /usr/bin/open "$BUNDLE"; exit 1; }
 while kill -0 "$PID" 2>/dev/null; do sleep 0.3; done
-[ "$(/usr/bin/shasum -a 256 "$FILE" | /usr/bin/cut -d' ' -f1)" = "$SHA" ] || exit 1
-rm -rf "$STAGING" && mkdir -p "$STAGING"
-/usr/bin/ditto -x -k "$FILE" "$STAGING"
+[ "$(/usr/bin/shasum -a 256 "$FILE" | /usr/bin/cut -d' ' -f1)" = "$SHA" ] || fail "the downloaded file changed on disk"
+{ rm -rf "$STAGING" && mkdir -p "$STAGING"; } || fail "the update could not be prepared"
+/usr/bin/ditto -x -k "$FILE" "$STAGING" || fail "the update could not be unpacked"
 NEW="$(/usr/bin/find "$STAGING" -maxdepth 1 -name '*.app' | head -1)"
-[ -d "$NEW" ] || exit 1
+[ -d "$NEW" ] || fail "the update did not contain the app"
 /usr/bin/xattr -dr com.apple.quarantine "$NEW" 2>/dev/null || true
 rm -rf "$BUNDLE.old"
-mv "$BUNDLE" "$BUNDLE.old"
-mv "$NEW" "$BUNDLE"
+mv "$BUNDLE" "$BUNDLE.old" || fail "the current app could not be moved aside"
+mv "$NEW" "$BUNDLE" || fail "the new app could not be put in place"
 rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
 /usr/bin/open "$BUNDLE"
 `,
-      { mode: 0o700, flag: 'wx' },
-    );
-    spawn('/bin/bash', [script, String(process.pid), copy, staging, bundle, this.state.sha256!], { detached: true, stdio: 'ignore' }).unref();
+        { mode: 0o700, flag: 'wx' },
+      );
+      cmd = '/bin/bash';
+      args = [script, String(process.pid), copy, join(priv, 'staging'), bundle, this.state.sha256!, join(dataDir(), 'update-failed.txt')];
+    }
+    rmSync(join(dataDir(), 'update-failed.txt'), { force: true });
+    writeFileSync(pending, JSON.stringify({ version: this.state.version }));
+    const started = await new Promise<Error | null>((done) => {
+      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      child.once('error', done);
+      child.once('spawn', () => {
+        child.unref();
+        done(null);
+      });
+    });
+    if (started) {
+      rmSync(pending, { force: true });
+      this.state = { ...this.state, error: `The installer could not be started (${started.message}).` };
+      this.onChange();
+      return false;
+    }
     app.quit();
     return true;
   }

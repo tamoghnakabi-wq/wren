@@ -103,6 +103,20 @@ describe('shell risk', () => {
     expect(isReadOnlyCommand('cat $FILE')).toBe(false);
     expect(isReadOnlyCommand('echo hi > x')).toBe(false);
   });
+  it('W-74: a bare name counts as read-only only if the host vouches for the program it resolves to', () => {
+    const trust = (name: string) => name !== 'ls' && name !== 'node';
+    expect(assessShell('ls -la', 'desktop', trust)).toMatchObject({ risk: 'medium', reason: expect.stringMatching(/folder agents can write/) });
+    expect(assessShell('cat a.txt | ls', 'desktop', trust).risk).toBe('medium');
+    expect(assessShell('node --version', 'desktop', trust).risk).toBe('medium');
+    expect(isReadOnlyCommand('ls', trust)).toBe(false);
+    expect(assessShell('cat a.txt', 'desktop', trust).risk).toBe('low');
+    // The system's own utility by full path doesn't depend on PATH.
+    expect(assessShell('/bin/ls -la', 'desktop', trust).risk).toBe('low');
+    expect(isReadOnlyCommand('/bin/ls', () => false)).toBe(true);
+    // Through assessCall, as the desktop host supplies it.
+    expect(assessCall('computer.shell', { command: 'ls' }, 'desktop', { trustedProgram: () => false }).risk).toBe('medium');
+    expect(assessCall('computer.shell', { command: 'ls' }, 'desktop', { trustedProgram: () => true }).risk).toBe('low');
+  });
   it('blocks catastrophic commands', () => {
     expect(desk('rm -rf /').blocked).toBeTruthy();
     expect(desk('rm -rf ~').blocked).toBeTruthy();

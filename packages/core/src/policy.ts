@@ -364,6 +364,13 @@ const SAFE_ASSIGNMENT = /^(LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|COLUM
 /** Where the real system utilities live: a path anywhere else could be any program. */
 const SYSTEM_BIN = /^\/(usr\/)?s?bin\/[^/]+$/;
 
+/**
+ * Whether a bare program name (no slash) runs a program agents can't have put there. Only the host
+ * knows its PATH and which folders agents may write, so it supplies this; without it (the cloud VM,
+ * which the agent owns anyway) names are taken at face value.
+ */
+export type ProgramTrust = (name: string) => boolean;
+
 /** The program a command runs: the first word after leading VAR=value assignments. */
 function program(c: SimpleCommand): { words: string[]; dynamic: boolean[]; unsafeEnv: boolean } {
   let k = 0;
@@ -372,7 +379,7 @@ function program(c: SimpleCommand): { words: string[]; dynamic: boolean[]; unsaf
   return { words: c.words.slice(k), dynamic: c.dynamic.slice(k), unsafeEnv };
 }
 
-function commandIsReadOnly(c: SimpleCommand): boolean {
+function commandIsReadOnly(c: SimpleCommand, trust?: ProgramTrust): boolean {
   if (c.outputs.some((o) => o.dynamic || !SAFE_OUTPUTS.has(o.target))) return false;
   const { words, dynamic, unsafeEnv } = program(c);
   if (!words.length) return !dynamic.some(Boolean) && !unsafeEnv;
@@ -381,6 +388,8 @@ function commandIsReadOnly(c: SimpleCommand): boolean {
   if (dynamic[0]) return false; // the program itself is unknown
   // A path names a specific file: only the system's own utilities count as the known commands.
   if (words[0].includes('/') && !SYSTEM_BIN.test(words[0])) return false;
+  // A bare name is whatever PATH finds first, which may be a file an agent wrote ("ls" in a writable folder).
+  if (trust && !words[0].includes('/') && !trust(words[0])) return false;
   const cmd = words[0].toLowerCase().replace(/^.*[\\/]/, '');
   const args = words.slice(1);
   const line = [cmd, ...args].join(' ');
@@ -393,12 +402,12 @@ function commandIsReadOnly(c: SimpleCommand): boolean {
 }
 
 /** True when every command in the line is a known read-only form with fully known arguments. */
-export function isReadOnlyCommand(command: string): boolean {
+export function isReadOnlyCommand(command: string, trust?: ProgramTrust): boolean {
   const { commands } = parseShell(command);
-  return commands.length > 0 && commands.every((c) => commandIsReadOnly(c) && !c.dynamic.some(Boolean));
+  return commands.length > 0 && commands.every((c) => commandIsReadOnly(c, trust) && !c.dynamic.some(Boolean));
 }
 
-export function assessShell(command: string, runtime: Runtime): Assessment {
+export function assessShell(command: string, runtime: Runtime, trust?: ProgramTrust): Assessment {
   let risk: Risk = 'low';
   let reason: string | undefined;
   // Rules see both the text as written and with quoting removed ("rm" -rf ~ is rm -rf ~).
@@ -419,10 +428,12 @@ export function assessShell(command: string, runtime: Runtime): Assessment {
     reason = 'runs a program whose name is only known when it runs';
   }
   if (risk === 'low') {
-    const ro = commands.every(commandIsReadOnly);
+    const ro = commands.every((c) => commandIsReadOnly(c, trust));
     if (!ro) {
       risk = 'medium';
-      reason = 'runs a program that can change files';
+      reason = commands.every((c) => commandIsReadOnly(c))
+        ? 'runs a program found in a folder agents can write to, so it may not be the usual one'
+        : 'runs a program that can change files';
     }
   }
   // The cloud computer is an isolated VM owned by the agent: one level less
@@ -487,6 +498,16 @@ export function assessGithub(method: string, path: string): Assessment {
   return { risk: 'high', reason: 'writes to GitHub' };
 }
 
+/** Lookups the host can provide for assessing a call. */
+export interface RiskContext {
+  browserTarget?: BrowserTarget;
+  fileExists?: boolean;
+  mcpReadOnly?: boolean;
+  unsandboxed?: boolean;
+  /** Shell: which bare program names resolve to programs agents can't have written. */
+  trustedProgram?: ProgramTrust;
+}
+
 /**
  * Assess a tool call. `context` carries lookups the host can provide (e.g. the
  * browser element behind a ref, whether a file exists).
@@ -495,12 +516,12 @@ export function assessCall(
   name: string,
   args: Record<string, unknown>,
   runtime: Runtime,
-  context: { browserTarget?: BrowserTarget; fileExists?: boolean; mcpReadOnly?: boolean; unsandboxed?: boolean } = {},
+  context: RiskContext = {},
 ): Assessment {
   const s = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : '');
   switch (name) {
     case 'computer.shell': {
-      const a = assessShell(s('command'), runtime);
+      const a = assessShell(s('command'), runtime, context.trustedProgram);
       // Without an OS sandbox (Windows) even a "read-only" command could read any of the user's
       // files, not just the allowed folders, so every command asks unless the agent is autonomous.
       if (context.unsandboxed && !a.blocked && riskRank(a.risk) < riskRank('high')) {

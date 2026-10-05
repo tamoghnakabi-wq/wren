@@ -29,9 +29,12 @@ const TOOLCHAINS = [
   '.config/git', '.m2/repository', '.gradle/caches', '.gradle/wrapper',
 ];
 const HOME_FILES = ['.gitconfig', '.gitignore_global', '.editorconfig', '.CFUserTextEncoding', '.tool-versions', '.nvmrc', '.node-version', '.python-version', '.ruby-version'];
-/** Package-manager caches commands may read and write. */
+/**
+ * Package-manager caches commands may read and write. Only pnpm's store, not ~/Library/pnpm itself:
+ * that is PNPM_HOME, which holds global commands and is usually first on PATH.
+ */
 const CACHES = [
-  '.npm', '.cache', '.bun/install', '.yarn/berry', '.cargo/registry', '.cargo/git', '.nuget/packages', 'Library/pnpm',
+  '.npm', '.cache', '.bun/install', '.yarn/berry', '.cargo/registry', '.cargo/git', '.nuget/packages', 'Library/pnpm/store',
   ...['pip', 'Homebrew', 'Yarn', 'node-gyp', 'ms-playwright', 'pnpm', 'go-build', 'electron', 'electron-builder', 'typescript', 'deno', 'bun', 'pypoetry', 'uv'].map((c) => `Library/Caches/${c}`),
 ];
 /**
@@ -90,6 +93,13 @@ interface Spec {
   readOnly?: string[];
 }
 
+const tempDirs = () => [realpathSync(tmpdir()), '/private/tmp', '/private/var/folders'];
+
+/** Everything agent shell commands may write (besides /dev): the allowed folders, temp and package caches. */
+export function agentWritable(roots: string[], home = homedir()): string[] {
+  return [...roots, ...tempDirs(), ...CACHES.map((p) => join(home, p))];
+}
+
 function build(s: Spec): string {
   const home = s.home ?? homedir();
   const h = (p: string) => join(home, p);
@@ -98,7 +108,7 @@ function build(s: Spec): string {
   const protect = [...engine.protect.map(h), ...(s.engine === 'grok-build' ? grokHookTargets(home) : [])];
   const engineDirs = engine.dirs.map(h);
   const enginePrefixes = engine.prefixes.map((p) => prefix(h(p))).join(' ');
-  const temp = s.tools ? [realpathSync(tmpdir()), '/private/tmp', '/private/var/folders'] : [];
+  const temp = s.tools ? tempDirs() : [];
   const writable = [...s.roots, ...temp, ...caches, ...engineDirs];
   const readable = [...s.roots, ...caches, ...engineDirs, ...(s.tools ? TOOLCHAINS.map(h) : []), ...(s.readOnly ?? [])];
   const ownState = new Set(engineDirs);

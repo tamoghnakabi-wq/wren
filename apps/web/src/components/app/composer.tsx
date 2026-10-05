@@ -105,6 +105,10 @@ export function Composer({
     }
   }
 
+  // Starting a task opens its page, which would drop anything typed here meanwhile, so the box holds
+  // still until then. In a task, a follow-up leaves the box at once and the next one can be written.
+  const holding = busy && !sessionId;
+
   async function send() {
     if (!agent || busy || (!text.trim() && !files.length) || uploading) return;
     setBusy(true);
@@ -112,16 +116,24 @@ export function Composer({
     // draft that the answer can't wipe. If sending fails, it comes back (ahead of the new draft).
     const sentText = text;
     const sentFiles = files;
-    setText('');
-    setFiles([]);
+    if (sessionId) {
+      setText('');
+      setFiles([]);
+    }
     try {
       const r = await api<{ sessionId: string; runId: string }>('/api/tasks', {
         body: { agentId: agent.id, sessionId, text: sentText, attachments: sentFiles, runtime: sessionId ? undefined : runtime },
       });
+      if (!sessionId) {
+        setText('');
+        setFiles([]);
+      }
       onSent?.(r);
     } catch (e) {
-      setText((cur) => (cur.trim() ? `${sentText}\n\n${cur}` : sentText));
-      setFiles((cur) => [...sentFiles, ...cur.filter((f) => !sentFiles.some((s) => s.artifactId === f.artifactId))].slice(0, 10));
+      if (sessionId) {
+        setText((cur) => (cur.trim() ? `${sentText}\n\n${cur}` : sentText));
+        setFiles((cur) => [...sentFiles, ...cur.filter((f) => !sentFiles.some((s) => s.artifactId === f.artifactId))].slice(0, 10));
+      }
       toast((e as Error).message, 'error');
     } finally {
       setBusy(false);
@@ -137,13 +149,13 @@ export function Composer({
       )}
       onDragOver={(e) => {
         e.preventDefault();
-        if (e.dataTransfer.types.includes('Files')) setDragging(true);
+        if (!holding && e.dataTransfer.types.includes('Files')) setDragging(true);
       }}
       onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setDragging(false)}
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
-        upload(e.dataTransfer.files);
+        if (!holding) upload(e.dataTransfer.files);
       }}
     >
       {dragging && <p className="px-2 pb-1 text-[12.5px] font-medium text-brand-ink">Drop to attach</p>}
@@ -153,7 +165,7 @@ export function Composer({
             <span key={f.artifactId} className="pop-in inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-subtle py-1 pr-1.5 pl-2.5 text-[12.5px]">
               <span className="max-w-[160px] truncate">{f.name}</span>
               <span className="text-faint">{formatBytes(f.size)}</span>
-              <button onClick={() => setFiles((c) => c.filter((x) => x !== f))} className="text-faint hover:text-text" aria-label={`Remove ${f.name}`}>
+              <button onClick={() => setFiles((c) => c.filter((x) => x !== f))} disabled={holding} className="text-faint hover:text-text disabled:opacity-50" aria-label={`Remove ${f.name}`}>
                 <X className="h-3.5 w-3.5" />
               </button>
             </span>
@@ -175,6 +187,8 @@ export function Composer({
         className="block w-full resize-none bg-transparent px-2 py-1.5 text-[15px] leading-relaxed text-text placeholder:text-faint focus:outline-none"
         aria-label="Task description"
         disabled={!agent}
+        readOnly={holding}
+        aria-busy={holding || undefined}
       />
       <div className="mt-1 flex items-center gap-1.5">
         {!sessionId && onAgentChange && (
@@ -241,7 +255,7 @@ export function Composer({
             {effectiveRuntime === 'desktop' && <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', deviceOnline ? 'bg-success' : 'bg-border-strong')} />}
           </button>
         )}
-        <button type="button" onClick={() => fileInput.current?.click()} className="flex h-8 w-8 items-center justify-center rounded-full text-faint transition-colors hover:bg-bg-subtle hover:text-text" aria-label={uploading ? 'Uploading files' : 'Attach files'} title="Attach files">
+        <button type="button" onClick={() => fileInput.current?.click()} disabled={holding} className="flex h-8 w-8 items-center justify-center rounded-full text-faint transition-colors hover:bg-bg-subtle hover:text-text disabled:opacity-50" aria-label={uploading ? 'Uploading files' : 'Attach files'} title="Attach files">
           {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
         </button>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => upload(e.target.files)} />

@@ -7,7 +7,7 @@ import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
-import { closeBrowser, killAllJobs, stopAllJobs } from './host';
+import { closeBrowser, stopAllJobs } from './host';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
 import { approveScriptPath } from '../engines/claude-code';
@@ -31,6 +31,8 @@ if (process.argv.includes('--selftest')) {
     // `--update` also downloads the latest release through the updater's real path (network; CI).
     let updateDownload: { version: string; bytes: number } | { error: string } | undefined;
     if (process.argv.includes('--update')) updateDownload = await new Updater(() => {}).selfTestDownload().catch((e: Error) => ({ error: e.message }));
+    // `--proctree`: something a command leaves running is found and stopped (CI, on each OS).
+    const proctree = process.argv.includes('--proctree') ? await procTreeSelfTest().catch((e: Error) => ({ ok: false, error: e.message })) : undefined;
     const result = {
       version: app.getVersion(),
       platform: process.platform,
@@ -42,11 +44,45 @@ if (process.argv.includes('--selftest')) {
       grokHook: existsSync(approve.replace(/mcp-approve\.mjs$/, 'grok-hook.mjs')),
       preload: existsSync(join(DIST, 'preload.js')),
       ...(updateDownload && { updateDownload }),
+      ...(proctree && { proctree }),
     };
     process.stdout.write(JSON.stringify(result) + '\n');
-    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) ? 0 : 1);
+    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) ? 0 : 1);
   });
 }
+/**
+ * Starts a command that launches a hidden long-running child and exits at once. macOS/Linux: the
+ * child is still counted as the command's (its process group) and is stopped. Windows: inside the
+ * Job Object the child ends with the command; without it, it is found by parent id and stopped.
+ */
+async function procTreeSelfTest(): Promise<Record<string, unknown> & { ok: boolean }> {
+  const { spawn } = await import('node:child_process');
+  const { killTree, tracked, treeAlive } = await import('./proctree');
+  const exited = (p: import('node:child_process').ChildProcess) => new Promise((r) => (p.exitCode !== null ? r(null) : p.once('exit', r)));
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  if (process.platform !== 'win32') {
+    const p = tracked(spawn('/bin/bash', ['-c', 'perl -e "select(undef,undef,undef,60)" & exit 0'], { detached: true, stdio: 'ignore' }));
+    await exited(p);
+    const leftover = await treeAlive(p);
+    const stopped = await killTree(p, 0);
+    const gone = !(await treeAlive(p));
+    return { ok: leftover && stopped && gone, leftover, stopped, gone };
+  }
+  const { jobLibrary, spawnContained } = await import('./winjob');
+  const child = "Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 120'; 'started'";
+  const dll = await jobLibrary();
+  const contained = await spawnContained(child, process.cwd(), process.env);
+  await exited(contained);
+  await sleep(2000);
+  const endedWithCommand = !(await treeAlive(contained));
+  const plain = tracked(spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', child], { windowsHide: true, stdio: 'ignore' }));
+  await exited(plain);
+  await sleep(1000);
+  const orphanFound = await treeAlive(plain);
+  const orphanStopped = (await killTree(plain, 0)) && !(await treeAlive(plain));
+  return { ok: !!dll && endedWithCommand && orphanFound && orphanStopped, jobLibrary: !!dll, endedWithCommand, orphanFound, orphanStopped };
+}
+
 app.setName('Wren');
 if (process.env.WREN_DATA_DIR) app.setPath('userData', process.env.WREN_DATA_DIR);
 
@@ -228,15 +264,28 @@ function quit() {
   app.quit(); // cleanup happens in before-quit, which every way of quitting goes through
 }
 
-/** Stop everything this app started, once, however Wren is quit (⌘Q, menu, tray, update). */
+/**
+ * Stop everything this app started before it exits, however Wren is quit (⌘Q, menu, tray, an
+ * update, logging out): runs end and report, then every engine CLI and command is stopped and
+ * waited for, forced stops included. Quitting holds off until then, for at most QUIT_WAIT_MS.
+ */
+const QUIT_WAIT_MS = 15_000;
 let cleanedUp = false;
-function shutdown() {
+let cleaning: Promise<void> | null = null;
+function shutdown(e: Electron.Event) {
   quitting = true;
   if (cleanedUp) return;
-  cleanedUp = true;
-  runner.abortAll();
-  killAllJobs();
-  void closeBrowser();
+  e.preventDefault();
+  cleaning ??= (async () => {
+    const all = (async () => {
+      await runner.suspend(8_000).catch(() => false);
+      await closeBrowser();
+      await Promise.all([stopAllEngines(), stopAllJobs()]);
+    })();
+    await Promise.race([all, new Promise((r) => setTimeout(r, QUIT_WAIT_MS))]);
+    cleanedUp = true;
+    app.quit();
+  })();
 }
 
 function installUpdate() {
@@ -428,7 +477,7 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(() => {
 });
 
 app.on('activate', () => showWindow());
-app.on('before-quit', () => shutdown());
+app.on('before-quit', (e) => shutdown(e));
 app.on('window-all-closed', () => {
   // Keep running in the background (tray / menu bar) so agents can keep working.
 });

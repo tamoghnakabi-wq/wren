@@ -14,10 +14,13 @@ const h = vi.hoisted(() => ({
   info: null as null | Record<string, unknown>,
   serve: null as null | Serve,
   requests: [] as (number | undefined)[],
+  quits: 0,
+  launch: 'spawn' as 'spawn' | 'error',
+  launched: [] as string[],
 }));
 
 vi.mock('electron', () => ({
-  app: { getVersion: () => '0.1.8', getPath: () => tmpdir() },
+  app: { getVersion: () => '0.1.8', getPath: () => tmpdir(), quit: () => h.quits++ },
   safeStorage: {},
   net: {
     fetch: async (url: string, init: RequestInit = {}) => {
@@ -29,6 +32,19 @@ vi.mock('electron', () => ({
     },
   },
 }));
+// The installer launch: emits 'spawn' or 'error' like a real child process would.
+vi.mock('node:child_process', async (orig) => {
+  const { EventEmitter } = await import('node:events');
+  return {
+    ...(await orig<typeof import('node:child_process')>()),
+    spawn: (cmd: string) => {
+      h.launched.push(cmd);
+      const child = Object.assign(new EventEmitter(), { unref: () => {} });
+      setTimeout(() => (h.launch === 'spawn' ? child.emit('spawn') : child.emit('error', new Error('spawn EPERM'))), 0);
+      return child;
+    },
+  };
+});
 // Manifest signatures are covered by the release tooling; here every manifest counts as signed.
 vi.mock('node:crypto', async (orig) => ({ ...(await orig<typeof import('node:crypto')>()), verify: () => true }));
 
@@ -89,6 +105,9 @@ beforeEach(() => {
   h.info = { version: '0.1.9', url: `https://github.com/o/r/releases/download/v0.1.9/${NAME}`, sha256: SHA, size: SIZE, signature: 'x' };
   h.serve = good;
   h.requests = [];
+  h.quits = 0;
+  h.launch = 'spawn';
+  h.launched = [];
   changes = 0;
   u = new Updater(() => changes++);
 });
@@ -196,5 +215,59 @@ describe('Updater download', () => {
     const s = await u.check();
     expect(s).toEqual({ available: false, error: 'Update check failed (503)', retryAt: Date.now() + 5 * 60_000 });
     expect(existsSync(join(dir, 'updates'))).toBe(false);
+  });
+});
+
+describe('Updater install handoff (W-83)', () => {
+  const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  beforeEach(() => Object.defineProperty(process, 'platform', { ...realPlatform, value: 'win32' }));
+  afterEach(() => Object.defineProperty(process, 'platform', realPlatform));
+  const ready = () => {
+    mkdirSync(versionDir(), { recursive: true });
+    const file = join(versionDir(), NAME);
+    writeFileSync(file, BODY);
+    u.state = { available: true, version: '0.1.9', ready: true, file, sha256: SHA, size: SIZE };
+  };
+
+  it('reports an installer that fails to start, without quitting', async () => {
+    ready();
+    h.launch = 'error';
+    let resumed = 0;
+    vi.useRealTimers();
+    await u.install(async () => true, () => resumed++);
+    expect(h.launched).toHaveLength(1);
+    expect(h.quits).toBe(0);
+    expect(resumed).toBe(1);
+    expect(u.state.error).toMatch(/installer could not be started \(spawn EPERM\)/);
+    expect(existsSync(join(dir, 'update-pending.json'))).toBe(false);
+  });
+
+  it('quits only once the installer is running, leaving a note for the next start', async () => {
+    ready();
+    let resumed = 0;
+    vi.useRealTimers();
+    await u.install(async () => true, () => resumed++);
+    expect(h.quits).toBe(1);
+    expect(resumed).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'))).toEqual({ version: '0.1.9' });
+  });
+
+  it('at the next start, says the last install did not happen (and why), and repeats it with the next ready update', async () => {
+    writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9' }));
+    writeFileSync(join(dir, 'update-failed.txt'), 'the update could not be unpacked\n');
+    u.cleanup();
+    expect(u.state.error).toBe('The last attempt to install 0.1.9 failed (the update could not be unpacked).');
+    expect(existsSync(join(dir, 'update-pending.json'))).toBe(false);
+    expect(existsSync(join(dir, 'update-failed.txt'))).toBe(false);
+    await u.check();
+    await done();
+    expect(u.state).toMatchObject({ ready: true, error: 'The last attempt to install 0.1.9 failed (the update could not be unpacked).' });
+  });
+
+  it('says nothing when the installed version is the one that was pending', async () => {
+    writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.8' }));
+    u.cleanup();
+    expect(u.state.error).toBeUndefined();
+    expect(existsSync(join(dir, 'update-pending.json'))).toBe(false);
   });
 });

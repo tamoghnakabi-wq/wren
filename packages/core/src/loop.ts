@@ -1,4 +1,4 @@
-import { assessCall, isReadOnlyCommand, needsApproval, type BrowserTarget } from './policy';
+import { assessCall, isReadOnlyCommand, needsApproval, type BrowserTarget, type ProgramTrust, type RiskContext } from './policy';
 import { describeCall } from './tools';
 import { clipMiddle } from './transcript';
 import type {
@@ -67,7 +67,7 @@ export interface ToolContext {
 export interface ToolHost {
   readonly runtime: Runtime;
   /** Extra information the policy needs (element behind a browser ref, whether a file exists). */
-  riskContext?(name: string, args: Record<string, unknown>): Promise<{ browserTarget?: BrowserTarget; fileExists?: boolean; mcpReadOnly?: boolean; unsandboxed?: boolean }>;
+  riskContext?(name: string, args: Record<string, unknown>): Promise<RiskContext>;
   execute(name: string, args: Record<string, unknown>, ctx: ToolContext, resume?: ToolCallData['background']): Promise<ToolResult | { yield: true }>;
 }
 
@@ -153,7 +153,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
         // Found already running with no resumable handle: the worker died mid-action. Re-running
         // anything that isn't a pure read could repeat a side effect (whatever its approval risk,
         // e.g. a low-risk append in the cloud), so report it and let the agent check.
-        if (ev.status === 'running' && !d.background && !isBuiltin(d.name) && !replaySafe(d)) {
+        if (ev.status === 'running' && !d.background && !isBuiltin(d.name) && !replaySafe(d, d.name === 'computer.shell' ? (await o.host.riskContext?.(d.name, d.args).catch(() => undefined))?.trustedProgram : undefined)) {
           await finish(o, ev, d, {
             output: 'Wren was interrupted while this action was running, so it may or may not have completed. Check the current state before trying it again.',
             isError: true,
@@ -291,8 +291,8 @@ function sameTarget(a: ToolCallData['target'], b: BrowserTarget | undefined) {
   return (['label', 'role', 'inputType', 'elementId', 'url', 'href', 'form'] as const).every((k) => (a[k] ?? '') === (b[k] ?? ''));
 }
 
-/** Calls that only read, so repeating one after a crash can't change anything. */
-function replaySafe(d: ToolCallData): boolean {
+/** Calls that only read, so repeating one after a crash can't change anything. `trust` is the host's view of bare program names, checked now. */
+function replaySafe(d: ToolCallData, trust?: ProgramTrust): boolean {
   switch (d.name) {
     case 'computer.read_file':
     case 'computer.list_files':
@@ -305,7 +305,7 @@ function replaySafe(d: ToolCallData): boolean {
       return String(d.args.method ?? 'GET').toUpperCase() === 'GET';
     case 'computer.shell':
       // Only commands that are read-only with fully known arguments (no $-expansions) can repeat.
-      return isReadOnlyCommand(String(d.args.command ?? ''));
+      return isReadOnlyCommand(String(d.args.command ?? ''), trust);
     default:
       return false;
   }

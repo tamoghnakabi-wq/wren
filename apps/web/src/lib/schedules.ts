@@ -14,11 +14,31 @@ export function nextRun(cron: string, timezone: string, from = new Date()): Date
   }
 }
 
-export function validateCron(cron: string, timezone: string) {
+/** Schedules run at most this often. */
+const MIN_GAP_MS = 15 * 60 * 1000;
+
+export function validateCron(cron: string, timezone: string, from = new Date()) {
   if (cron.trim().split(/\s+/).length !== 5) throw new HttpError(400, 'Use a 5-field cron expression (minute hour day month weekday).', 'invalid');
-  const a = nextRun(cron, timezone);
-  const b = nextRun(cron, timezone, a);
-  if (b.getTime() - a.getTime() < 15 * 60 * 1000) throw new HttpError(400, 'Schedules can run at most every 15 minutes.', 'invalid');
+  // Every gap over the coming year, not just the next one: "0,1 0,12 * * *" looks like twice a
+  // day from just after midnight, but runs at 12:00 and again at 12:01.
+  nextRun(cron, timezone, from); // reports an invalid expression
+  const it = CronExpressionParser.parse(cron, { tz: timezone, currentDate: from });
+  let prev = it.next().getTime();
+  const end = prev + 400 * 86_400_000;
+  for (let i = 0; i < 6000 && prev < end; i++) {
+    const next = it.next().getTime();
+    if (next - prev < MIN_GAP_MS) throw new HttpError(400, 'Schedules can run at most every 15 minutes.', 'invalid');
+    prev = next;
+  }
+}
+
+/**
+ * When a schedule runs next, having just started for the occurrence `slot`: the first occurrence
+ * at least 15 minutes after that slot and after this start (allowing a minute for the cron's own
+ * delay). Enforced here as well as when saving, so starts never bunch up, even after an outage.
+ */
+export function nextRunAfter(cron: string, timezone: string, slot: Date, now = new Date()): Date {
+  return nextRun(cron, timezone, new Date(Math.max(slot.getTime(), now.getTime() - 60_000) + MIN_GAP_MS - 1000));
 }
 
 export function describeCron(cron: string): string {
