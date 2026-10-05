@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The updater's download path against a fake release server: `net.fetch` is mocked, and each test
 // decides how the server answers (stall, drop, ignore Range, corrupt, ...). Timers are fake, so
@@ -33,6 +33,13 @@ vi.mock('electron', () => ({
 vi.mock('node:crypto', async (orig) => ({ ...(await orig<typeof import('node:crypto')>()), verify: () => true }));
 
 const { Updater } = await import('../src/main/updater');
+
+// The updater only runs on macOS and Windows; CI runs these tests on Linux.
+const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+beforeAll(() => {
+  if (process.platform !== 'darwin' && process.platform !== 'win32') Object.defineProperty(process, 'platform', { ...realPlatform, value: 'darwin' });
+});
+afterAll(() => Object.defineProperty(process, 'platform', realPlatform));
 
 const SIZE = 1_000_000;
 const BODY = Buffer.from(Array.from({ length: SIZE }, (_, i) => (i * 31 + (i >> 8)) & 255));
