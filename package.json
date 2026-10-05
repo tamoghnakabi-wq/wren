@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "npm run dev -w apps/web",
     "build": "npm run build -w apps/web",
-    "test": "npm test -w packages/core && npm test -w apps/web",
+    "test": "npm test -w packages/core && npm test -w apps/desktop && npm test -w apps/web",
     "typecheck": "npm run typecheck -w packages/core && npm run typecheck -w apps/web && npm run typecheck -w apps/desktop"
   },
   "engines": {

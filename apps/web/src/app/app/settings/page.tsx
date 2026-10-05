@@ -7,7 +7,7 @@ import { enablePush, pushState, type PushState } from '@/components/app/push';
 import { useApp } from '@/components/app/provider';
 import { Badge, Button, Card, cx, Input, Label, PageHeader, Select, Switch, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
-import { useDesktop, type DesktopPolicy, type WrenDesktop } from '@/lib/client/desktop';
+import { useDesktop, type DesktopPolicy, type DesktopStatus, type WrenDesktop } from '@/lib/client/desktop';
 import { supabase } from '@/lib/client/supabase';
 
 export default function SettingsPage() {
@@ -243,7 +243,6 @@ function Notifications() {
 
 function ThisComputer({ d }: { d: WrenDesktop }) {
   const { desktop: status } = useApp();
-  const toast = useToast();
   const [policy, setPolicy] = useState<DesktopPolicy | null>(null);
   useEffect(() => {
     d.getPolicy().then(setPolicy);
@@ -297,25 +296,69 @@ function ThisComputer({ d }: { d: WrenDesktop }) {
           <Badge tone={status?.local.reachable ? 'success' : 'neutral'}>{status?.local.reachable ? `${status.local.models.length} models` : 'Not reachable'}</Badge>
         </div>
       </div>
-      <Row title="Updates" body={status?.update?.ready ? `Version ${status.update.version} is ready to install.` : status?.update?.available ? `Downloading ${status.update.version}…` : status?.update?.error ? status.update.error : `You’re on ${status?.version}.`}>
-        {status?.update?.ready ? (
-          <Button size="sm" onClick={() => d.installUpdate()}>
-            Restart & update
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={async () => {
-              const u = await d.checkUpdate();
-              toast(u?.available ? `Update ${u.version} found — downloading.` : 'Wren is up to date.');
-            }}
-          >
-            <RefreshCw className="h-4 w-4" /> Check
-          </Button>
-        )}
-      </Row>
+      <UpdateRow d={d} status={status} />
     </Section>
+  );
+}
+
+const sentence = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`);
+
+/** The desktop app's self-updater. Older desktop builds report less (no progress, no retry time), and this copes with both. */
+function UpdateRow({ d, status }: { d: WrenDesktop; status: DesktopStatus | null | undefined }) {
+  const toast = useToast();
+  const u = status?.update;
+  const manual = (
+    <button type="button" className="underline underline-offset-2 hover:text-text" onClick={() => d.openExternal(`${location.origin}/download`)}>
+      download it yourself
+    </button>
+  );
+  const pct = u?.downloading && u.total ? Math.min(100, Math.floor(((u.received ?? 0) / u.total) * 100)) : null;
+  let body: React.ReactNode;
+  if (u?.ready) body = `Version ${u.version} is ready to install.${u.error ? ` ${sentence(u.error)}` : ''}`;
+  else if (u?.downloading)
+    body =
+      pct === null ? (
+        // Builds before 0.1.9 don't report progress, so there's no telling whether they're stuck.
+        <>Downloading {u.version}… If this doesn’t finish, {manual}.</>
+      ) : (
+        <>
+          Downloading {u.version}… {pct}% of {Math.round(u.total! / 1e6)} MB
+          <span role="progressbar" aria-label={`Downloading Wren ${u.version}`} aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} className="mt-1.5 block h-1 max-w-64 overflow-hidden rounded-full bg-border">
+            <span className="block h-full rounded-full bg-brand-solid transition-[width] duration-700" style={{ width: `${pct}%` }} />
+          </span>
+        </>
+      );
+  else if (u?.available && u.error)
+    body = (
+      <>
+        Couldn’t download {u.version}: {sentence(u.error)}
+        {u.retryAt ? ` Wren will try again at ${new Date(u.retryAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}.` : ''} You can also {manual}.
+      </>
+    );
+  else if (u?.error) body = sentence(u.error);
+  else body = `You’re on ${status?.version}.`;
+  return (
+    <Row title="Updates" body={body}>
+      {u?.ready ? (
+        <Button size="sm" onClick={() => d.installUpdate()}>
+          Restart & update
+        </Button>
+      ) : u?.downloading ? null : (
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={async () => {
+            const r = await d.checkUpdate();
+            if (r?.ready) toast(`Version ${r.version} is ready to install.`, 'success');
+            else if (r?.downloading) toast(`Downloading ${r.version}…`);
+            else if (r?.error) toast(r.available ? `Couldn’t download ${r.version}: ${sentence(r.error)}` : sentence(r.error), 'error');
+            else toast('Wren is up to date.');
+          }}
+        >
+          <RefreshCw className="h-4 w-4" /> {u?.error ? 'Try again' : 'Check'}
+        </Button>
+      )}
+    </Row>
   );
 }
 

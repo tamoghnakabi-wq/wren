@@ -1,9 +1,9 @@
-import { app } from 'electron';
+import { app, net } from 'electron';
 import { spawn } from 'node:child_process';
-import { createHash, createPublicKey, verify } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, createPublicKey, verify, type Hash } from 'node:crypto';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { Readable, Transform } from 'node:stream';
+import { Readable, Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { APP_URL, dataDir } from './config';
 import { compareVersions } from '@wren/core';
@@ -13,6 +13,11 @@ import { compareVersions } from '@wren/core';
 // against the public key built into this app, so a compromised website or
 // release host can't push a malicious build. macOS installs by swapping the
 // app bundle after quit; Windows runs the per-user NSIS installer silently.
+//
+// Requests go through Chromium's network stack (`net.fetch`), the same one the
+// user's browser downloaded Wren with: it follows the system proxy settings and
+// trusts the OS certificate store, which Node's own fetch ignores. That matters
+// on Windows, where proxies and antivirus HTTPS scanning are common.
 
 const PUBLIC_KEY = createPublicKey(`-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAgsEaViMzJQBoeqJKIwNB+dHg7kIM8veg0dYUJljLDzg=
@@ -31,8 +36,13 @@ export interface UpdateState {
   available: boolean;
   version?: string;
   downloading?: boolean;
+  /** Bytes downloaded so far and the full size, while downloading. */
+  received?: number;
+  total?: number;
   ready?: boolean;
   error?: string;
+  /** When Wren tries again after a failed check or download (ms since the epoch). */
+  retryAt?: number;
   file?: string;
   /** Signed checksum/size of `file`, re-checked right before installing. */
   sha256?: string;
@@ -65,6 +75,37 @@ async function verifiedCopy(file: string, sha256: string, size: number): Promise
   return dest;
 }
 
+/** A download that receives nothing for this long is dropped and resumed later. Generous, because some antivirus holds a download while it scans it. */
+const STALL_MS = 2 * 60_000;
+/** Waits before trying again after a failure: 5 minutes, 15 minutes, then hourly. */
+const RETRY_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000];
+
+/** Feed the first `bytes` bytes of `file` into `hash`. */
+async function hashFile(hash: Hash, file: string, bytes: number) {
+  if (bytes <= 0) return;
+  await pipeline(
+    createReadStream(file, { end: bytes - 1 }),
+    new Writable({
+      write(chunk: Buffer, _enc, cb) {
+        hash.update(chunk);
+        cb();
+      },
+    }),
+  );
+}
+
+/** Rename, retrying for a few seconds: on Windows an antivirus scan can hold a just-written file. */
+async function renameSettled(from: string, to: string) {
+  for (let i = 0; ; i++) {
+    try {
+      return renameSync(from, to);
+    } catch (e) {
+      if (i >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+}
+
 export const platformKey = () => `${process.platform}-${process.arch === 'arm64' ? 'arm64' : 'x64'}`;
 
 export function signedPayload(u: Pick<UpdateInfo, 'version' | 'sha256' | 'size'>, platform = platformKey()) {
@@ -95,40 +136,88 @@ export class Updater {
     }
   }
 
+  /** The signed update for this platform, if the server has one newer than `version`. */
+  private async latest(version: string): Promise<UpdateInfo | null> {
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    const res = await net.fetch(`${APP_URL}/api/updates?platform=${process.platform}&arch=${arch}&version=${version}`, { signal: AbortSignal.timeout(20000), cache: 'no-store' });
+    if (res.status === 204) return null;
+    if (!res.ok) throw new Error(`Update check failed (${res.status})`);
+    const info = (await res.json()) as UpdateInfo;
+    if (!verifySignature(info)) throw new Error('The update failed signature verification and was ignored.');
+    return info;
+  }
+
+  /**
+   * Look for a newer release and, if there is one, start downloading it. Returns as soon as that's
+   * decided; the download carries on in the background and reports progress through `onChange`.
+   */
   async check(): Promise<UpdateState> {
     if (this.busy) return this.state;
     if (process.platform !== 'darwin' && process.platform !== 'win32') return this.state;
     this.busy = true;
+    let downloading = false;
     try {
-      const plat = process.platform;
-      const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-      const res = await fetch(`${APP_URL}/api/updates?platform=${plat}&arch=${arch}&version=${app.getVersion()}`, { signal: AbortSignal.timeout(20000) });
-      if (res.status === 204) {
-        if (!this.state.ready) this.state = { available: false };
-        return this.state;
-      }
-      if (!res.ok) throw new Error(`Update check failed (${res.status})`);
-      const info = (await res.json()) as UpdateInfo;
-      if (!verifySignature(info)) throw new Error('The update failed signature verification and was ignored.');
+      const info = await this.latest(app.getVersion());
       // A validly signed *older* release must never be installed (it could reintroduce fixed bugs).
-      if (compareVersions(info.version, app.getVersion()) <= 0) {
+      if (!info || compareVersions(info.version, app.getVersion()) <= 0) {
+        this.succeeded();
         if (!this.state.ready) this.state = { available: false };
         return this.state;
       }
       // Already holding this (or a newer) download: nothing to do. A newer release replaces it.
       if (this.state.ready && compareVersions(info.version, this.state.version ?? '0.0.0') <= 0) return this.state;
-      this.state = { available: true, version: info.version, downloading: true };
-      this.onChange();
-      const file = await this.download(info);
-      this.state = { available: true, version: info.version, ready: true, file, sha256: info.sha256, size: info.size };
+      this.state = { available: true, version: info.version, downloading: true, received: 0, total: info.size };
+      downloading = true;
+      void this.fetchUpdate(info);
       return this.state;
     } catch (e) {
-      this.state = { ...this.state, downloading: false, error: (e as Error).message };
+      // A ready download stays installable; the next scheduled check looks again.
+      if (!this.state.ready) this.state = { available: false, error: (e as Error).message, retryAt: this.retryLater() };
       return this.state;
+    } finally {
+      if (!downloading) this.busy = false;
+      this.onChange();
+    }
+  }
+
+  /** The download started by check(). `busy` stays set until it ends. */
+  private async fetchUpdate(info: UpdateInfo) {
+    try {
+      const file = await this.download(info);
+      this.succeeded();
+      this.state = { available: true, version: info.version, ready: true, file, sha256: info.sha256, size: info.size };
+    } catch (e) {
+      this.state = { available: true, version: info.version, downloading: false, error: (e as Error).message, retryAt: this.retryLater() };
     } finally {
       this.busy = false;
       this.onChange();
     }
+  }
+
+  private failures = 0;
+  private retryTimer?: NodeJS.Timeout;
+
+  /** Schedule another try after a failure, backing off. Returns when it will run. */
+  private retryLater(): number {
+    clearTimeout(this.retryTimer);
+    const wait = RETRY_MS[Math.min(this.failures++, RETRY_MS.length - 1)];
+    this.retryTimer = setTimeout(() => void this.check(), wait);
+    return Date.now() + wait;
+  }
+
+  private succeeded() {
+    this.failures = 0;
+    clearTimeout(this.retryTimer);
+  }
+
+  private reportedAt = 0;
+
+  /** Record download progress; listeners hear about it at most once a second. */
+  private progress(received: number) {
+    this.state.received = received;
+    if (Date.now() - this.reportedAt < 1000) return;
+    this.reportedAt = Date.now();
+    this.onChange();
   }
 
   private async download(info: UpdateInfo): Promise<string> {
@@ -136,24 +225,91 @@ export class Updater {
     const dir = join(dataDir(), 'updates', info.version);
     mkdirSync(dir, { recursive: true });
     const file = join(dir, info.url.split('/').pop()!.replace(/[^\w.\-]/g, '_'));
-    const res = await fetch(info.url, { redirect: 'follow' });
-    if (!res.ok || !res.body) throw new Error(`Download failed (${res.status})`);
-    const hash = createHash('sha256');
-    let size = 0;
-    const tap = new Transform({
-      transform(chunk, _enc, cb) {
-        hash.update(chunk);
-        size += chunk.length;
-        cb(null, chunk);
-      },
-    });
-    await pipeline(Readable.fromWeb(res.body as never), tap, createWriteStream(file));
-    const digest = hash.digest('hex');
-    if (digest !== info.sha256 || size !== info.size) {
+    // Downloaded in an earlier session but not installed yet (Wren was quit): reuse it if it still checks out.
+    if (existsSync(file)) {
+      const hash = createHash('sha256');
+      if (statSync(file).size === info.size) await hashFile(hash, file, info.size);
+      if (hash.digest('hex') === info.sha256) return file;
       rmSync(file, { force: true });
-      throw new Error('The downloaded update did not match its signed checksum.');
     }
+    // Bytes land in a .part file, so a dropped or stalled connection resumes where it stopped
+    // instead of starting the whole download again. It's named after the signed hash, so a
+    // re-published file never resumes from another file's bytes.
+    const part = `${file}.${info.sha256.slice(0, 12)}.part`;
+    let have = existsSync(part) ? statSync(part).size : 0;
+    if (have >= info.size) {
+      rmSync(part, { force: true });
+      have = 0;
+    }
+    const ctl = new AbortController();
+    let stalled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const alive = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        ctl.abort();
+      }, STALL_MS);
+    };
+    let discard = false; // the partial file can't be trusted for resuming
+    try {
+      alive();
+      const res = await net.fetch(info.url, { signal: ctl.signal, cache: 'no-store', headers: have ? { Range: `bytes=${have}-` } : undefined });
+      if (res.status === 206) {
+        if (!(res.headers.get('content-range') ?? '').startsWith(`bytes ${have}-`)) {
+          discard = true;
+          throw new Error('The download server sent the wrong part of the file.');
+        }
+      } else if (res.ok) {
+        have = 0; // the whole file is coming
+      } else {
+        discard = res.status === 416;
+        throw new Error(`Download failed (${res.status})`);
+      }
+      if (!res.body) throw new Error('Download failed (empty response)');
+      const hash = createHash('sha256');
+      await hashFile(hash, part, have);
+      if (have) this.progress(have);
+      let received = have;
+      const onBytes = (n: number) => this.progress(n);
+      const tap = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          alive();
+          received += chunk.length;
+          if (received > info.size) {
+            discard = true;
+            return cb(new Error('The download is larger than the signed update.'));
+          }
+          hash.update(chunk);
+          onBytes(received);
+          cb(null, chunk);
+        },
+      });
+      await pipeline(Readable.fromWeb(res.body as never), tap, createWriteStream(part, { flags: have ? 'a' : 'w' }));
+      if (received < info.size) throw new Error('The connection closed before the download finished.');
+      if (hash.digest('hex') !== info.sha256) {
+        discard = true;
+        throw new Error('The downloaded update did not match its signed checksum.');
+      }
+    } catch (e) {
+      if (discard) rmSync(part, { force: true });
+      if (stalled) throw new Error(`The download stopped receiving data for ${STALL_MS / 60_000} minutes.`);
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    await renameSettled(part, file);
     return file;
+  }
+
+  /** `Wren --selftest --update`: download the latest release for this platform through the real path and verify it (CI). */
+  async selfTestDownload(): Promise<{ version: string; bytes: number }> {
+    const info = await this.latest('0.0.0');
+    if (!info) throw new Error('No release for this platform.');
+    const file = await this.download(info);
+    const bytes = statSync(file).size;
+    rmSync(dirname(file), { recursive: true, force: true });
+    return { version: info.version, bytes };
   }
 
   private installing = false;

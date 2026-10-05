@@ -28,6 +28,9 @@ if (process.argv.includes('--selftest')) {
       playwright = false;
     }
     const approve = approveScriptPath(DIST);
+    // `--update` also downloads the latest release through the updater's real path (network; CI).
+    let updateDownload: { version: string; bytes: number } | { error: string } | undefined;
+    if (process.argv.includes('--update')) updateDownload = await new Updater(() => {}).selfTestDownload().catch((e: Error) => ({ error: e.message }));
     const result = {
       version: app.getVersion(),
       platform: process.platform,
@@ -38,9 +41,10 @@ if (process.argv.includes('--selftest')) {
       approveHelper: existsSync(approve),
       grokHook: existsSync(approve.replace(/mcp-approve\.mjs$/, 'grok-hook.mjs')),
       preload: existsSync(join(DIST, 'preload.js')),
+      ...(updateDownload && { updateDownload }),
     };
     process.stdout.write(JSON.stringify(result) + '\n');
-    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload ? 0 : 1);
+    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) ? 0 : 1);
   });
 }
 app.setName('Wren');
@@ -194,17 +198,25 @@ function trayIcon() {
   return img;
 }
 
+let trayKey = '';
+
 function updateTray() {
   if (!tray) return;
   const s = status();
+  const u = updater.state;
   const lines = [s.linked ? (s.connected ? `Connected as ${s.account?.email ?? 'you'}` : 'Connecting…') : 'Not linked yet', s.runningRuns ? `${s.runningRuns} task${s.runningRuns > 1 ? 's' : ''} running here` : 'No tasks running here'];
+  const updateLabel = u.ready ? `Restart to update to ${u.version}` : u.downloading ? `Downloading update ${u.version}…` : 'Check for updates';
+  // Status is pushed every second while an update downloads; rebuild the menu only when it changes.
+  const key = JSON.stringify([lines, updateLabel]);
+  if (key === trayKey) return;
+  trayKey = key;
   tray.setToolTip(`Wren — ${lines.join(' · ')}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       ...lines.map((l) => ({ label: l, enabled: false })),
       { type: 'separator' },
       { label: 'Open Wren', click: () => showWindow() },
-      { label: updater.state.ready ? `Restart to update to ${updater.state.version}` : 'Check for updates', click: () => (updater.state.ready ? installUpdate() : void updater.check()) },
+      { label: updateLabel, enabled: !u.downloading, click: () => (updater.state.ready ? installUpdate() : void updater.check()) },
       { type: 'separator' },
       { label: 'Stop all tasks on this computer', enabled: s.runningRuns > 0, click: () => runner.abortAll() },
       { label: 'Quit Wren', click: () => quit() },

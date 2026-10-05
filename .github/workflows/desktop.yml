@@ -23,6 +23,7 @@ jobs:
       - run: npm ci
         env: { ELECTRON_SKIP_BINARY_DOWNLOAD: '1' }
       - run: npm test -w packages/core
+      - run: npm test -w apps/desktop
       - run: npx tsc --noEmit -p apps/desktop
 
   mac:
@@ -38,6 +39,10 @@ jobs:
       - name: Self-test the packaged app
         run: |
           ./apps/desktop/release/mac-arm64/Wren.app/Contents/MacOS/Wren --selftest
+      # Downloads the latest published release through the updater's own code path.
+      - name: Self-test the updater download
+        run: |
+          WREN_DATA_DIR="$RUNNER_TEMP/wren-update-test" ./apps/desktop/release/mac-arm64/Wren.app/Contents/MacOS/Wren --selftest --update
       - uses: actions/upload-artifact@v4
         with:
           name: mac
@@ -67,6 +72,15 @@ jobs:
           $out = & $app.FullName --selftest | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "Self-test failed" }
+      # Downloads the latest published release through the updater's own code path (it once failed on Windows only).
+      - name: Self-test the updater download
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs') -Recurse -Filter Wren.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $env:WREN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'wren-update-test'
+          $out = & $app.FullName --selftest --update | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "Updater download self-test failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows

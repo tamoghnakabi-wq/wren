@@ -27,7 +27,8 @@ export interface DesktopStatus {
   chatgpt: { signedIn: boolean; email?: string; planUsage?: boolean; error?: string };
   engines: { claudeCode: { installed: boolean; version?: string; loggedIn?: boolean }; grokBuild: { installed: boolean; version?: string; loggedIn?: boolean } };
   local: { baseUrl: string; reachable: boolean; models: { id: string; name: string }[] };
-  update?: { available: boolean; version?: string; downloading?: boolean; ready?: boolean; error?: string };
+  /** `received`, `total` and `retryAt` come from desktop 0.1.9 and later. */
+  update?: { available: boolean; version?: string; downloading?: boolean; received?: number; total?: number; ready?: boolean; error?: string; retryAt?: number };
 }
 
 export interface WrenDesktop {
