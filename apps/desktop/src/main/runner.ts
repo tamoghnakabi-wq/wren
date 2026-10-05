@@ -22,6 +22,7 @@ import { deviceJson } from './api';
 import { detect, type Capabilities } from './capabilities';
 import * as chatgpt from './chatgpt';
 import { loadDevice, loadPolicy, type Policy } from './config';
+import { pendingAsks } from './asks';
 import { closeRunTab, killRunJobs, LocalHost } from './host';
 import { allowedRoots, isConfined } from './paths';
 import { ProxyModelClient, RemoteStore } from './remote';
@@ -66,6 +67,8 @@ export class DeviceRunner {
   private stopReasons = new Map<string, string>();
   private ticking = false;
   private again = false;
+  /** Set while an update is being installed: no new work is picked up. */
+  private suspended = false;
   state: RunnerState = { connected: false, running: 0 };
 
   constructor(
@@ -107,7 +110,27 @@ export class DeviceRunner {
     for (const c of this.active.values()) c.abort();
   }
 
+  /**
+   * Stop taking work and stop every run, resolving once all of them have finished (their
+   * outcomes reported) or false if that takes longer than `timeoutMs`. resume() undoes it.
+   */
+  async suspend(timeoutMs = 20_000): Promise<boolean> {
+    this.suspended = true;
+    this.stop();
+    this.abortAll();
+    const end = Date.now() + timeoutMs;
+    while (this.active.size && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+    return this.active.size === 0;
+  }
+
+  resume() {
+    if (!this.suspended) return;
+    this.suspended = false;
+    this.start();
+  }
+
   async tick(): Promise<void> {
+    if (this.suspended) return;
     if (this.ticking) {
       this.again = true;
       return;
@@ -132,7 +155,7 @@ export class DeviceRunner {
       for (const w of hb.work) {
         const running = this.active.get(w.id);
         if (running && w.cancel) running.abort();
-        if (!running && !w.cancel && this.active.size < 3 && (w.status === 'queued' || !w.leased)) void this.execute(w.id, hb.settings);
+        if (!running && !w.cancel && !this.suspended && this.active.size < 3 && (w.status === 'queued' || !w.leased)) void this.execute(w.id, hb.settings);
       }
     } catch (e) {
       this.state.lastError = (e as Error).message;
@@ -143,7 +166,7 @@ export class DeviceRunner {
     } finally {
       this.ticking = false;
       this.onChange();
-      if (this.again) {
+      if (this.again && !this.suspended) {
         this.again = false;
         void this.tick();
       }
@@ -224,15 +247,13 @@ export class DeviceRunner {
   private async runEngine(c: Claim, store: RemoteStore, policy: Policy, signal: AbortSignal): Promise<LoopOutcome> {
     const events = await store.events();
     const seenSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
-    // Everything the user said since the engine last answered (several messages can arrive while
-    // it works; finishRun queues another turn for any that come in after this point).
-    const lastAnswer = events.reduce((i, e, k) => (e.type === 'message' && (e.data as MessageData).role === 'assistant' && e.status === 'done' ? k : i), -1);
-    const asks = events.slice(lastAnswer + 1).filter((e) => e.type === 'message' && (e.data as MessageData).role === 'user');
+    const asks = pendingAsks(events);
     const firstAsk = (asks[0]?.data ?? {}) as MessageData & { context?: string };
     const text = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
     const prompt = `${firstAsk.context ? `${firstAsk.context}\n\n` : ''}${text}`;
     const engine = c.run.model.source;
-    const resume = [...events].reverse().find((e) => e.type === 'reasoning' && (e.data as { engine?: string }).engine === engine) as SessionEvent<{ resumeId?: string }> | undefined;
+    // The engine's own session to continue (reasoning events also carry the follow-up cursor).
+    const resume = [...events].reverse().find((e) => e.type === 'reasoning' && (e.data as { engine?: string }).engine === engine && typeof (e.data as { resumeId?: unknown }).resumeId === 'string') as SessionEvent<{ resumeId?: string }> | undefined;
     const run = {
       runId: c.run.id,
       store,
@@ -264,7 +285,11 @@ export class DeviceRunner {
     if (!policy.folders.length) return { kind: 'failed', error: 'No folders are allowed on this computer. Add one in Wren → Settings → This computer.', code: 'no_folders', steps: 0 };
     const inFolders = this.inFolders();
     const out = engine === 'claude-code' ? await runClaudeCode(run, inFolders, approveScript()) : await runGrokBuild(run, inFolders, approveScript().replace(/mcp-approve\.mjs$/, 'grok-hook.mjs'));
-    return out.kind === 'completed' ? { ...out, seenSeq } : out;
+    if (out.kind !== 'completed') return out;
+    // Everything up to seenSeq was given to the engine and answered: the next turn starts after it
+    // (a follow-up sent while the engine worked comes before this answer, and must not be skipped).
+    await store.append('reasoning', { engine, consumedSeq: seenSeq }, 'done');
+    return { ...out, seenSeq };
   }
 
   private async runAgentLoop(c: Claim, store: RemoteStore, policy: Policy, settings: Heartbeat['settings'], signal: AbortSignal): Promise<LoopOutcome> {

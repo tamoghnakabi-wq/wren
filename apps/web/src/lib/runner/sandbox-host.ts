@@ -41,7 +41,21 @@ echo $? > "$dir/$id.exit"
 /** Shell function `stopjob <id>`: ends a job's whole session, politely first. */
 const STOP_JOB = `stopjob() { d="$HOME/.wren/jobs"; s=$(cat "$d/$1.sid" 2>/dev/null); p=$(cat "$d/$1.pid" 2>/dev/null)
   [ -n "$s" ] && { kill -TERM -- -"$s"; pkill -TERM -s "$s"; } 2>/dev/null; [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
-  sleep 1; [ -n "$s" ] && { kill -KILL -- -"$s"; pkill -KILL -s "$s"; } 2>/dev/null; true; }`;
+  sleep 1; [ -n "$s" ] && { kill -KILL -- -"$s"; pkill -KILL -s "$s"; } 2>/dev/null; true; }
+jobalive() { d="$HOME/.wren/jobs"; s=$(cat "$d/$1.sid" 2>/dev/null)
+  { [ -n "$s" ] && pgrep -s "$s" >/dev/null; } || { [ ! -f "$d/$1.exit" ] && p=$(cat "$d/$1.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; }`;
+
+/** Stops every job of run $1 and exits 0 only once none of their processes is left. */
+const STOP_RUN_JOBS = `${STOP_JOB}
+left=0
+for f in "$HOME"/.wren/jobs/*.run; do
+  [ -f "$f" ] && [ "$(cat "$f")" = "$1" ] || continue
+  j="$(basename "$f" .run)"
+  stopjob "$j"
+  for i in 1 2 3 4 5 6 7 8 9 10; do jobalive "$j" || break; sleep 0.3; done
+  jobalive "$j" && { echo "job $j still running" >&2; left=1; }
+done
+exit $left`;
 
 // One-time browser install in the browser VM. It takes minutes on a new VM, so it runs in the
 // background (a long silent command would outlive its connection) and is polled with
@@ -140,10 +154,7 @@ export class SandboxHost implements ToolHost {
     try {
       const sb = await Sandbox.get({ name: SandboxHost.sandboxName(agentId), resume: false });
       if (sb.status === 'running') {
-        const r = await sb.runCommand({
-          cmd: 'bash',
-          args: ['-lc', `${STOP_JOB}\nfor f in "$HOME"/.wren/jobs/*.run; do [ -f "$f" ] && [ "$(cat "$f")" = ${shq(runId)} ] && stopjob "$(basename "$f" .run)"; done; true`],
-        });
+        const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', STOP_RUN_JOBS, 'stop', runId] });
         if (r.exitCode !== 0) return false;
       }
     } catch (e) {
@@ -152,8 +163,13 @@ export class SandboxHost implements ToolHost {
     try {
       const br = await Sandbox.get({ name: SandboxHost.browserName(agentId), resume: false });
       if (br.status === 'running') {
+        // Closed only when the browser says so. Nothing listening (curl 7) means no browser, so no tab.
         const payload = Buffer.from(JSON.stringify({ action: 'close', tab: runId })).toString('base64');
-        await br.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | curl -s -m 10 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act >/dev/null; true`] });
+        const r = await br.runCommand({
+          cmd: 'bash',
+          args: ['-lc', `out=$(echo ${payload} | base64 -d | curl -s -m 10 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act); c=$?\n[ $c -eq 7 ] && exit 0\n[ $c -eq 0 ] && printf '%s' "$out" | grep -q '"ok":true' && exit 0\nexit 1`],
+        });
+        if (r.exitCode !== 0) return false;
       }
     } catch (e) {
       if (!gone(e)) return false;
@@ -418,7 +434,7 @@ export class SandboxHost implements ToolHost {
     throw new Error(`The browser did not start: ${await log.stdout()}`);
   }
 
-  private async browserAct(action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; snapshot?: string; image?: string; preview?: string; url?: string; title?: string; target?: { label: string; role: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string } }> {
+  private async browserAct(action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; snapshot?: string; image?: string; preview?: string; url?: string; title?: string; target?: { label: string; role: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string; form?: string } }> {
     const sb = await this.browserVm();
     const payload = Buffer.from(JSON.stringify(action)).toString('base64');
     const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | curl -s -m 60 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act`] });

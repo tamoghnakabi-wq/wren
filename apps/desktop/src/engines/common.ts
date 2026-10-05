@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -9,6 +9,7 @@ import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcom
 import type { RemoteStore } from '../main/remote';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
+import { killTree, treeAlive } from '../main/proctree';
 import { engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
 import { toolEnv } from '../main/shellenv';
 
@@ -65,10 +66,35 @@ export function engineEnv(): NodeJS.ProcessEnv {
  */
 export async function spawnEngine(engine: Engine, cli: string, args: string[], run: EngineRun, helper: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<ChildProcessWithoutNullStreams> {
   const env = { ...engineEnv(), ...extraEnv };
-  if (!hasSeatbelt()) return spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  if (!hasSeatbelt()) return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
   Object.assign(env, await toolEnv());
   const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), appPaths(helper));
-  return spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...args], { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  return track(spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...args], { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true }));
+}
+
+// Engine CLIs run as the leader of their own process group (detached), so stopping one also stops
+// every command and server it started. They stay tracked until nothing of theirs is left running.
+const engines = new Set<ChildProcess>();
+
+function track<P extends ChildProcess>(p: P): P {
+  engines.add(p);
+  p.on('close', () => {
+    if (!treeAlive(p)) engines.delete(p);
+  });
+  return p;
+}
+
+/** Stop an engine CLI and everything it started; resolves whether that is confirmed. */
+export async function stopEngine(p: ChildProcess, graceMs = 3000): Promise<boolean> {
+  const ok = await killTree(p, graceMs).catch(() => false);
+  if (ok) engines.delete(p);
+  return ok;
+}
+
+/** Stop every engine CLI process tree (for an update); true once all are confirmed gone. */
+export async function stopAllEngines(): Promise<boolean> {
+  const done = await Promise.all([...engines].map((p) => stopEngine(p, 1000)));
+  return done.every(Boolean);
 }
 
 /** Paths commands need to read to start this app's helpers (e.g. the approval MCP server). */
@@ -129,7 +155,7 @@ export async function spawnClaude(cli: string, args: string[], run: EngineRun, h
       WREN_SHELL_SB: seatbeltProfile(allowedRoots(run.folders), dataDir(), undefined, appPaths(helper)),
     });
   }
-  return spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
 }
 
 export class TimelineWriter {

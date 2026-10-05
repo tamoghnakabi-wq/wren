@@ -16,7 +16,8 @@ export const POST = route(async (req) => {
     await sql`update public.device_pairings set expires_at = now() where id = ${p.id}`;
     return json({ ok: true, approved: false });
   }
-  await sql`update public.device_pairings set user_id = ${user.id}, approved_at = now() where id = ${p.id} and approved_at is null`;
+  const claimed = await sql`update public.device_pairings set user_id = ${user.id}, approved_at = now() where id = ${p.id} and approved_at is null and expires_at > now() returning id`;
+  if (!claimed.length) return json({ error: 'That code was already used.' }, 409);
   return json({ ok: true, approved: true, device: { name: p.device_name, platform: p.platform } });
 });
 

@@ -156,30 +156,52 @@ export class Updater {
     return file;
   }
 
-  /** Quit and install the downloaded update, then relaunch. */
-  async install(stopAgents: () => void) {
+  private installing = false;
+
+  /**
+   * Quit and install the downloaded update, then relaunch. `stopAgents` resolves true once every
+   * agent run, engine and command is confirmed stopped; `resumeAgents` undoes it if the install
+   * doesn't go ahead.
+   */
+  async install(stopAgents: () => Promise<boolean>, resumeAgents: () => void) {
     const file = this.state.file;
-    if (!file || !existsSync(file)) return;
-    // Stop agents (and every command they started) before anything is staged, so nothing they run
-    // is around while the installer is prepared. Where commands aren't sandboxed (Windows) this is
-    // what keeps them away from it.
-    stopAgents();
-    // The file sat on disk since download: install from a private copy that is verified as it's made.
-    const copy = this.state.sha256 && this.state.size ? await verifiedCopy(file, this.state.sha256, this.state.size).catch(() => null) : null;
-    if (!copy) {
-      rmSync(file, { force: true });
-      this.state = { available: false, error: 'The downloaded update changed on disk and was discarded. It will be downloaded again.' };
-      this.onChange();
-      return;
+    if (!file || !existsSync(file) || this.installing) return;
+    this.installing = true;
+    let handedOff = false;
+    try {
+      // Agents (and every process they started) must be gone before anything is staged, so nothing
+      // they run is around while the installer is prepared. Where commands aren't sandboxed
+      // (Windows) this is what keeps them away from it.
+      if (!(await stopAgents().catch(() => false))) {
+        this.state = { ...this.state, error: 'Some agent processes could not be confirmed stopped, so the update was not installed. Try again in a moment.' };
+        this.onChange();
+        return;
+      }
+      // The file sat on disk since download: install from a private copy that is verified as it's made.
+      const copy = this.state.sha256 && this.state.size ? await verifiedCopy(file, this.state.sha256, this.state.size).catch(() => null) : null;
+      if (!copy) {
+        rmSync(file, { force: true });
+        this.state = { available: false, error: 'The downloaded update changed on disk and was discarded. It will be downloaded again.' };
+        this.onChange();
+        return;
+      }
+      handedOff = this.launchInstaller(copy);
+    } finally {
+      this.installing = false;
+      if (!handedOff) resumeAgents();
     }
+  }
+
+  /** Start the installer for the verified copy and quit; false if that isn't possible here. */
+  private launchInstaller(copy: string): boolean {
     if (process.platform === 'win32') {
       spawn(copy, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
       app.quit();
-      return;
+      return true;
     }
     // macOS: <bundle>/Contents/MacOS/Wren -> swap the .app after this process exits.
     const bundle = resolve(dirname(process.execPath), '..', '..');
-    if (!bundle.endsWith('.app')) return;
+    if (!bundle.endsWith('.app')) return false;
     // Script, archive copy and staging all live in the private folder; the script checks the
     // archive once more right before extracting it, after this process has exited.
     const priv = dirname(copy);
@@ -208,5 +230,6 @@ rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
     );
     spawn('/bin/bash', [script, String(process.pid), copy, staging, bundle, this.state.sha256!], { detached: true, stdio: 'ignore' }).unref();
     app.quit();
+    return true;
   }
 }

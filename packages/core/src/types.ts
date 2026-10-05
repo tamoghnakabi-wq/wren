@@ -123,9 +123,10 @@ export interface ToolCallData {
   /** The page element a browser action was assessed (and approved) against. */
   /**
    * The browser element a click/type/press was assessed (and approved) against: the exact DOM
-   * node (elementId, unique per page load), the page it was on, and a link's destination.
+   * node (elementId, held by the browser controller and never visible to the page), the page it
+   * was on, and where a link or form leads.
    */
-  target?: { label?: string; role?: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string };
+  target?: { label?: string; role?: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string; form?: string };
 }
 
 export interface ToolResult {

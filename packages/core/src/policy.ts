@@ -141,10 +141,47 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
           norm += command[j];
           continue;
         }
-        if (command[j] === '$' || command[j] === '`') dyn = true;
+        // "$(...)" and "`...`" still run commands: check them like any other.
+        if (command[j] === '$' && command[j + 1] === '(' && command[j + 2] !== '(') {
+          const end = closingParen(command, j + 2);
+          const inner = parseShell(command.slice(j + 2, end));
+          nested.push(...inner.commands);
+          word += '$(…)';
+          norm += `$(${inner.normalized})`;
+          dyn = true;
+          j = end;
+          continue;
+        }
+        if (command[j] === '`') {
+          let end = j + 1;
+          while (end < n && command[end] !== '`') end += command[end] === '\\' ? 2 : 1;
+          const inner = parseShell(command.slice(j + 1, end));
+          nested.push(...inner.commands);
+          word += '$(…)';
+          norm += `\`${inner.normalized}\``;
+          dyn = true;
+          j = end;
+          continue;
+        }
+        if (command[j] === '$') dyn = true;
         word += command[j];
         norm += command[j];
       }
+      i = j;
+      continue;
+    }
+    if (c === '$' && command[i + 1] === "'") {
+      // $'...' (ANSI-C quoting): decode it, so escapes can't hide a command name.
+      let j = i + 2;
+      let raw = '';
+      for (; j < n && command[j] !== "'"; j++) {
+        if (command[j] === '\\' && j + 1 < n) raw += command[j] + command[++j];
+        else raw += command[j];
+      }
+      const text = decodeAnsiC(raw);
+      word += text;
+      norm += text;
+      inWord = true;
       i = j;
       continue;
     }
@@ -235,12 +272,25 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
       norm += c;
       continue;
     }
+    // Unquoted *, ?, [ and {a,b} expand to names only known when the command runs.
+    if (c === '*' || c === '?' || c === '[' || c === '{') dyn = true;
     word += c;
     norm += c;
     inWord = true;
   }
   endCommand();
   return { commands: [...commands, ...nested], normalized: norm };
+}
+
+/** Decodes the escapes of a $'...' string (\\xHH, \\NNN, \\uHHHH, \\n, ...). */
+function decodeAnsiC(raw: string): string {
+  const named: Record<string, string> = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+  return raw.replace(/\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|c.|.)/g, (_, e: string) => {
+    if (e[0] === 'x' || e[0] === 'u' || e[0] === 'U') return String.fromCodePoint(parseInt(e.slice(1), 16));
+    if (/^[0-7]/.test(e)) return String.fromCharCode(parseInt(e, 8));
+    if (e[0] === 'c') return String.fromCharCode(e.charCodeAt(1) & 31);
+    return named[e] ?? '\\' + e;
+  });
 }
 
 /** Index of the ")" closing a "(" whose contents start at `from` (quotes respected). */
@@ -309,15 +359,28 @@ function ghReadOnly(args: string[]): boolean {
   return method.toUpperCase() === 'GET';
 }
 
-function commandIsReadOnly(c: SimpleCommand): boolean {
-  if (c.outputs.some((o) => o.dynamic || !SAFE_OUTPUTS.has(o.target))) return false;
-  // leading VAR=value assignments only affect the environment
+/** Variables that can't change which program runs or what it loads. */
+const SAFE_ASSIGNMENT = /^(LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|COLUMNS|LINES|TERM|PAGER|GIT_PAGER)=/;
+/** Where the real system utilities live: a path anywhere else could be any program. */
+const SYSTEM_BIN = /^\/(usr\/)?s?bin\/[^/]+$/;
+
+/** The program a command runs: the first word after leading VAR=value assignments. */
+function program(c: SimpleCommand): { words: string[]; dynamic: boolean[]; unsafeEnv: boolean } {
   let k = 0;
   while (k < c.words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(c.words[k])) k++;
-  const words = c.words.slice(k);
-  const dynamic = c.dynamic.slice(k);
-  if (!words.length) return !dynamic.some(Boolean);
+  const unsafeEnv = c.words.slice(0, k).some((w) => !SAFE_ASSIGNMENT.test(w));
+  return { words: c.words.slice(k), dynamic: c.dynamic.slice(k), unsafeEnv };
+}
+
+function commandIsReadOnly(c: SimpleCommand): boolean {
+  if (c.outputs.some((o) => o.dynamic || !SAFE_OUTPUTS.has(o.target))) return false;
+  const { words, dynamic, unsafeEnv } = program(c);
+  if (!words.length) return !dynamic.some(Boolean) && !unsafeEnv;
+  // PATH=…, LD_PRELOAD=… etc. can make "ls" a different program.
+  if (unsafeEnv) return false;
   if (dynamic[0]) return false; // the program itself is unknown
+  // A path names a specific file: only the system's own utilities count as the known commands.
+  if (words[0].includes('/') && !SYSTEM_BIN.test(words[0])) return false;
   const cmd = words[0].toLowerCase().replace(/^.*[\\/]/, '');
   const args = words.slice(1);
   const line = [cmd, ...args].join(' ');
@@ -349,6 +412,12 @@ export function assessShell(command: string, runtime: Runtime): Assessment {
       }
     }
   }
+  // A program whose name is only known when the command runs (from $VAR, $(...), a wildcard)
+  // can't be judged: ask, like for anything else that could do real damage.
+  if (riskRank(risk) < riskRank('high') && commands.some((c) => program(c).dynamic[0])) {
+    risk = 'high';
+    reason = 'runs a program whose name is only known when it runs';
+  }
   if (risk === 'low') {
     const ro = commands.every(commandIsReadOnly);
     if (!ro) {
@@ -376,6 +445,8 @@ export interface BrowserTarget {
   autocomplete?: string;
   url?: string;
   href?: string;
+  /** Where a form the element belongs to submits ("POST https://..."). */
+  form?: string;
   /** Identity of the exact element (stable for the life of the page, unlike e12 refs). */
   elementId?: string;
 }

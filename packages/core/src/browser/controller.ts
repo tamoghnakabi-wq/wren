@@ -4,7 +4,7 @@
 // the cloud runner writes this file into the agent's sandbox and runs it with
 // Node's built-in type stripping, while the desktop app bundles it normally.
 
-import type { BrowserContext, Page } from 'playwright-core';
+import type { BrowserContext, ElementHandle, Page } from 'playwright-core';
 
 export interface BrowserAction {
   action: 'navigate' | 'snapshot' | 'click' | 'type' | 'press' | 'scroll' | 'screenshot' | 'back' | 'describe' | 'close';
@@ -17,7 +17,7 @@ export interface BrowserAction {
   amount?: number;
   full_page?: boolean;
   /** The element this action was assessed/approved against; refused if it changed. */
-  expect?: { label?: string; role?: string; inputType?: string; elementId?: string; url?: string; href?: string };
+  expect?: { label?: string; role?: string; inputType?: string; elementId?: string; url?: string; href?: string; form?: string };
   /** The task this action belongs to: each task gets its own tab, so tasks can't move each other's page. */
   tab?: string;
 }
@@ -35,21 +35,18 @@ export interface BrowserResponse {
   image?: string;
   /** Small JPEG base64 for the live view. */
   preview?: string;
-  target?: { label: string; role: string; inputType?: string; autocomplete?: string; href?: string; elementId?: string; url?: string };
+  target?: { label: string; role: string; inputType?: string; autocomplete?: string; href?: string; form?: string; elementId?: string; url?: string };
 }
 
-// Gives an element an identity that survives new snapshots (refs like e12 are renumbered each
-// time) and is unique per page load, so an approval names one exact DOM node.
-const ELEMENT_ID_JS = `const wrenId = (el) => {
-    if (!window.__wrenDoc) { window.__wrenDoc = Math.random().toString(36).slice(2, 10); window.__wrenSeq = 0; }
-    if (!el.getAttribute('data-wren-id')) el.setAttribute('data-wren-id', window.__wrenDoc + '-' + (++window.__wrenSeq));
-    return el.getAttribute('data-wren-id');
-  };`;
+type Target = NonNullable<BrowserResponse['target']>;
+/** What has to be unchanged between assessing (or approving) an action and taking it. */
+const TARGET_KEYS = ['label', 'role', 'inputType', 'elementId', 'url', 'href', 'form'] as const;
+/** Element handles kept per tab; older ones are let go (an approval on them is then refused). */
+const MAX_HELD = 200;
 
 // Runs inside the page. Walks the DOM in order, tags interactive elements with
 // data-wren-ref and returns a compact text rendering.
 const SNAPSHOT_FN = `(() => {
-  ${ELEMENT_ID_JS}
   const MAX = 24000, MAX_REFS = 450;
   let n = 0, out = [], len = 0, seenText = new Set();
   const push = (s) => { if (len > MAX) return; out.push(s); len += s.length + 1; };
@@ -113,7 +110,6 @@ const SNAPSHOT_FN = `(() => {
     if (interactive(el) && n < MAX_REFS) {
       const ref = 'e' + (++n);
       el.setAttribute('data-wren-ref', ref);
-      wrenId(el);
       const r = role(el);
       let line = '[' + ref + '] ' + r + ' "' + name(el) + '"';
       if (el.tagName === 'A') { const h = el.getAttribute('href') || ''; if (h && !h.startsWith('javascript')) line += ' -> ' + h.slice(0, 120); }
@@ -135,16 +131,28 @@ const SNAPSHOT_FN = `(() => {
   return out.join('\\n');
 })()`;
 
-const DESCRIBE_FN = `(ref) => {
-  ${ELEMENT_ID_JS}
-  const el = ref === '@focused' ? (document.activeElement && document.activeElement !== document.body ? document.activeElement : null) : document.querySelector('[data-wren-ref="' + ref + '"]');
-  if (!el) return ref === '@focused' ? { label: '', role: 'page', elementId: 'page:' + (window.__wrenDoc || (window.__wrenDoc = Math.random().toString(36).slice(2, 10))), url: location.href } : null;
+// The node an action would reach: a snapshot ref, or (for a key press) whatever has focus,
+// with the document itself standing for "the page" when nothing does.
+const FIND_FN = `(ref) => ref === '@focused'
+  ? (document.activeElement && document.activeElement !== document.body ? document.activeElement : document)
+  : document.querySelector('[data-wren-ref="' + ref + '"]')`;
+
+// What an element is and where using it leads. Runs in the page with the element passed in.
+const DESCRIBE_FN = `(el) => {
+  if (el === document) return { label: '', role: 'page', url: location.href };
   const t = (el.getAttribute('type') || '').toLowerCase();
   const hidden = t === 'password' || /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i.test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
   const label = (el.getAttribute('aria-label') || el.innerText || (hidden ? '' : el.value) || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
   const form = el.closest('form');
   const submitText = form ? Array.from(form.querySelectorAll('button,[type=submit]')).map(b => (b.innerText || b.value || '').trim()).join(' / ').slice(0, 120) : '';
-  return { label: label + (submitText && el.tagName !== 'BUTTON' ? ' (form: ' + submitText + ')' : ''), role: el.getAttribute('role') || el.tagName.toLowerCase(), inputType: el.getAttribute('type') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined, href: el.getAttribute('href') || undefined, elementId: wrenId(el), url: location.href };
+  // Where submitting goes: a submit button's own formaction/formmethod win over the form's.
+  const owner = el.form || form;
+  const attr = (n) => (owner && owner.getAttribute(n)) || '';
+  const action = owner ? new URL((el.getAttribute('formaction') || attr('action') || location.href), location.href).href : '';
+  const method = owner ? (el.getAttribute('formmethod') || attr('method') || 'get').toUpperCase() : '';
+  const link = el.closest('a[href],area[href]');
+  const href = link ? new URL(link.getAttribute('href'), location.href).href : el.getAttribute('href') || undefined;
+  return { label: label + (submitText && el.tagName !== 'BUTTON' ? ' (form: ' + submitText + ')' : ''), role: el.getAttribute('role') || el.tagName.toLowerCase(), inputType: el.getAttribute('type') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined, href, form: owner ? method + ' ' + action : undefined, url: location.href };
 }`;
 
 export class BrowserController {
@@ -152,6 +160,12 @@ export class BrowserController {
   /** One tab per task (see BrowserAction.tab). */
   private readonly tabs = new Map<string, Page>();
   private readonly context: BrowserContext;
+  /**
+   * Elements that were described, by a random id the page never sees. The id is what an
+   * approval names, and the action is then dispatched to that very node through its handle:
+   * a page can't forge it, and a look-alike put in the node's place doesn't match.
+   */
+  private readonly held = new Map<string, { handle: ElementHandle<Node>; page: Page }>();
 
   constructor(context: BrowserContext) {
     this.context = context;
@@ -194,36 +208,97 @@ export class BrowserController {
     return { ok: true, title, url: page.url(), snapshot: snapshot ? `Title: ${title}\nURL: ${page.url()}\n\n${snapshot}` : undefined, preview };
   }
 
-  /** The element to act on: the exact node an approval named when there is one, else the ref. */
-  private async locator(page: Page, ref?: string, elementId?: string) {
-    if (elementId && /^[a-z0-9]+-\d+$/.test(elementId)) {
-      const exact = page.locator(`[data-wren-id="${elementId}"]`).first();
-      if ((await exact.count()) === 0) throw new Error('That element is not on the page any more. Take a new snapshot and try again.');
-      return exact;
-    }
+  /** The element to act on when no exact node was named (see target()). */
+  private async locator(page: Page, ref?: string) {
     if (!ref || !/^e\d+$/.test(ref)) throw new Error('Unknown element ref. Take a snapshot and use a ref like e12.');
     const loc = page.locator(`[data-wren-ref="${ref}"]`).first();
     if ((await loc.count()) === 0) throw new Error(`Element ${ref} is not on the page any more. Take a new snapshot and use a current ref.`);
     return loc;
   }
 
-  private async describe(page: Page, ref: string): Promise<BrowserResponse['target'] | null> {
-    return (await page.evaluate(`(${DESCRIBE_FN})(${JSON.stringify(ref)})`)) as BrowserResponse['target'] | null;
+  /** The id for this node: the one it was given before, or a new one. Takes ownership of `handle`. */
+  private async remember(page: Page, handle: ElementHandle<Node>): Promise<string> {
+    let mine = [...this.held].filter(([, h]) => h.page === page);
+    const find = () => page.evaluate(([el, ...known]) => known.indexOf(el), [handle, ...mine.map(([, h]) => h.handle)]);
+    let i = mine.length ? await find().catch(() => null) : -1;
+    if (i === null) {
+      // Some kept handles belong to a document that is gone: let them go and look again.
+      const alive = await Promise.all(mine.map(([, h]) => h.handle.evaluate(() => true).catch(() => false)));
+      mine.forEach(([id, h], k) => {
+        if (!alive[k]) this.forget(id, h.handle);
+      });
+      mine = mine.filter((_, k) => alive[k]);
+      i = mine.length ? await find() : -1;
+    }
+    if (i >= 0) {
+      const [id, h] = mine[i];
+      void handle.dispose().catch(() => {});
+      this.held.delete(id);
+      this.held.set(id, h); // most recently used last
+      return id;
+    }
+    const id = `el-${globalThis.crypto.randomUUID()}`;
+    this.held.set(id, { handle, page });
+    if (mine.length + 1 > MAX_HELD) {
+      const [oldId, old] = mine[0];
+      this.forget(oldId, old.handle);
+    }
+    return id;
   }
 
-  /** Refuse when the element differs from what was approved, or is a secret field. */
-  private async guard(page: Page, a: BrowserAction): Promise<string | null> {
-    if (a.action !== 'click' && a.action !== 'type' && a.action !== 'press') return null;
-    const target = await this.describe(page, a.action === 'press' ? '@focused' : a.ref ?? '');
-    if (a.expect) {
-      const e = a.expect;
-      const same = !!target && (['label', 'role', 'inputType', 'elementId', 'url', 'href'] as const).every((k) => (k === 'elementId' || k === 'url' ? !e[k] : false) || (target[k] ?? '') === (e[k] ?? ''));
-      if (!same) return 'The page changed since this action was checked, so it was not taken. Take a new snapshot and try again.';
+  private forget(id: string, handle: ElementHandle<Node>) {
+    this.held.delete(id);
+    void handle.dispose().catch(() => {});
+  }
+
+  private forgetPage(page: Page) {
+    for (const [id, h] of this.held) if (h.page === page) this.forget(id, h.handle);
+  }
+
+  /** Describe the element behind a ref (or the focused one for '@focused') and give it an id. */
+  private async describe(page: Page, ref: string): Promise<Target | null> {
+    if (ref !== '@focused' && !/^e\d+$/.test(ref)) return null;
+    const found = await page.evaluateHandle(`(${FIND_FN})(${JSON.stringify(ref)})`);
+    const handle = found.asElement() as ElementHandle<Node> | null;
+    if (!handle) {
+      await found.dispose().catch(() => {});
+      return null;
     }
-    if (a.action === 'type' && target && SECRET_FIELD.test(`${target.inputType ?? ''} ${target.autocomplete ?? ''} ${target.label ?? ''}`)) {
-      return 'Agents never type passwords, card numbers or other credentials. Ask the user to do this step.';
+    const target = await describeElement(page, handle);
+    return { ...target, elementId: await this.remember(page, handle) };
+  }
+
+  /** A described element, by its id, if it is still in this tab's page; else null. */
+  private async heldElement(page: Page, id: string): Promise<ElementHandle<Node> | null> {
+    const h = this.held.get(id);
+    if (!h || h.page !== page) return null;
+    const connected = await h.handle.evaluate((n) => n === document || n.isConnected).catch(() => false);
+    return connected ? h.handle : null;
+  }
+
+  /**
+   * The element an action reaches. When the action was assessed (or approved) against an exact
+   * element, that node is used and must still be in the page and look the same; otherwise the ref.
+   */
+  private async target(page: Page, a: BrowserAction): Promise<{ handle?: ElementHandle<Node>; target: Target | null; refused?: string }> {
+    const changed = 'The page changed since this action was checked, so it was not taken. Take a new snapshot and try again.';
+    const e = a.expect;
+    if (e?.elementId) {
+      if (a.action === 'press') {
+        // A key goes to whatever has focus: that has to be the element (or page) that was checked.
+        const now = await this.describe(page, '@focused');
+        if (!now || now.elementId !== e.elementId || !same(now, e)) return { target: now, refused: changed };
+        return { target: now };
+      }
+      const handle = await this.heldElement(page, e.elementId);
+      if (!handle) return { target: null, refused: 'That element is not on the page any more. Take a new snapshot and try again.' };
+      const now = { ...(await describeElement(page, handle)), elementId: e.elementId };
+      if (!same(now, e)) return { target: now, refused: changed };
+      return { handle, target: now };
     }
-    return null;
+    const now = await this.describe(page, a.action === 'press' ? '@focused' : a.ref ?? '');
+    if (e && (!now || !same(now, { ...e, elementId: now.elementId, url: e.url ?? now.url }))) return { target: now, refused: changed };
+    return { target: now };
   }
 
   async act(a: BrowserAction): Promise<BrowserResponse> {
@@ -231,12 +306,21 @@ export class BrowserController {
       if (a.action === 'close' && a.tab) {
         const own = this.tabs.get(a.tab);
         this.tabs.delete(a.tab);
+        if (own) this.forgetPage(own);
         if (own && !own.isClosed()) await own.close().catch(() => {});
         return { ok: true };
       }
       const page = await this.current(a.tab);
-      const refused = await this.guard(page, a);
-      if (refused) return { ...(await this.state(page)), ok: false, error: refused };
+      let exact: ElementHandle<Node> | undefined;
+      if (a.action === 'click' || a.action === 'type' || a.action === 'press') {
+        const t = await this.target(page, a);
+        let refused = t.refused;
+        if (!refused && a.action === 'type' && t.target && SECRET_FIELD.test(`${t.target.inputType ?? ''} ${t.target.autocomplete ?? ''} ${t.target.label ?? ''}`)) {
+          refused = 'Agents never type passwords, card numbers or other credentials. Ask the user to do this step.';
+        }
+        if (refused) return { ...(await this.state(page)), ok: false, error: refused };
+        exact = t.handle;
+      }
       switch (a.action) {
         case 'navigate': {
           if (!a.url || !/^https?:\/\//i.test(a.url)) throw new Error('A full http(s) URL is required.');
@@ -247,15 +331,18 @@ export class BrowserController {
         case 'snapshot':
           return this.state(page);
         case 'click': {
-          const loc = await this.locator(page, a.ref, a.expect?.elementId);
+          // Through the handle, the click can only land on that node (Playwright checks what is
+          // under the pointer), however the page rearranges itself meanwhile.
+          const loc = exact ?? (await this.locator(page, a.ref));
           await loc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
           await loc.click({ timeout: 8000 });
           await this.settle(page);
           return this.state(await this.current(a.tab));
         }
         case 'type': {
-          const loc = await this.locator(page, a.ref, a.expect?.elementId);
-          const editable = await loc.evaluate((el) => (el as HTMLElement).isContentEditable).catch(() => false);
+          const loc = exact ?? (await this.locator(page, a.ref));
+          const isEditable = (el: Node) => (el as HTMLElement).isContentEditable;
+          const editable = await (exact ? exact.evaluate(isEditable) : (loc as Exclude<typeof loc, ElementHandle<Node>>).evaluate(isEditable)).catch(() => false);
           if (editable) {
             await loc.click({ timeout: 5000 });
             await page.keyboard.type(a.text ?? '', { delay: 10 });
@@ -292,6 +379,7 @@ export class BrowserController {
           return { ok: true, target: target ?? undefined };
         }
         case 'close':
+          for (const [id, h] of this.held) this.forget(id, h.handle);
           await this.context.close();
           return { ok: true };
       }
@@ -306,5 +394,20 @@ export class BrowserController {
       }
       return { ...extra, ok: false, error: msg };
     }
+  }
+}
+
+/** Same element as checked: every field the check saw is unchanged (fields it didn't have are skipped only for elementId/url). */
+function same(now: Target, e: NonNullable<BrowserAction['expect']>): boolean {
+  return TARGET_KEYS.every((k) => ((k === 'elementId' || k === 'url') && !e[k] ? true : (now[k] ?? '') === (e[k] ?? '')));
+}
+
+/** Runs DESCRIBE_FN on one element (a string function can't take a handle directly, so it is fetched first). */
+async function describeElement(page: Page, el: ElementHandle<Node>): Promise<Target> {
+  const fn = await page.evaluateHandle(`(${DESCRIBE_FN})`);
+  try {
+    return (await fn.evaluate((f, node) => (f as unknown as (n: Node) => Target)(node), el)) as Target;
+  } finally {
+    void fn.dispose().catch(() => {});
   }
 }

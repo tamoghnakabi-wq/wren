@@ -10,7 +10,8 @@ import { join } from 'node:path';
 //      plus the toolchains and non-secret configuration developer tools need
 //      (metadata such as stat stays readable so paths still resolve)
 //   3. credential files and Wren's own data: never readable, even inside (2)
-// System locations (/usr, /opt/homebrew, /Library, …) stay readable so tools work.
+// System locations (/usr, /opt/homebrew, /Library, …) stay readable to commands so tools work;
+// Wren's own file helpers get only the few system files they need to start.
 
 export type Engine = 'claude-code' | 'grok-build';
 
@@ -33,8 +34,13 @@ const CACHES = [
   '.npm', '.cache', '.bun/install', '.yarn/berry', '.cargo/registry', '.cargo/git', '.nuget/packages', 'Library/pnpm',
   ...['pip', 'Homebrew', 'Yarn', 'node-gyp', 'ms-playwright', 'pnpm', 'go-build', 'electron', 'electron-builder', 'typescript', 'deno', 'bun', 'pypoetry', 'uv'].map((c) => `Library/Caches/${c}`),
 ];
-/** What the small file helpers (cat, sh, find, stat) need to load; everything else is unreadable to them. */
-const SYSTEM_RUNTIME = ['/usr', '/bin', '/sbin', '/System', '/private/var/db/dyld', '/private/var/db/timezone', '/dev', '/Library/Apple'];
+/**
+ * What Wren's small file helpers need to start: their own programs, the system libraries and the
+ * dyld shared cache. Nothing else outside the allowed folders is readable to them (not /usr/local,
+ * /Library, /etc or other system data).
+ */
+const HELPER_PROGRAMS = ['/bin/cat', '/bin/sh', '/bin/bash', '/bin/mkdir', '/usr/bin/dirname', '/usr/bin/find', '/usr/bin/xargs', '/usr/bin/stat', '/usr/bin/head', '/private/var/select/sh'];
+const SYSTEM_RUNTIME = ['/usr/lib', '/System/Library/dyld', '/System/Volumes/Preboot/Cryptexes/OS', '/System/Cryptexes/OS', '/private/var/db/dyld', '/dev'];
 
 /** Never readable: credential stores, other apps' private data, registry/cloud tokens. */
 const SECRETS = [
@@ -109,7 +115,7 @@ function build(s: Spec): string {
     // Commands may read system locations (toolchains live there); Wren's file helpers only the
     // allowed folders and the system runtime.
     s.tools ? `(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath ${q(home)}))` : '(deny file-read-data (subpath "/"))',
-    `(allow file-read-data ${sub(readable)} ${enginePrefixes} ${s.tools ? lit(HOME_FILES.map(h)) : `${sub(SYSTEM_RUNTIME)} (literal "/")`})`,
+    `(allow file-read-data ${sub(readable)} ${enginePrefixes} ${s.tools ? lit(HOME_FILES.map(h)) : `${sub(SYSTEM_RUNTIME)} ${lit(HELPER_PROGRAMS)} (literal "/")`})`,
     ...(protect.length ? [`(deny file-write* ${sub(protect)} ${lit(protect)})`] : []),
     `(deny file-read* file-write* ${sub(secrets)} ${secretPrefixes})`,
   ].join('\n');

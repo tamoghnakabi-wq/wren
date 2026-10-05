@@ -108,14 +108,20 @@ export function Composer({
   async function send() {
     if (!agent || busy || (!text.trim() && !files.length) || uploading) return;
     setBusy(true);
+    // What's being sent leaves the box right away, so anything typed or attached meanwhile is a new
+    // draft that the answer can't wipe. If sending fails, it comes back (ahead of the new draft).
+    const sentText = text;
+    const sentFiles = files;
+    setText('');
+    setFiles([]);
     try {
       const r = await api<{ sessionId: string; runId: string }>('/api/tasks', {
-        body: { agentId: agent.id, sessionId, text, attachments: files, runtime: sessionId ? undefined : runtime },
+        body: { agentId: agent.id, sessionId, text: sentText, attachments: sentFiles, runtime: sessionId ? undefined : runtime },
       });
-      setText('');
-      setFiles([]);
       onSent?.(r);
     } catch (e) {
+      setText((cur) => (cur.trim() ? `${sentText}\n\n${cur}` : sentText));
+      setFiles((cur) => [...sentFiles, ...cur.filter((f) => !sentFiles.some((s) => s.artifactId === f.artifactId))].slice(0, 10));
       toast((e as Error).message, 'error');
     } finally {
       setBusy(false);

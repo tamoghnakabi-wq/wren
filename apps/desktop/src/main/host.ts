@@ -10,8 +10,9 @@ import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
 import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
+import { killTree } from './proctree';
 import { hasSeatbelt, seatbeltProfile } from './sandbox';
-import { toolEnv } from './shellenv';
+import { absolutePath, toolEnv } from './shellenv';
 
 // Tool host for runs on this computer. Everything is confined to the folders
 // the user allowed in this app's Settings (a policy the server can't change),
@@ -177,6 +178,8 @@ export class LocalHost implements ToolHost {
     const env = { ...process.env, WREN_AGENT: '1', ELECTRON_RUN_AS_NODE: undefined } as NodeJS.ProcessEnv;
     for (const k of Object.keys(env)) if (/^(WREN_URL|WREN_DATA_DIR)$/.test(k)) delete env[k];
     if (process.platform === 'win32') {
+      // Programs are only looked up in absolute PATH folders, never relative to the project.
+      for (const k of Object.keys(env)) if (/^path$/i.test(k)) env[k] = absolutePath(env[k] ?? '');
       return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { cwd, env, windowsHide: true });
     }
     if (hasSeatbelt()) {
@@ -223,11 +226,11 @@ export class LocalHost implements ToolHost {
         return { output: `exit code ${job.exit}\n${tail(job.out) || '(no output)'}`, isError: job.exit !== 0 };
       }
       if (Date.now() - job.started > limit) {
-        kill(job.proc);
+        void kill(job.proc);
         return { output: `Timed out after ${Math.round(limit / 1000)}s (stopped).\n${tail(job.out, 6000)}`, isError: true };
       }
       if (ctx.signal?.aborted) {
-        kill(job.proc);
+        void kill(job.proc);
         return { output: 'Stopped.', isError: true };
       }
       if (Date.now() > ctx.deadline - 3000) return { yield: true };
@@ -324,23 +327,9 @@ function tail(s: string, n = 28_000) {
  * own), the process tree on Windows. A polite stop first, then a forced one after `graceMs`
  * whether or not the first was obeyed (a command can ignore SIGTERM).
  */
-function kill(p: ChildProcess, graceMs = 3000) {
-  if (process.platform === 'win32') {
-    if (p.pid) spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => p.kill());
-    else p.kill();
-    return;
-  }
-  const signal = (sig: NodeJS.Signals) => {
-    try {
-      if (p.pid) process.kill(-p.pid, sig);
-      else p.kill(sig);
-    } catch {
-      /* already gone */
-    }
-  };
-  if (graceMs <= 0) return signal('SIGKILL');
-  signal('SIGTERM');
-  setTimeout(() => signal('SIGKILL'), graceMs).unref();
+function kill(p: ChildProcess, graceMs = 3000): Promise<boolean> {
+  if (!p.pid) p.kill();
+  return killTree(p, graceMs).catch(() => false);
 }
 
 export async function closeBrowser() {
@@ -350,8 +339,16 @@ export async function closeBrowser() {
 
 /** Wren is quitting: end every command now. */
 export function killAllJobs() {
-  for (const j of jobs.values()) kill(j.proc, 0);
+  for (const j of jobs.values()) void kill(j.proc, 0);
   jobs.clear();
+}
+
+/** Like killAllJobs, but resolves once every command (and what it started) is confirmed gone. */
+export async function stopAllJobs(): Promise<boolean> {
+  const all = [...jobs.values()];
+  jobs.clear();
+  const done = await Promise.all(all.map((j) => kill(j.proc, 0)));
+  return done.every(Boolean);
 }
 
 /** Stop the commands a run started (foreground or background); other runs' jobs keep going. */
@@ -364,7 +361,7 @@ export function killRunJobs(runId?: string) {
     }
     // Still tracked until it has really exited (so quitting can still reach it).
     j.stopping = true;
-    kill(j.proc);
+    void kill(j.proc);
   }
 }
 

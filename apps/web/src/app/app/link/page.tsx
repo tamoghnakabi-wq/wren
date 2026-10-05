@@ -6,6 +6,8 @@ import { Suspense, useEffect, useState } from 'react';
 import { Button, ButtonLink, Card, Input, Skeleton, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 
+type Lookup = { code: string; valid: boolean; device?: { name: string; platform: string } };
+
 export default function LinkPage() {
   return (
     <Suspense fallback={<Skeleton className="mx-auto mt-10 h-72 max-w-md rounded-2xl" />}>
@@ -18,23 +20,32 @@ function LinkDevice() {
   const params = useSearchParams();
   const toast = useToast();
   const [code, setCode] = useState(params.get('code') ?? '');
-  const [info, setInfo] = useState<{ valid: boolean; device?: { name: string; platform: string } } | null>(null);
-  const [done, setDone] = useState(false);
+  // A lookup result belongs to the code it was made for, and only shows while that is the code.
+  const [info, setInfo] = useState<Lookup | null>(null);
+  const [done, setDone] = useState<Lookup | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const complete = code.replace(/[^A-Za-z0-9]/g, '').length === 8;
+  const normalized = code.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const complete = normalized.length === 8;
   useEffect(() => {
     if (!complete) return;
-    api<{ valid: boolean; device?: { name: string; platform: string } }>(`/api/devices/approve?code=${encodeURIComponent(code)}`).then(setInfo).catch(() => setInfo({ valid: false }));
-  }, [code, complete]);
-  // Only a complete code has something to show.
-  const shown = complete ? info : null;
+    let current = true; // a slower answer for an earlier code is dropped
+    api<Omit<Lookup, 'code'>>(`/api/devices/approve?code=${encodeURIComponent(normalized)}`)
+      .then((r) => current && setInfo({ ...r, code: normalized }))
+      .catch(() => current && setInfo({ valid: false, code: normalized }));
+    return () => {
+      current = false;
+    };
+  }, [normalized, complete]);
+  // Only the details of exactly this code (looked up, not still loading) are shown or approved.
+  const shown = complete && info?.code === normalized ? info : null;
+  const looking = complete && !shown;
 
   if (done)
     return (
       <Card className="mx-auto mt-10 max-w-md p-8 text-center">
         <CheckCircle2 className="mx-auto h-12 w-12 text-success" />
-        <h1 className="mt-4 text-xl font-semibold">{info?.device?.name ?? 'Your computer'} is linked</h1>
+        <h1 className="mt-4 text-xl font-semibold">{done.device?.name ?? 'Your computer'} is linked</h1>
         <p className="mt-2 text-sm text-muted">You can close this tab and return to the Wren app. Agents can now work on that computer with the permissions you set there.</p>
         <ButtonLink href="/app" variant="secondary" className="mt-6">
           Go to Wren
@@ -49,7 +60,8 @@ function LinkDevice() {
       </div>
       <h1 className="mt-4 text-xl font-semibold">Link a computer</h1>
       <p className="mt-1.5 text-sm text-muted">Enter the code shown in the Wren desktop app. Only approve codes you just started yourself.</p>
-      <Input className="mt-5 text-center font-mono text-lg tracking-[0.3em] uppercase" value={code} maxLength={9} placeholder="ABCD-EF23" onChange={(e) => setCode(e.target.value.toUpperCase())} aria-label="Code" />
+      <Input className="mt-5 text-center font-mono text-lg tracking-[0.3em] uppercase" value={code} maxLength={9} placeholder="ABCD-EF23" readOnly={busy} onChange={(e) => setCode(e.target.value.toUpperCase())} aria-label="Code" />
+      {looking && <Skeleton className="mt-4 h-[58px] rounded-xl" />}
       {shown && !shown.valid && <p className="mt-2 text-[13px] text-danger">That code is invalid or expired.</p>}
       {shown?.valid && (
         <div className="mt-4 rounded-xl bg-bg-subtle p-3 text-sm">
@@ -59,13 +71,16 @@ function LinkDevice() {
       )}
       <Button
         className="mt-5 w-full"
-        disabled={!shown?.valid}
+        disabled={!shown?.valid || busy}
         loading={busy}
         onClick={async () => {
+          const approving = shown;
+          if (!approving?.valid) return;
           setBusy(true);
           try {
-            await api('/api/devices/approve', { body: { code } });
-            setDone(true);
+            // The code whose computer is on screen, never whatever the box holds by now.
+            await api('/api/devices/approve', { body: { code: approving.code } });
+            setDone(approving);
           } catch (e) {
             toast((e as Error).message, 'error');
           } finally {

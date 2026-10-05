@@ -67,7 +67,9 @@ describe('shell risk', () => {
   });
   it('treats unknown values conservatively', () => {
     expect(desk('sort $OPTS data.txt').risk).toBe('medium');
-    expect(desk('$CMD file').risk).toBe('medium');
+    expect(desk('$CMD file').risk).toBe('high');
+    expect(desk('"$(which git)" status').risk).toBe('high');
+    expect(desk('./*/ls').risk).toBe('high');
     expect(desk('rg "$(cat flags)" src').risk).toBe('medium');
     expect(desk('echo $HOME').risk).toBe('low');
     expect(desk('cat "$FILE"').risk).toBe('low');
@@ -76,6 +78,24 @@ describe('shell risk', () => {
     for (const c of ['grep "a|b" notes.txt', "grep 'x;y' f", 'echo "a && b"', 'git log --format="%h %s"', 'echo $(date) done', 'LC_ALL=C sort data.txt', 'cat a.txt 2>&1 | wc -l']) {
       expect(desk(c).risk, c).toBe('low');
     }
+  });
+  it('looks inside substitutions within double quotes', () => {
+    expect(desk('echo "$(sort -o result.txt input.txt)"').risk).not.toBe('low');
+    expect(desk('echo "$(g\'it\' push)"').risk).toBe('high');
+    expect(desk('echo "`git push --force`"').risk).toBe('high');
+    expect(isReadOnlyCommand('echo "$(sort -o result.txt input.txt)"')).toBe(false);
+    expect(desk("$'\\x67it' push").risk).toBe('high');
+    expect(desk('echo "$(date)"').risk).toBe('low');
+  });
+  it('only trusts the system copies of read-only commands', () => {
+    expect(isReadOnlyCommand('/allowed/project/ls')).toBe(false);
+    expect(isReadOnlyCommand('./ls -la')).toBe(false);
+    expect(isReadOnlyCommand('PATH=/tmp/x ls')).toBe(false);
+    expect(isReadOnlyCommand('DYLD_INSERT_LIBRARIES=/tmp/x.dylib cat a')).toBe(false);
+    expect(desk('PATH=. ls').risk).not.toBe('low');
+    expect(isReadOnlyCommand('/bin/ls -la')).toBe(true);
+    expect(isReadOnlyCommand('LC_ALL=C sort data.txt')).toBe(true);
+    expect(desk('LC_ALL=C sort data.txt').risk).toBe('low');
   });
   it('replays only read commands with known arguments', () => {
     expect(isReadOnlyCommand('ls -la && cat a.txt')).toBe(true);

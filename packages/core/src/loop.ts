@@ -194,7 +194,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
           const ctx = (await o.host.riskContext?.(d.name, d.args).catch(() => undefined)) ?? {};
           if (BROWSER_TARGETED.has(d.name) && ctx.browserTarget) {
             const t = ctx.browserTarget;
-            d.target = { label: t.label, role: t.role, inputType: t.inputType, autocomplete: t.autocomplete, elementId: t.elementId, url: t.url, href: t.href };
+            d.target = { label: t.label, role: t.role, inputType: t.inputType, autocomplete: t.autocomplete, elementId: t.elementId, url: t.url, href: t.href, form: t.form };
           }
           const a = assessCall(d.name, d.args, o.host.runtime, ctx);
           if (a.blocked) {
@@ -288,7 +288,7 @@ const BROWSER_TARGETED = new Set(['browser.click', 'browser.type', 'browser.pres
 /** Same element, same page: identity, location and what the user was shown must all match. */
 function sameTarget(a: ToolCallData['target'], b: BrowserTarget | undefined) {
   if (!a || !b) return false;
-  return (['label', 'role', 'inputType', 'elementId', 'url', 'href'] as const).every((k) => (a[k] ?? '') === (b[k] ?? ''));
+  return (['label', 'role', 'inputType', 'elementId', 'url', 'href', 'form'] as const).every((k) => (a[k] ?? '') === (b[k] ?? ''));
 }
 
 /** Calls that only read, so repeating one after a crash can't change anything. */

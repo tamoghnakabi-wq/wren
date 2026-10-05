@@ -28,6 +28,9 @@ export interface LiveOptions {
 
 type Row = Record<string, unknown>;
 
+/** Rows per request when filling a gap in a keepAll list. */
+const GAP_PAGE = 1000;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; loading: boolean; error: string | null; reload: () => void } {
   const [rows, setRows] = useState<T[]>([]);
@@ -63,6 +66,9 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
 
     // keepAll: everything seen for this subscription, by primary key.
     const kept = new Map<unknown, T>();
+    // keepAll: how far (by the order column) fetched pages reach without a hole. Rows that came in
+    // over realtime don't count: there can be missed rows just below them.
+    let fetchedTop: number | string | undefined;
     const keep = (list: T[]) => {
       for (const r of list) kept.set((r as R)[pk], r);
       setRows(sortRows([...kept.values()]));
@@ -82,15 +88,36 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
       const { data, error } = await q;
       if (cancelled) return;
       if (error) setError(error.message);
-      else if (opts.keepAll && opts.order && opts.limit && kept.size && (data ?? []).length >= opts.limit) {
-        // The newest page may not reach back to what is kept (many rows arrived meanwhile): fetch the gap.
+      else if (opts.keepAll && opts.order && opts.limit && (data ?? []).length) {
         const col = opts.order.column;
         const val = (r: unknown) => (r as R)[col] as number | string;
-        const keptNewest = [...kept.values()].reduce((m, r) => (val(r) > m ? val(r) : m), val([...kept.values()][0]));
-        const pageOldest = (data as unknown as T[]).reduce((m, r) => (val(r) < m ? val(r) : m), val((data as unknown as T[])[0]));
-        const gap = pageOldest > keptNewest ? await query().gt(col, keptNewest).lt(col, pageOldest).order(col, { ascending: true }).limit(5000) : { data: [] };
-        if (cancelled) return;
-        keep([...((gap.data ?? []) as unknown as T[]), ...(data as unknown as T[])]);
+        const page = data as unknown as T[];
+        const pageNewest = page.reduce((m, r) => (val(r) > m ? val(r) : m), val(page[0]));
+        const pageOldest = page.reduce((m, r) => (val(r) < m ? val(r) : m), val(page[0]));
+        // A full newest page that starts above what was fetched before leaves rows in between
+        // (many arrived while the socket was down): fetch all of them, a page at a time.
+        const gap: T[] = [];
+        if (fetchedTop !== undefined && page.length >= opts.limit && pageOldest > fetchedTop) {
+          let from = fetchedTop;
+          for (;;) {
+            const r = await query().gt(col, from).lt(col, pageOldest).order(col, { ascending: true }).limit(GAP_PAGE);
+            if (cancelled) return;
+            if (r.error) {
+              // Keep what arrived; the hole above `from` is fetched again on the next load.
+              keep([...gap, ...page]);
+              fetchedTop = from;
+              setError(r.error.message);
+              setLoading(false);
+              return;
+            }
+            const rows = (r.data ?? []) as unknown as T[];
+            gap.push(...rows);
+            if (rows.length < GAP_PAGE) break;
+            from = val(rows[rows.length - 1]);
+          }
+        }
+        keep([...gap, ...page]);
+        fetchedTop = fetchedTop === undefined || pageNewest > fetchedTop ? pageNewest : fetchedTop;
         setError(null);
       } else {
         if (opts.keepAll) keep((data ?? []) as unknown as T[]);

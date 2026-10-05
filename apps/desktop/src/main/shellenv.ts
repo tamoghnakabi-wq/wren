@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, win32 } from 'node:path';
 
 // The environment agent commands run with. Sandboxed commands can't read shell
 // startup files (they often export tokens), so instead the user's shell is
@@ -13,10 +13,17 @@ const fallbackPath = () => [join(homedir(), '.local', 'bin'), '/opt/homebrew/bin
 
 let cached: Promise<Record<string, string>> | null = null;
 
+/** Only absolute PATH entries: "", "." or "bin" would look up programs in whatever folder a command runs in. */
+export function absolutePath(path: string, platform = process.platform): string {
+  const sep = platform === 'win32' ? ';' : ':';
+  const abs = platform === 'win32' ? (d: string) => win32.isAbsolute(d) && /^([a-zA-Z]:\\|\\\\)/.test(d) : (d: string) => isAbsolute(d);
+  return path.split(sep).filter((d) => d && abs(d)).join(sep);
+}
+
 /** PATH and toolchain variables from the user's login shell (macOS), resolved once. */
 export function toolEnv(): Promise<Record<string, string>> {
   cached ??= new Promise((resolve) => {
-    if (process.platform !== 'darwin') return resolve({ PATH: process.env.PATH ?? '' });
+    if (process.platform !== 'darwin') return resolve({ PATH: absolutePath(process.env.PATH ?? '') });
     const fallback = { PATH: fallbackPath() };
     const sh = /^\/(bin|usr\/local\/bin|opt\/homebrew\/bin)\/(zsh|bash)$/.test(process.env.SHELL ?? '') ? process.env.SHELL! : '/bin/zsh';
     const p = spawn(sh, ['-ilc', 'printf "\\n__WREN_ENV_START__\\n"; /usr/bin/env; printf "\\n__WREN_ENV_END__\\n"'], {
@@ -34,6 +41,7 @@ export function toolEnv(): Promise<Record<string, string>> {
         const i = line.indexOf('=');
         if (i > 0 && TOOL_VARS.test(line.slice(0, i))) env[line.slice(0, i)] = line.slice(i + 1);
       }
+      if (env.PATH !== undefined) env.PATH = absolutePath(env.PATH);
       if (!env.PATH?.includes('/usr/bin')) return resolve(fallback);
       // Keep the usual locations even if the shell's PATH left some out.
       const seen = new Set(env.PATH.split(':'));

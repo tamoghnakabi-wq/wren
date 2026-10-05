@@ -202,15 +202,22 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
  * instead of being left waiting (decideApproval / continueActiveRun take the
  * same lock after writing their side).
  */
-export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string): Promise<void> {
+/**
+ * How finishing went: `ended` (the run is completed/failed/cancelled now), `resumed` (more input
+ * arrived, so it was queued again), `paused` (waiting, or handed back to run more), `lease_lost`
+ * (another worker owns it: nothing was written) or `missing`.
+ */
+export type FinishResult = 'ended' | 'resumed' | 'paused' | 'lease_lost' | 'missing';
+
+export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string): Promise<FinishResult> {
   const sql = db();
   const [ref] = await sql`select session_id from public.runs where id = ${runId}`;
-  if (!ref) return;
+  if (!ref) return 'missing';
   const done = await taskTx(async (tx) => {
     await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
     const [run] = await tx`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for no key update of r`;
-    if (!run) return null;
-    if (leaseId && run.lease_id !== leaseId) return null; // another worker owns the run now
+    if (!run) return 'missing' as const;
+    if (leaseId && run.lease_id !== leaseId) return 'lease_lost' as const; // another worker owns the run now
     let o = outcome;
     // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
     const cancelledLate = run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(o.kind);
@@ -252,10 +259,10 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
         values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${tx.json({ text: o.error, level: 'error', ...(o.code ? { code: o.code } : {}) } satisfies StatusData as unknown as Json)})`;
     }
-    return { run, o, resume };
+    return { run, o, resume, terminal };
   });
-  if (!done) return;
-  const { run, o, resume } = done;
+  if (typeof done === 'string') return done;
+  const { run, o, resume, terminal } = done;
   if (resume) await kickRun(runId);
   // A finished run's shell jobs (background ones included) and browser tab end with it. The
   // flag set above stays until the VM confirms it, and the cron retries until then.
@@ -268,6 +275,7 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
     await notifyUser({ userId: run.user_id, kind: 'run_completed', title: `${run.agent_name} finished`, body: (o.result || run.title).replace(/[#*_`>]/g, '').slice(0, 280), url, sessionId: run.session_id });
   }
   // waiting_input: the question notification is sent by the loop's ask_user handler
+  return resume ? 'resumed' : terminal ? 'ended' : 'paused';
 }
 
 /** Stop a finished cloud run's commands and close its browser tab; clears the pending flag once confirmed. */

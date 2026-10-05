@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
-import { closeBrowser, killAllJobs } from './host';
+import { stopAllEngines } from '../engines/common';
+import { closeBrowser, killAllJobs, stopAllJobs } from './host';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
 import { approveScriptPath } from '../engines/claude-code';
@@ -227,12 +228,17 @@ function shutdown() {
 }
 
 function installUpdate() {
-  // Agents stop before the update is staged; the rest of the cleanup runs when the app quits.
-  updater.install(() => {
-    runner.abortAll();
-    killAllJobs();
-    void closeBrowser();
-  });
+  // Every run, engine CLI and command is confirmed stopped before the update is staged; the rest
+  // of the cleanup runs when the app quits. If anything won't stop, nothing is installed.
+  return updater.install(
+    async () => {
+      const runsDone = await runner.suspend();
+      await closeBrowser();
+      const [engines, jobs] = await Promise.all([stopAllEngines(), stopAllJobs()]);
+      return runsDone && engines && jobs;
+    },
+    () => runner.resume(),
+  );
 }
 
 // ------------------------------------------------------------------ pairing

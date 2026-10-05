@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import readline from 'node:readline';
 import type { LoopOutcome } from '@wren/core';
-import { decide, findCli, spawnEngine, startApprovalBridge, TimelineWriter, type EngineRun } from './common';
+import { decide, findCli, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
 // Grok Build engine: drives xAI's official `grok` CLI through its documented
 // Agent Client Protocol mode (`grok agent stdio`), authenticated with the
@@ -147,7 +147,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   let sessionId = '';
   const onAbort = () => {
     if (sessionId) send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
-    setTimeout(() => proc.kill('SIGTERM'), 3000);
+    setTimeout(() => void stopEngine(proc), 3000);
   };
   run.signal.addEventListener('abort', onAbort, { once: true });
   const exited = new Promise<number>((r) => proc.on('close', (c) => r(c ?? 1)));
@@ -192,6 +192,6 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     run.signal.removeEventListener('abort', onAbort);
     rl.close();
     proc.stdin.end();
-    setTimeout(() => proc.kill('SIGTERM'), 1500);
+    setTimeout(() => void stopEngine(proc), 1500);
   }
 }

@@ -143,10 +143,13 @@ export async function runTick(runId: string): Promise<string> {
     if (handed.length && !wakeMs) await kickTick(runId);
     return 'yield';
   }
-  await finishRun(runId, outcome, lease);
-  if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') {
-    const others = await sql`select 1 from public.runs where agent_id = ${agent.id} and runtime = 'cloud' and status in ('queued', 'running') and id <> ${runId} limit 1`;
-    if (!others.length) await host.stop();
+  // The computers stop only when this run really ended (not when finishing queued it again for a
+  // late message, or another worker owns it now) and no run of this agent, this one included,
+  // is still active as recorded now.
+  const finished = await finishRun(runId, outcome, lease);
+  if (finished === 'ended') {
+    const active = await sql`select 1 from public.runs where agent_id = ${agent.id} and runtime = 'cloud' and status in ('queued', 'running') limit 1`;
+    if (!active.length) await host.stop();
   }
   return outcome.kind;
 }
