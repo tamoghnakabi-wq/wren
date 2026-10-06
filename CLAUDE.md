@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-06: `main` is in sync with `origin/main`; the last code commit is `e8caf04` (later commits are docs). The desktop app is at **0.1.10** (tags `v0.1.0`…`v0.1.10`). The web app is deployed from that commit. Production migrations run to `wren_0010_agent_computers`. The five Codex security audits (W-1…W-85) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-06: `main` is in sync with `origin/main`; the last code commit is `0961512` (two-step sign-in, live in production with migration `wren_0011_mfa` and the dashboard settings below). The desktop app is at **0.1.10**. The five Codex security audits (W-1…W-85) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -339,8 +339,13 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
   - Every 0.x release is marked *pre-release* on GitHub. The update channel filters on plain `x.y.z` tags, never on that flag (filtering on it once broke updates).
   - Installed apps see a new release within about 5 minutes.
 - **Supabase production:** project "Overdrive League", ref `luqeemaymnyybzyznmuh` (shared with another app; Wren tables live in `public`).
-  - **MFA rollout order** (the API calls `wren_mfa_state()`, so the migration must exist first): in the dashboard, set the Magic Link email template to `supabase/templates/verification-code.html` with subject "Your Wren verification code" (otherwise email codes and step-up for accounts without MFA can't work), and turn on the MFA-enrolled/unenrolled and password-changed security emails. Then apply migration 0009 (`wren_0011_mfa`), then push the web app.
-  - Production migration names are `wren_0001`…`wren_0009`: repo 0006 = `wren_0008_run_invariants`, repo 0007 = `wren_0009_run_cleanup`. Repo 0008 = `wren_0010_agent_computers`.
+  - **MFA in production (done 2026-10-06):**
+    - Dashboard → Auth → Emails: the "Magic link or OTP" template is the code-only one (`supabase/templates/verification-code.html`, subject "Your Wren verification code"). Email codes and step-up for accounts without MFA depend on it.
+    - Security emails "Password changed", "MFA method added" and "MFA method removed" are on.
+    - TOTP was already enabled (max 10 factors). There is no recovery-codes switch in the dashboard or Management API yet.
+    - Email limit is 30 per hour project-wide; "Enable IP address forwarding" is on.
+    - Order for any similar change: dashboard first, then the migration (the API calls `wren_mfa_state()`), then the web push.
+  - Production migration names are `wren_0001`…`wren_0009`: repo 0006 = `wren_0008_run_invariants`, repo 0007 = `wren_0009_run_cleanup`. Repo 0008 = `wren_0010_agent_computers`, repo 0009 = `wren_0011_mfa`.
   - pg_cron job `wren-tick` posts every minute to `/api/internal/cron` with a Bearer token from Vault secret `wren_cron_secret`.
   - Auth: Site URL https://wren-agents.vercel.app; email confirmation off; SMTP through Gmail.
   - Realtime broadcast from the DB needs a grant plus an insert policy on `realtime.messages` for `wren_api`.
