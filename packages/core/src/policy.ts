@@ -38,7 +38,39 @@ const READ_ONLY = new Set([
 
 const VERSION_ONLY = /^(node|npm|npx|pnpm|yarn|bun|python3?|pip3?|go|cargo|rustc|java|ruby|git|gh|docker|deno)\s+(-v|--version|version)\s*$/i;
 
-const GIT_READ = /^git\s+(status|log|diff|show|branch(\s+(-a|-r|--list|-v+))?\s*$|remote(\s+-v)?\s*$|rev-parse|ls-files|blame|describe|tag(\s+-l)?\s*$|config\s+--get|shortlog|reflog\s*$|stash\s+list)/i;
+/**
+ * Git subcommands that only read refs and config. Everything that reads the index (status, diff,
+ * ls-files: fsmonitor hooks, clean filters, post-index-change hooks), shows diffs (external diff,
+ * textconv) or shows commits (log, show, blame, reflog: signature checks run gpg.program) can run a
+ * program the repository's own config names, and that config is in a folder agents can write (W-88).
+ * Built-in names can't be aliased; anything else (an alias) isn't listed here.
+ */
+function gitReadOnly(args: string[]): boolean {
+  const [sub, ...rest] = args;
+  const plain = (a: string) => !a.startsWith('-') && !a.includes(':');
+  switch (sub) {
+    case 'branch':
+      return rest.every((a) => /^(-a|--all|-r|--remotes|--list|-v+|--verbose|--no-color)$/.test(a));
+    case 'remote':
+      return rest.every((a) => a === '-v' || a === '--verbose');
+    case 'tag':
+      return rest.length > 0 && /^(-l|--list)$/.test(rest[0]) && rest.slice(1).every((a) => /^-n\d*$/.test(a) || plain(a));
+    case 'rev-parse':
+      return rest.every((a) => /^(--abbrev-ref|--short(=\d+)?|--show-toplevel|--show-prefix|--show-cdup|--git-dir|--absolute-git-dir|--is-inside-work-tree|--is-bare-repository|--verify|-q|--quiet|--symbolic-full-name)$/.test(a) || plain(a));
+    case 'describe':
+      return rest.every((a) => /^(--tags|--all|--always|--long|--exact-match|--abbrev=\d+|--first-parent)$/.test(a) || plain(a));
+    case 'config':
+      return (
+        rest.length > 0 &&
+        /^(--get|--get-all|--get-regexp|-l|--list|get|list)$/.test(rest[0]) &&
+        rest.slice(1).every((a) => /^(--global|--local|--system|--show-origin|--show-scope|--name-only|-z|--null|--all)$/.test(a) || !a.startsWith('-'))
+      );
+    default:
+      return false;
+  }
+}
+/** Looks like a git read (status, log, diff…) even though it isn't counted as one: for the reason shown. */
+const GIT_LOOKS_READ = /^git\s+(status|log|diff|show|ls-files|blame|shortlog|reflog|stash\s+list|grep|whatchanged|describe)(\s|$)/i;
 /** Read commands whose options can still write files or run programs: an unknown argument value makes them unsafe. */
 const OPTION_SENSITIVE = new Set(['sort', 'tree', 'uniq', 'xxd', 'yq', 'rg', 'fd', 'date', 'hostname', 'find', 'git', 'gh']);
 
@@ -360,7 +392,8 @@ function ghReadOnly(args: string[]): boolean {
 }
 
 /** Variables that can't change which program runs or what it loads. */
-const SAFE_ASSIGNMENT = /^(LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|COLUMNS|LINES|TERM|PAGER|GIT_PAGER)=/;
+// Not PAGER or GIT_PAGER: they name a program to run (`PAGER=./x man ls` runs ./x, terminal or not).
+const SAFE_ASSIGNMENT = /^(LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|COLUMNS|LINES|TERM)=/;
 /** Where the real system utilities live: a path anywhere else could be any program. */
 const SYSTEM_BIN = /^\/(usr\/)?s?bin\/[^/]+$/;
 
@@ -396,7 +429,7 @@ function commandIsReadOnly(c: SimpleCommand, trust?: ProgramTrust): boolean {
   if (VERSION_ONLY.test(line)) return true;
   if (OPTION_SENSITIVE.has(cmd) && dynamic.some(Boolean)) return false;
   if (cmd === 'gh') return ghReadOnly(args);
-  if (cmd === 'git') return GIT_READ.test(line) && !args.some((a) => /^(--output(=|$)|-o$|-o.|--output-directory)/.test(a));
+  if (cmd === 'git') return gitReadOnly(args);
   if (!READ_ONLY.has(cmd)) return false;
   return readOnlyForm(cmd, args);
 }
@@ -433,7 +466,9 @@ export function assessShell(command: string, runtime: Runtime, trust?: ProgramTr
       risk = 'medium';
       reason = commands.every((c) => commandIsReadOnly(c))
         ? 'runs a program found in a folder agents can write to, so it may not be the usual one'
-        : 'runs a program that can change files';
+        : GIT_LOOKS_READ.test(normalized.trim())
+          ? 'git can run programs named in the repository’s own settings (hooks, filters, diff tools)'
+          : 'runs a program that can change files';
     }
   }
   // The cloud computer is an isolated VM owned by the agent: one level less

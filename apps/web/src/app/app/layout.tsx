@@ -2,6 +2,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { supabaseServer, userFromClaims } from '@/lib/auth';
 import { mfaStatusFor } from '@/lib/mfa';
+import { safeNext } from '@/lib/next-path';
 import { AppProvider } from '@/components/app/provider';
 import { Shell } from '@/components/app/shell';
 import { StepUpProvider } from '@/components/app/step-up';
@@ -17,15 +18,16 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // Two-step sign-in not finished in this session: finish it first (the API and the database
   // refuse everything until then anyway).
   const status = await mfaStatusFor(userFromClaims(claims as Record<string, unknown>)!);
+  if (!status.facts.sessionAlive) redirect('/auth/signout');
   if (!status.satisfied) {
     const path = (await headers()).get('x-wren-path') ?? '/app';
-    redirect(`/auth/mfa?next=${encodeURIComponent(path.startsWith('/app') ? path : '/app')}`);
+    redirect(`/auth/mfa?next=${encodeURIComponent(safeNext(path))}`);
   }
   return (
     <ToastProvider>
       <ConfirmProvider>
         <StepUpProvider>
-          <AppProvider userId={claims.sub} email={String(claims.email ?? '')}>
+          <AppProvider userId={claims.sub} email={status.facts.userEmail || String(claims.email ?? '')}>
             <Shell>{children}</Shell>
           </AppProvider>
         </StepUpProvider>

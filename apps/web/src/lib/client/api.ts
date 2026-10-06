@@ -40,6 +40,11 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign(`/auth/mfa?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     }
+    // This sign-in was ended elsewhere (signed out, revoked): drop it and go to the sign-in page.
+    if (res.status === 401 && d?.code === 'session_ended' && typeof window !== 'undefined') {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+      window.location.assign('/auth/signout');
+    }
     throw new ApiError(d?.error ?? `Request failed (${res.status})`, res.status, d?.code);
   }
   return data as T;

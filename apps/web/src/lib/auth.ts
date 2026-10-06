@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { db } from './db';
 import { sha256 } from './crypto';
 import { env } from './env';
-import { mfaStatusFor } from './mfa';
+import { mfaStatusFor, type MfaStatusFor } from './mfa';
 
 // Request authentication for API routes.
 //  - Browser sessions: Supabase Auth cookies (verified locally against the
@@ -19,6 +19,8 @@ export interface AuthUser {
   sessionId?: string;
   aal?: string;
   amr?: { method: string; timestamp: number }[];
+  /** Set by requireUser(): where this session stands with two-step sign-in. */
+  mfa?: MfaStatusFor;
 }
 
 type Claims = Record<string, unknown>;
@@ -88,11 +90,24 @@ export async function currentUser(request?: Request): Promise<AuthUser | null> {
 export async function requireUser(request?: Request, opts: { mfa?: 'skip'; stepUp?: boolean } = {}): Promise<AuthUser> {
   const u = await currentUser(request);
   if (!u) throw new HttpError(401, 'Sign in required.', 'unauthenticated');
-  if (opts.mfa === 'skip' && !opts.stepUp) return u;
   const s = await mfaStatusFor(u);
+  // The JWT is valid until it expires, but signing out or revoking the session ends it now.
+  if (!s.facts.sessionAlive) throw new HttpError(401, 'This sign-in has ended. Sign in again.', 'session_ended');
+  // The account's current address (the token's can be from before an email change).
+  u.email = s.facts.userEmail || u.email;
+  u.mfa = s;
+  if (opts.mfa === 'skip' && !opts.stepUp) return u;
   if (!s.satisfied) throw new HttpError(403, 'Finish signing in first: enter your verification code.', 'mfa_required');
   if (opts.stepUp && !s.stepUpUntil) throw new HttpError(403, 'Confirm it’s you to continue.', 'step_up_required');
   return u;
+}
+
+/** The caller's Supabase access token (Bearer header or session cookie), for calls to Supabase Auth as them. */
+export async function accessToken(request?: Request): Promise<string | null> {
+  const authz = request?.headers.get('authorization');
+  if (authz?.startsWith('Bearer ')) return authz.slice(7);
+  const { data } = await (await supabaseServer()).auth.getSession();
+  return data.session?.access_token ?? null;
 }
 
 export interface AuthDevice {

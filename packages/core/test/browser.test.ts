@@ -246,6 +246,64 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
+  it('W-91/W-92: a key chord is guarded to its last key, and a field that turns secret gets nothing', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const page = context.pages()[0];
+      await page.setContent(`
+        <input id=q aria-label="Query"><input id=flip aria-label="Notes"><input id=late aria-label="Late">
+        <textarea id=msg aria-label="Message"></textarea><input id=k aria-label="Search box">
+        <button id=bad onkeydown="if (event.key === 'Enter') document.title = 'bad'" onclick="document.title = 'bad'">Delete all</button>
+        <button id=bad2 onkeypress="document.title = 'keypress-bad'" onkeyup="document.title = 'keyup-bad'">Archive all</button>
+        <script>
+          // Same node, so focus "stays": it becomes a password box when focused...
+          document.getElementById('flip').addEventListener('focus', (e) => { e.target.type = 'password'; e.target.name = 'password'; });
+          // ...or as soon as the text is in.
+          document.getElementById('late').addEventListener('input', (e) => { e.target.type = 'password'; });
+          // Shift (the chord's first keydown) moves focus to "Delete all" before Enter arrives.
+          document.getElementById('msg').addEventListener('keydown', (e) => { if (e.key === 'Shift') document.getElementById('bad').focus(); });
+          // Enter's own keydown moves focus: its keypress/keyup must not act on the new focus.
+          document.getElementById('k').addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('bad2').focus(); });
+        </script>`);
+      const snap = (await ctl.act({ action: 'snapshot', tab: 'T' })).snapshot ?? '';
+      const ref = (label: string) => new RegExp(`\\[(e\\d+)\\] \\w+ "${label}"`).exec(snap)![1];
+      const typeInto = async (label: string, text: string) => {
+        const r = ref(label);
+        const t = (await ctl.act({ action: 'describe', ref: r, tab: 'T' })).target!;
+        return ctl.act({ action: 'type', ref: r, text, tab: 'T', expect: t });
+      };
+
+      const flipped = await typeInto('Notes', 'my-text');
+      expect(flipped.ok).toBe(false);
+      expect(flipped.error).toMatch(/changed/);
+      expect(await page.locator('#flip').inputValue()).toBe('');
+      const late = await typeInto('Late', 'my-text');
+      expect(late.ok).toBe(false);
+      expect(await page.locator('#late').inputValue()).toBe('');
+      expect((await typeInto('Query', 'weather')).ok).toBe(true);
+      expect(await page.locator('#q').inputValue()).toBe('weather');
+
+      await page.focus('#msg');
+      const msg = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+      const chord = await ctl.act({ action: 'press', key: 'Shift+Enter', tab: 'T', expect: msg });
+      expect(await page.title()).not.toBe('bad');
+      expect(chord.ok, chord.error).toBe(true);
+      expect(await page.locator('#msg').inputValue()).toBe('\n');
+
+      await page.focus('#k');
+      const k = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+      const enter = await ctl.act({ action: 'press', key: 'Enter', tab: 'T', expect: k });
+      expect(enter.ok, enter.error).toBe(true);
+      expect(await page.title()).not.toMatch(/keypress-bad|keyup-bad/);
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
   it('W-80: closing a task closes its popups too, and says so when it can\'t', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });

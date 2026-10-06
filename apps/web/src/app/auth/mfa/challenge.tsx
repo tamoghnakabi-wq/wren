@@ -6,12 +6,9 @@ import { useEffect, useState } from 'react';
 import { SecondStep } from '@/components/second-step';
 import { Spinner } from '@/components/ui';
 import { mfaInfo, type MfaInfo } from '@/lib/client/mfa';
+import { safeNext } from '@/lib/next-path';
 import { supabase } from '@/lib/client/supabase';
 
-/** Where to go afterwards: only inside the app (or back to choosing a new password). */
-function safeNext(next: string | null) {
-  return next && (next.startsWith('/app') || next === '/auth/update-password') && !next.startsWith('//') ? next : '/app';
-}
 
 export function MfaChallenge() {
   const router = useRouter();

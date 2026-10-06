@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Eye, EyeOff, MailCheck } from 'lucide-react';
 import { useState } from 'react';
 import { mfaInfo } from '@/lib/client/mfa';
+import { safeNext } from '@/lib/next-path';
 import { supabase } from '@/lib/client/supabase';
 import { Logo } from './brand';
 import { Button, Input, Label } from './ui';
@@ -26,7 +27,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
 export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get('next')?.startsWith('/app') ? params.get('next')! : '/app';
+  const next = safeNext(params.get('next'));
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');

@@ -5,7 +5,7 @@ import { isPrivateAddress } from '../src/net';
 describe('shell risk', () => {
   const desk = (c: string) => assessShell(c, 'desktop');
   it('treats read-only commands as low', () => {
-    for (const c of ['ls -la', 'git status', 'git log --oneline -5', 'cat README.md | head -20', 'node --version', 'rg TODO src', 'gh pr list']) {
+    for (const c of ['ls -la', 'git branch -v', 'git rev-parse --abbrev-ref HEAD', 'cat README.md | head -20', 'node --version', 'rg TODO src', 'gh pr list']) {
       expect(desk(c).risk, c).toBe('low');
     }
   });
@@ -75,7 +75,7 @@ describe('shell risk', () => {
     expect(desk('cat "$FILE"').risk).toBe('low');
   });
   it('keeps quoted operators inside their argument', () => {
-    for (const c of ['grep "a|b" notes.txt', "grep 'x;y' f", 'echo "a && b"', 'git log --format="%h %s"', 'echo $(date) done', 'LC_ALL=C sort data.txt', 'cat a.txt 2>&1 | wc -l']) {
+    for (const c of ['grep "a|b" notes.txt', "grep 'x;y' f", 'echo "a && b"', 'git tag -l "v1;x"', 'echo $(date) done', 'LC_ALL=C sort data.txt', 'cat a.txt 2>&1 | wc -l']) {
       expect(desk(c).risk, c).toBe('low');
     }
   });
@@ -86,6 +86,29 @@ describe('shell risk', () => {
     expect(isReadOnlyCommand('echo "$(sort -o result.txt input.txt)"')).toBe(false);
     expect(desk("$'\\x67it' push").risk).toBe('high');
     expect(desk('echo "$(date)"').risk).toBe('low');
+  });
+  it('never counts git commands that can run repository-configured programs as read-only (W-88)', () => {
+    // fsmonitor/post-index-change hooks, clean filters, external diff, textconv, gpg.program: all
+    // named in .git/config, which agents can write.
+    for (const c of ['git status', 'git status --short', 'git diff', 'git diff --ext-diff', 'git log --oneline -5', 'git show HEAD', 'git ls-files', 'git blame a.txt', 'git shortlog', 'git reflog', 'git stash list', 'git describe --dirty', 'git rev-parse :a.txt', 'git config --get-urlmatch http https://x']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+      expect(desk(c).risk, c).not.toBe('low');
+    }
+    expect(desk('git status').reason).toMatch(/repository’s own settings/);
+    // A prefix of a read subcommand is a different command (an alias can run anything: !./helper).
+    for (const c of ['git statusprobe', 'git branchx', 'git rev-parsex', 'git configx --get a', 'git tagger -l', 'git remote-helper']) expect(isReadOnlyCommand(c), c).toBe(false);
+    // Global options and -c come before the subcommand: never read-only.
+    for (const c of ['git -c core.fsmonitor=./x branch', 'git -C ../other branch', 'git --git-dir=x branch', 'git --exec-path=. branch']) expect(isReadOnlyCommand(c), c).toBe(false);
+    for (const c of ['git branch', 'git branch -a', 'git branch -vv', 'git remote -v', 'git tag -l', 'git tag -l "v*" -n', 'git rev-parse HEAD', 'git rev-parse --show-toplevel', 'git describe --tags', 'git config --get user.name', 'git config --list --show-origin', 'git --version']) {
+      expect(isReadOnlyCommand(c), c).toBe(true);
+    }
+    for (const c of ['git branch -D x', 'git branch new', 'git remote add o u', 'git tag v2', 'git tag -l -d v1', 'git config user.name x', 'git config --get a --unset b', 'git rev-parse --git-path hooks']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+    }
+  });
+  it('treats pager variables as choosing a program (PAGER=./x man ls runs ./x)', () => {
+    for (const c of ['PAGER=./x man ls', 'GIT_PAGER=./x git branch', 'MANPAGER=./x man ls']) expect(isReadOnlyCommand(c), c).toBe(false);
+    expect(isReadOnlyCommand('TERM=dumb ls')).toBe(true);
   });
   it('only trusts the system copies of read-only commands', () => {
     expect(isReadOnlyCommand('/allowed/project/ls')).toBe(false);

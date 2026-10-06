@@ -39,7 +39,7 @@ vi.mock('node:child_process', async (orig) => {
     ...(await orig<typeof import('node:child_process')>()),
     spawn: (cmd: string) => {
       h.launched.push(cmd);
-      const child = Object.assign(new EventEmitter(), { unref: () => {} });
+      const child = Object.assign(new EventEmitter(), { unref: () => {}, pid: 4242 });
       setTimeout(() => (h.launch === 'spawn' ? child.emit('spawn') : child.emit('error', new Error('spawn EPERM'))), 0);
       return child;
     },
@@ -249,7 +249,10 @@ describe('Updater install handoff (W-83)', () => {
     await u.install(async () => true, () => resumed++);
     expect(h.quits).toBe(1);
     expect(resumed).toBe(0);
-    expect(JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'))).toEqual({ version: '0.1.9' });
+    // Which process installs, so a Wren opened again meanwhile can tell (W-96).
+    const pending = JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'));
+    expect(pending).toMatchObject({ version: '0.1.9', pid: 4242 });
+    expect(pending.installer).toContain(join(dir, 'install-'));
   });
 
   it('at the next start, says the last install did not happen (and why), and repeats it with the next ready update', async () => {
@@ -270,4 +273,47 @@ describe('Updater install handoff (W-83)', () => {
     expect(u.state.error).toBeUndefined();
     expect(existsSync(join(dir, 'update-pending.json'))).toBe(false);
   });
+});
+
+// W-96: Wren opened again while the installer is still swapping the app must leave its files alone.
+// (The liveness check runs `ps` here; on Windows it asks CIM, which the self-test covers.)
+describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-96)', () => {
+  it('leaves an install that is still running alone, and reports it once it has ended', async () => {
+    const { spawn: realSpawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    const staging = join(dir, 'install-abc');
+    mkdirSync(join(staging, 'staging'), { recursive: true });
+    const script = join(staging, 'install.sh');
+    writeFileSync(script, 'sleep 30\n');
+    const child = realSpawn('/bin/sh', [script], { stdio: 'ignore' });
+    await new Promise((r) => child.once('spawn', r));
+    try {
+      writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', pid: child.pid, installer: script, at: Date.now() }));
+      expect(u.installerRunning()).toBe(true);
+      u.cleanup();
+      expect(existsSync(join(staging, 'staging'))).toBe(true);
+      expect(existsSync(join(dir, 'update-pending.json'))).toBe(true);
+      expect(u.state.error).toBeUndefined();
+    } finally {
+      child.kill('SIGKILL');
+      await new Promise((r) => child.once('exit', r));
+    }
+    expect(u.installerRunning()).toBe(false);
+    u.cleanup();
+    expect(existsSync(staging)).toBe(false);
+    expect(existsSync(join(dir, 'update-pending.json'))).toBe(false);
+    expect(u.state.error).toMatch(/last attempt to install 0\.1\.9 failed/);
+  });
+
+  it('does not mistake another process (a reused pid) or an old marker for the installer', async () => {
+    mkdirSync(join(dir, 'install-xyz'), { recursive: true });
+    const script = join(dir, 'install-xyz', 'install.sh');
+    // This test's own process is alive, but it isn't that installer.
+    writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.8', pid: process.pid, installer: script, at: Date.now() }));
+    expect(u.installerRunning()).toBe(false);
+    writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.8', pid: process.pid, installer: process.argv[1] ?? 'node', at: Date.now() - 31 * 60_000 }));
+    expect(u.installerRunning()).toBe(false);
+    u.cleanup();
+    expect(existsSync(join(dir, 'install-xyz'))).toBe(false);
+  });
+
 });

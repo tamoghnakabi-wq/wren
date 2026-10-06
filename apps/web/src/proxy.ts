@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { safeNext, urlFor } from './lib/next-path';
 
 // Refreshes the Supabase session cookie and keeps signed-out visitors out of
 // the app. Authorization itself happens in every API route.
@@ -28,10 +29,7 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
   if (signedIn && (path === '/login' || path === '/signup')) {
-    const url = request.nextUrl.clone();
-    url.pathname = request.nextUrl.searchParams.get('next')?.startsWith('/app') ? request.nextUrl.searchParams.get('next')! : '/app';
-    url.search = '';
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(urlFor(request.nextUrl.origin, safeNext(request.nextUrl.searchParams.get('next'))));
   }
   return response;
 }

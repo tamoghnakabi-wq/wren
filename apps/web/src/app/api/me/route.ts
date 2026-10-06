@@ -1,7 +1,6 @@
 import { requireUser } from '@/lib/auth';
 import { env } from '@/lib/env';
 import { json, route } from '@/lib/http';
-import { mfaStatusFor } from '@/lib/mfa';
 import { maskEmail } from '@/lib/mfa-rules';
 import { canUsePlatform } from '@/lib/models';
 
@@ -9,7 +8,7 @@ import { canUsePlatform } from '@/lib/models';
 // sign-in is finished too: the sign-in page uses it to know what to ask for.
 export const GET = route(async (req) => {
   const user = await requireUser(req, { mfa: 'skip' });
-  const s = await mfaStatusFor(user);
+  const s = user.mfa!;
   return json({
     id: user.id,
     email: user.email,

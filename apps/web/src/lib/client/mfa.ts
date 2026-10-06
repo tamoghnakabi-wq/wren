@@ -45,16 +45,24 @@ export function mfaError(e: { code?: string; message?: string } | null | undefin
   }
 }
 
-async function verifiedTotpFactor(): Promise<string> {
+export interface TotpFactor {
+  id: string;
+  name: string;
+}
+
+/** The account's authenticator apps, oldest first (sign-in lets the user pick one when there are several). */
+export async function totpFactors(): Promise<TotpFactor[]> {
   const { data, error } = await supabase().auth.mfa.listFactors();
   if (error) throw new Error(mfaError(error));
-  const f = data.totp.find((x) => x.status === 'verified');
-  if (!f) throw new Error('No authenticator app is set up.');
-  return f.id;
+  return data.totp
+    .filter((x) => x.status === 'verified')
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    .map((f, i) => ({ id: f.id, name: f.friendly_name || (i ? `Authenticator app ${i + 1}` : 'Authenticator app') }));
 }
 
 export async function verifyTotp(code: string, factorId?: string): Promise<void> {
-  const id = factorId ?? (await verifiedTotpFactor());
+  const id = factorId ?? (await totpFactors())[0]?.id;
+  if (!id) throw new Error('No authenticator app is set up.');
   const { error } = await supabase().auth.mfa.challengeAndVerify({ factorId: id, code: code.replace(/\s+/g, '') });
   if (error) throw new Error(mfaError(error));
 }
@@ -64,8 +72,19 @@ export async function verifyRecoveryCode(code: string): Promise<void> {
   if (error) throw new Error(mfaError(error));
 }
 
-export const sendEmailCode = (purpose: 'sign_in' | 'step_up' | 'enable') => api('/api/mfa/email/send', { body: { purpose } });
-export const verifyEmailCode = (code: string) => api<{ ok: true; purpose: string }>('/api/mfa/email/verify', { body: { code } });
+export type CodePurpose = 'sign_in' | 'step_up' | 'enable';
+export interface CodeSent {
+  challengeId: string;
+  /** False: this session's code for the same thing went out moments ago and still works. */
+  sent: boolean;
+  /** Seconds until another code can be sent. */
+  wait: number;
+}
+
+export const sendEmailCode = (purpose: CodePurpose) => api<CodeSent>('/api/mfa/email/send', { body: { purpose } });
+/** Check a code for the request it was sent for. */
+export const verifyEmailCode = (code: string, challengeId: string, purpose: CodePurpose) =>
+  api<{ ok: true; purpose: CodePurpose }>('/api/mfa/email/verify', { body: { code, challengeId, purpose } });
 
 /** Recovery codes come in canonical form (16 lowercase characters); show them in groups of four. */
 export const formatRecoveryCode = (c: string) => c.toUpperCase().match(/.{1,4}/g)?.join('-') ?? c;

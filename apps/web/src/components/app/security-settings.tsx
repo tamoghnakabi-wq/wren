@@ -64,7 +64,9 @@ export function SecuritySettings({ section: Section, row: Row }: { section: Reac
 
   async function removeFactor(f: Factor) {
     if (!(await stepUp())) return;
-    const last = factors.length === 1;
+    // From Supabase, not from when this page loaded: another tab may have removed one meanwhile.
+    const fresh = await loadSecurity().catch(() => null);
+    const last = (fresh?.factors ?? factors).filter((x) => x.id !== f.id).length === 0;
     const ok = await confirm({
       title: 'Remove this authenticator app?',
       body: last ? 'Signing in will only need your password again, and your recovery codes stop working.' : 'You can still sign in with your other authenticator app.',
@@ -75,15 +77,30 @@ export function SecuritySettings({ section: Section, row: Row }: { section: Reac
     setBusy(f.id);
     try {
       const sb = supabase();
-      // Recovery codes can't be the only factor (Supabase would still ask for one at sign-in).
-      if (last && info?.recoveryCodes) {
-        const r = await sb.auth.mfa.recoveryCodes.unenroll();
-        if (r.error && r.error.code !== 'mfa_factor_not_found') throw new Error(mfaError(r.error));
-      }
+      // With the last app gone, the database removes the recovery codes in the same step (migration
+      // 0010), so they're never the only factor left, even with two removals at once.
       const { error } = await sb.auth.mfa.unenroll({ factorId: f.id });
       if (error) throw new Error(mfaError(error));
       await sb.auth.refreshSession();
       toast('Authenticator app removed.', 'success');
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setBusy(null);
+      reload();
+    }
+  }
+
+  async function removeCodes() {
+    if (!(await stepUp())) return;
+    const ok = await confirm({ title: 'Remove your recovery codes?', body: 'Signing in will only need your password.', confirmLabel: 'Remove', danger: true });
+    if (!ok) return;
+    setBusy('codes');
+    try {
+      const r = await supabase().auth.mfa.recoveryCodes.unenroll();
+      if (r.error && r.error.code !== 'mfa_factor_not_found') throw new Error(mfaError(r.error));
+      await supabase().auth.refreshSession();
+      toast('Recovery codes removed.', 'success');
     } catch (e) {
       toast((e as Error).message, 'error');
     } finally {
@@ -157,9 +174,26 @@ export function SecuritySettings({ section: Section, row: Row }: { section: Reac
           </Button>
         </Row>
       )}
-      {!hasApp && (
-        <Row title="Email codes" body={info.email ? `On. Signing in asks for a code sent to ${info.emailHint}.` : 'Get a code by email each time you sign in. An authenticator app is safer: it doesn’t depend on your email account.'}>
-          {info.email ? <Badge tone="success">On</Badge> : null}
+      {!hasApp && info.recoveryCodes && (
+        <Row title="Recovery codes" body="Only recovery codes are left, so signing in still asks for one. Set up an authenticator app, or remove them.">
+          <Badge tone="warning">No app</Badge>
+          <Button size="sm" variant="secondary" loading={busy === 'codes'} onClick={removeCodes} aria-label="Remove recovery codes">
+            Remove
+          </Button>
+        </Row>
+      )}
+      {(!hasApp || info.email) && (
+        <Row
+          title="Email codes"
+          body={
+            info.email
+              ? hasApp
+                ? `Still on: signing in asks for a code sent to ${info.emailHint}, not your authenticator app. Turn them off to use the app.`
+                : `On. Signing in asks for a code sent to ${info.emailHint}.`
+              : 'Get a code by email each time you sign in. An authenticator app is safer: it doesn’t depend on your email account.'
+          }
+        >
+          {info.email ? <Badge tone={hasApp ? 'warning' : 'success'}>On</Badge> : null}
           <Button size="sm" variant="secondary" loading={busy === 'email'} onClick={() => (info.email ? turnOffEmail() : setEmailOn(true))} aria-label={info.email ? 'Turn off email codes' : 'Turn on email codes'}>
             <Mail className="h-4 w-4" /> {info.email ? 'Turn off' : 'Turn on'}
           </Button>
@@ -270,14 +304,16 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
       if (error) throw new Error(mfaError(error));
       // The session is aal2 now. Email codes give way to the app (the step-up from a moment ago
       // covers turning them off); the first app also gets recovery codes.
-      if (info.email) await api('/api/mfa/email', { method: 'DELETE' }).catch(() => {});
+      const emailOff = !info.email || (await api('/api/mfa/email', { method: 'DELETE' }).then(() => true, () => false));
       let codes: string[] | null = null;
       if (!info.recoveryCodes && existing.length === 0) {
         const r = await sb.auth.mfa.recoveryCodes.generate();
         if (r.error) toast(`Authenticator app added, but recovery codes couldn’t be created: ${mfaError(r.error)}`, 'error');
         else codes = r.data.codes;
       }
-      toast('Two-step sign-in is on.', 'success');
+      // If email codes couldn't be turned off they stay in charge of signing in; Settings shows them.
+      if (emailOff) toast('Two-step sign-in is on.', 'success');
+      else toast('Authenticator app added, but email codes are still on, so signing in still asks for an email code. Turn them off below.', 'error');
       onDone(codes);
     } catch (err) {
       setError((err as Error).message);
@@ -341,11 +377,15 @@ function EmailOnDialog({ hint, onClose }: { hint: string; onClose: () => void })
   const [note, setNote] = useState(`Sending a code to ${hint}…`);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const challenge = useRef<string | null>(null);
 
   useEffect(() => {
     sendEmailCode('enable').then(
-      () => setNote(`We sent a code to ${hint}. Enter it to turn on email codes.`),
-      (e: ApiError) => (e.code === 'code_cooldown' ? setNote(`A code was sent to ${hint} a moment ago.`) : setError(e.message)),
+      (r) => {
+        challenge.current = r.challengeId;
+        setNote(r.sent ? `We sent a code to ${hint}. Enter it to turn on email codes.` : `A code was sent to ${hint} a moment ago. Enter it to turn on email codes.`);
+      },
+      (e: ApiError) => setError(e.code === 'code_cooldown' ? 'A code was just sent from another tab or device. Close this and try again in a minute.' : e.message),
     );
   }, [hint]);
 
@@ -358,7 +398,11 @@ function EmailOnDialog({ hint, onClose }: { hint: string; onClose: () => void })
           setBusy(true);
           setError(null);
           try {
-            await verifyEmailCode(code);
+            if (!challenge.current) throw new Error('No code was sent. Close this and try again.');
+            const r = await verifyEmailCode(code, challenge.current, 'enable');
+            // Say it's on only once the server says so.
+            const now = r.purpose === 'enable' ? await mfaInfo() : null;
+            if (!now?.email) throw new Error('Email codes couldn’t be turned on. Try again.');
             toast('Email codes are on.', 'success');
             onClose();
           } catch (err) {

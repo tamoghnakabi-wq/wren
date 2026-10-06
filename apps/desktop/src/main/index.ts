@@ -32,7 +32,13 @@ if (process.argv.includes('--selftest')) {
     let updateDownload: { version: string; bytes: number } | { error: string } | undefined;
     if (process.argv.includes('--update')) updateDownload = await new Updater(() => {}).selfTestDownload().catch((e: Error) => ({ error: e.message }));
     // `--proctree`: something a command leaves running is found and stopped (CI, on each OS).
-    const proctree = process.argv.includes('--proctree') ? await procTreeSelfTest().catch((e: Error) => ({ ok: false, error: e.message })) : undefined;
+    // It also checks that an installer still at work is recognised by its process (W-96).
+    const proctree = process.argv.includes('--proctree')
+      ? await Promise.all([procTreeSelfTest(), installerSelfTest()]).then(
+          ([tree, installer]) => ({ ...tree, installer, ok: tree.ok && installer.ok }),
+          (e: Error) => ({ ok: false, error: e.message }),
+        )
+      : undefined;
     const result = {
       version: app.getVersion(),
       platform: process.platform,
@@ -50,6 +56,34 @@ if (process.argv.includes('--selftest')) {
     app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) ? 0 : 1);
   });
 }
+/**
+ * A stand-in installer (a long-running system program) recorded the way launchInstaller records the
+ * real one: recognised while it runs, not once it has ended. Uses the data folder's marker, so it
+ * only runs where there is no pending update.
+ */
+async function installerSelfTest(): Promise<Record<string, unknown> & { ok: boolean }> {
+  const { existsSync, rmSync } = await import('node:fs');
+  const { dataDir } = await import('./config');
+  const marker = join(dataDir(), 'update-pending.json');
+  if (existsSync(marker)) return { ok: true, skipped: 'an update is pending' };
+  const win = process.platform === 'win32';
+  const cmd = win ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'PING.EXE') : '/bin/sleep';
+  const child = spawn(cmd, win ? ['-n', '30', '127.0.0.1'] : ['30'], { stdio: 'ignore', windowsHide: true });
+  await new Promise<void>((ok, fail) => (child.once('spawn', ok), child.once('error', fail)));
+  try {
+    writeFileSync(marker, JSON.stringify({ version: '0.0.0', pid: child.pid, installer: cmd, at: Date.now() }));
+    const probe = new Updater(() => {});
+    const running = probe.installerRunning();
+    child.kill();
+    await new Promise((r) => child.once('exit', r));
+    const after = probe.installerRunning();
+    return { ok: running && !after, running, after };
+  } finally {
+    child.kill();
+    rmSync(marker, { force: true });
+  }
+}
+
 /**
  * Starts a command that launches a hidden long-running child and exits at once. macOS/Linux: the
  * child is still counted as the command's (its process group) and is stopped. Windows: inside the
@@ -451,6 +485,13 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
 // ------------------------------------------------------------------ lifecycle
 
 if (!process.argv.includes('--selftest')) app.whenReady().then(() => {
+  // Opened again while an update is being installed: start nothing (no agents, no window) and let
+  // the installer finish; it opens the new version itself (W-96).
+  if (updater.installerRunning()) {
+    if (Notification.isSupported()) new Notification({ title: 'Wren is updating', body: 'It opens again by itself in a moment.' }).show();
+    setTimeout(() => app.exit(0), 1500);
+    return;
+  }
   session.fromPartition('persist:wren').setPermissionRequestHandler((wc, permission, cb) => {
     const ok = permission === 'notifications' || permission === 'clipboard-sanitized-write';
     cb(ok && new URL(wc.getURL()).origin === APP_ORIGIN);

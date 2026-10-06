@@ -1,5 +1,5 @@
 import { app, net } from 'electron';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, createPublicKey, verify, type Hash } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -120,6 +120,25 @@ export function verifySignature(u: UpdateInfo, platform = platformKey()): boolea
   }
 }
 
+/** What the last install left behind: the version handed to the installer, and that installer's process. */
+interface Pending {
+  version: string;
+  pid?: number;
+  /** The installer's program (Windows) or script (macOS), to tell it apart from a reused pid. */
+  installer?: string;
+  at?: number;
+}
+/** An installer still running after this long is treated as gone (it never takes nearly this long). */
+const INSTALL_MAX_MS = 30 * 60_000;
+
+function readPending(): Pending | null {
+  try {
+    return JSON.parse(readFileSync(join(dataDir(), 'update-pending.json'), 'utf8')) as Pending;
+  } catch {
+    return null;
+  }
+}
+
 export class Updater {
   state: UpdateState = { available: false };
   private busy = false;
@@ -134,22 +153,22 @@ export class Updater {
    * install staging.
    */
   cleanup() {
+    // Reopened while the installer still runs: its files and its marker are still in use (W-96).
+    if (this.installerRunning()) return;
     const pending = join(dataDir(), 'update-pending.json');
     if (existsSync(pending)) {
-      try {
-        const { version } = JSON.parse(readFileSync(pending, 'utf8')) as { version: string };
+      const p = readPending();
+      if (p?.version) {
         let why = '';
         try {
           why = readFileSync(join(dataDir(), 'update-failed.txt'), 'utf8').trim();
         } catch {
           /* the installer left no reason */
         }
-        if (compareVersions(app.getVersion(), version) < 0) {
-          this.installFailure = `The last attempt to install ${version} failed${why ? ` (${why})` : ''}.`;
+        if (compareVersions(app.getVersion(), p.version) < 0) {
+          this.installFailure = `The last attempt to install ${p.version} failed${why ? ` (${why})` : ''}.`;
           this.state = { available: false, error: this.installFailure };
         }
-      } catch {
-        /* no reason recorded */
       }
       rmSync(pending, { force: true });
       rmSync(join(dataDir(), 'update-failed.txt'), { force: true });
@@ -159,6 +178,34 @@ export class Updater {
     if (!existsSync(root)) return;
     for (const v of readdirSync(root)) {
       if (/^\d+\.\d+\.\d+/.test(v) && compareVersions(v, app.getVersion()) <= 0) rmSync(join(root, v), { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Whether the installer the last run of Wren handed off to is still at work: its process is alive
+   * and is that installer (not another program that got the pid later). Wren started again in the
+   * middle of an install must leave it alone.
+   */
+  installerRunning(): boolean {
+    const p = readPending();
+    if (!p || !Number.isInteger(p.pid) || !p.installer || !p.at || Date.now() - p.at > INSTALL_MAX_MS) return false;
+    try {
+      process.kill(p.pid!, 0);
+    } catch {
+      return false;
+    }
+    try {
+      if (process.platform === 'win32') {
+        const exe = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${p.pid}").ExecutablePath`], {
+          encoding: 'utf8',
+          timeout: 15000,
+          windowsHide: true,
+        }).trim();
+        return exe.toLowerCase() === p.installer.toLowerCase();
+      }
+      return execFileSync('/bin/ps', ['-o', 'command=', '-p', String(p.pid)], { encoding: 'utf8', timeout: 5000 }).includes(p.installer);
+    } catch {
+      return false;
     }
   }
 
@@ -426,6 +473,8 @@ rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
       child.once('error', done);
       child.once('spawn', () => {
         child.unref();
+        // Which process is installing, so a Wren opened again meanwhile keeps out of its way.
+        writeFileSync(pending, JSON.stringify({ version: this.state.version ?? '', pid: child.pid, installer: process.platform === 'win32' ? cmd : args[0], at: Date.now() } satisfies Pending));
         done(null);
       });
     });

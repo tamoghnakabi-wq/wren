@@ -161,10 +161,12 @@ const DESCRIBE_FN = `(el) => {
  * - `describe <ref|@focused> <newId>`: describe the node and give it an id (the same id every time).
  * - `id <id>`: the node itself, for Playwright to click (it hit-tests in this world too).
  * - `about <id>`: that node's description now, whether it is connected and whether it has focus.
- * - `type <id> <nonce> <text>`: focus it, make sure focus stayed, replace its text. Text goes to that
- *   node through the editing command, even if a handler moves focus while it is inserted.
- * - `arm <id>` / `disarm`: hold focus on the node until a key press reaches it, and stop key events
- *   aimed anywhere else in the page.
+ * - `type <id> <nonce> <text>`: focus it, make sure focus stayed and the field didn't change (a
+ *   focus handler can make it a password box), replace its text through the editing command, which
+ *   inserts into that node. A field an input handler changes right after gets its old text back
+ *   and the typing is refused.
+ * - `arm <id> <key>` / `disarm`: hold focus on the node until the key itself (the last keydown of
+ *   the chord) reaches it, stop key events of the press aimed anywhere else, and report it.
  */
 const ENGINE = `({
   ids: new Map(), of: new WeakMap(), done: new Map(), guard: null,
@@ -186,6 +188,11 @@ const ENGINE = `({
     return id;
   },
   out(v) { const d = document.createElement('wren-data'); d.setAttribute('data-wren', JSON.stringify(v)); return d; },
+  // What makes a field a secret one (or not typeable), read again after every step that runs page
+  // code: a focus or beforeinput handler can turn the checked text box into a password box.
+  fieldState(el) {
+    return [el.tagName, el.type, el.getAttribute('type'), el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.disabled, el.readOnly, el.isContentEditable].join('\u0001');
+  },
   type(el, text) {
     if (!el) return { error: 'gone' };
     const input = el.tagName === 'INPUT', area = el.tagName === 'TEXTAREA', kind = input ? el.type : '';
@@ -193,24 +200,45 @@ const ENGINE = `({
     if (kind === 'password') return { error: 'secret' };
     if (!(input && (SET.includes(kind) || ['text', 'email', 'number', 'search', 'tel', 'url'].includes(kind)) || area || el.isContentEditable)) return { error: 'field' };
     if (el.disabled || el.readOnly) return { error: 'disabled' };
+    const state = this.fieldState(el);
     el.focus();
     if (this.focused() !== el) return { error: 'focus' };
+    if (this.fieldState(el) !== state) return { error: 'changed' };
+    const setValue = Object.getOwnPropertyDescriptor(input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype, 'value');
     if (SET.includes(kind)) {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, text.trim());
+      setValue.set.call(el, text.trim());
       el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return { ok: true };
     }
+    const before = input || area ? setValue.get.call(el) : null;
     if (input || area) el.select();
     else { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
-    return document.execCommand(text ? 'insertText' : 'delete', false, text) ? { ok: true } : { error: 'rejected' };
+    // Last check: nothing of the page's runs between it and the insertion (Chrome fires no
+    // beforeinput for the editing command; select fires its event later).
+    if (this.fieldState(el) !== state || this.focused() !== el) return { error: 'changed' };
+    const done = document.execCommand(text ? 'insertText' : 'delete', false, text);
+    // An input handler turned it into something else right after: take the text back out.
+    if (this.fieldState(el) !== state) {
+      if (before !== null) setValue.set.call(el, before);
+      return { error: 'changed' };
+    }
+    return done ? { ok: true } : { error: 'rejected' };
   },
-  arm(el) {
+  // Playwright's key syntax: "Shift+Enter" is two keydowns, the modifier's first; "Shift++" ends in "+".
+  keyCount(key) {
+    let n = 1, part = '';
+    for (const c of key) { if (c === '+' && part) { n++; part = ''; } else part += c; }
+    return n;
+  },
+  arm(el, key) {
     this.disarm();
     if (!el || this.focused() !== el) return { error: 'focus' };
     const page = el === document.documentElement;
-    const g = { delivered: false, blocked: false, fixes: 0 };
-    // Something moved focus before the key arrived: put it back (after the mover's script ends).
+    const g = { delivered: false, blocked: false, fixes: 0, downs: 0, needs: this.keyCount(key || 'Enter') };
+    const mine = (t) => t === el || (page && (t === document.body || t === document.documentElement || t === document));
+    // Something moved focus before the key itself arrived (a timer, or a handler of one of the
+    // chord's modifiers): put it back (after the mover's script ends).
     const keep = () => {
       if (g.delivered || g.fixes > 20) return;
       queueMicrotask(() => {
@@ -219,18 +247,25 @@ const ENGINE = `({
         if (page) { const f = document.activeElement; if (f && f.blur) f.blur(); } else el.focus();
       });
     };
-    const key = (e) => {
-      if (g.delivered) return;
-      const t = e.composedPath()[0];
-      if (t === el || (page && (t === document.body || t === document.documentElement || t === document))) { g.delivered = true; return; }
-      e.preventDefault(); e.stopImmediatePropagation(); g.blocked = true;
+    // Every event of the press is checked, modifiers included. Until the last keydown (the key
+    // itself) has reached the node, an event aimed elsewhere is stopped and reported. After it, the
+    // key's own effect may move focus; the rest of the press (keypress, keyups) is then kept from
+    // landing on whatever has focus now.
+    const onKey = (e) => {
+      const ok = mine(e.composedPath()[0]);
+      if (!g.delivered) {
+        if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); g.blocked = true; return; }
+        if (e.type === 'keydown' && ++g.downs >= g.needs) g.delivered = true;
+        return;
+      }
+      if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); }
     };
     const kinds = ['keydown', 'keypress', 'keyup'];
     document.addEventListener('focusin', keep, true); document.addEventListener('focusout', keep, true);
-    for (const k of kinds) window.addEventListener(k, key, true);
+    for (const k of kinds) window.addEventListener(k, onKey, true);
     g.off = () => {
       document.removeEventListener('focusin', keep, true); document.removeEventListener('focusout', keep, true);
-      for (const k of kinds) window.removeEventListener(k, key, true);
+      for (const k of kinds) window.removeEventListener(k, onKey, true);
     };
     this.guard = g;
     return { ok: true };
@@ -257,7 +292,7 @@ const ENGINE = `({
       if (!this.done.has(b)) { this.done.set(b, this.type(this.node(a), decodeURIComponent(c || ''))); if (this.done.size > 50) this.done.delete(this.done.keys().next().value); }
       return this.out(this.done.get(b));
     }
-    if (op === 'arm') return this.out(this.arm(this.node(a)));
+    if (op === 'arm') return this.out(this.arm(this.node(a), decodeURIComponent(b || '')));
     if (op === 'disarm') return this.out(this.disarm());
     return null;
   },
@@ -397,14 +432,17 @@ export class BrowserController {
 
   /** Press a key on exactly this node: focus is held on it until the key arrives, and a key aimed elsewhere is stopped. */
   private async pressOn(page: Page, id: string, key: string): Promise<string | null> {
-    const armed = await this.ask<{ ok?: boolean }>(page, 'arm', id);
+    const armed = await this.ask<{ ok?: boolean }>(page, 'arm', id, encodeURIComponent(key));
     if (!armed.ok) return 'Focus is no longer on the element that was checked, so the key was not pressed. Take a new snapshot and try again.';
     try {
       await page.keyboard.press(key);
     } finally {
       // After a navigation the guard went with the old page, which is fine: the key arrived.
-      const r = await this.ask<{ blocked?: boolean }>(page, 'disarm').catch(() => ({ blocked: false }));
+      const r = await this.ask<{ blocked?: boolean; delivered?: boolean; none?: boolean }>(page, 'disarm').catch(() => ({ blocked: false, delivered: undefined, none: true }));
       if (r.blocked) return 'The page moved focus to something else just before the key press, so Wren stopped it. Take a new snapshot and check the page.';
+      // The guard never saw the key arrive (the page stopped the events before Wren's check could):
+      // don't claim it went where it was meant to.
+      if (!r.none && r.delivered === false) return 'Wren could not confirm that the key reached the element that was checked. Take a new snapshot to see what happened before trying again.';
     }
     return null;
   }
@@ -509,4 +547,5 @@ const TYPE_ERRORS: Record<string, string> = {
   disabled: 'That field is disabled or read-only.',
   focus: 'Focus moved to something else when Wren selected that field, so nothing was typed. Take a new snapshot and check the page.',
   rejected: 'The page did not accept the text.',
+  changed: 'The field changed while Wren was typing into it (for example into a password field), so nothing was typed. Take a new snapshot and check the page.',
 };

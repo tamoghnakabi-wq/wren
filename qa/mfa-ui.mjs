@@ -73,6 +73,11 @@ async function login(page, u, next = '') {
 }
 const seen = (loc, timeout = 10000) => loc.waitFor({ timeout }).then(() => true, () => false);
 const fresh = async () => (await browser.newContext({ viewport: { width: 1200, height: 900 } })).newPage();
+/** Skip Wren's one-code-a-minute gap for this account (Supabase Auth's own gap is a second locally). */
+async function backdate(email) {
+  psql(`update public.mfa_email_requests set sent_at = sent_at - interval '61 seconds' where user_id = (select id from auth.users where email = '${email}')`);
+  await sleep(1100);
+}
 
 try {
   // --- authenticator app at sign-in, with a deep link
@@ -134,6 +139,23 @@ try {
   check('…and spends that code (9 left)', await seen(page.getByText('9 of 10 left')));
   await page.context().close();
 
+  // --- two authenticators: sign-in lets you pick the one you have (W-93)
+  const en2 = await A.c.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Tablet' });
+  const totp2 = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(en2.data.totp.secret) });
+  await A.c.auth.mfa.challengeAndVerify({ factorId: en2.data.id, code: await freshCode(totp2) });
+  page = await fresh();
+  await login(page, A);
+  await page.waitForURL(/\/auth\/mfa/);
+  const picker = page.getByLabel('Authenticator app', { exact: true });
+  check('two authenticators: sign-in asks which one', await seen(picker) && (await picker.locator('option').allInnerTexts()).join(',') === 'Phone,Tablet');
+  await picker.selectOption({ label: 'Tablet' });
+  if (shots) await page.screenshot({ path: `${shots}/mfa-pick-app.png` });
+  await page.getByLabel('Code from your authenticator app').fill(await freshCode(totp2));
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.waitForURL(/\/app(\/)?$/, { timeout: 15000 }).catch(() => {});
+  check('two authenticators: the second one’s code signs in', new URL(page.url()).pathname.replace(/\/$/, '') === '/app', page.url());
+  await page.context().close();
+
   // --- set up an authenticator from Settings (no two-step sign-in yet): confirm by email, scan, codes
   const S = await newUser('setup');
   page = await fresh();
@@ -180,7 +202,7 @@ try {
   await page.getByRole('dialog', { name: 'Turn on email codes' }).getByRole('button', { name: 'Turn on' }).click();
   check('email codes turn on after entering the emailed code', await seen(page.getByText(/Signing in asks for a code sent to/)));
   await page.context().close();
-  await sleep(61_000); // one code a minute per account
+  await backdate(E.email);
   page = await fresh();
   const t2 = Date.now() - 1000;
   await login(page, E);
@@ -191,6 +213,46 @@ try {
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.waitForURL(/\/app(\/)?$/, { timeout: 15000 });
   check('sign-in with an email code works', true);
+
+  // --- choosing a new password goes through Wren (W-87); this session just passed an email code
+  await page.goto(`${WEB}/auth/update-password`);
+  await page.getByLabel('New password').fill(`${E.password}-new`);
+  await page.getByRole('button', { name: 'Save password' }).click();
+  await page.waitForURL(/\/app(\/)?$/, { timeout: 15000 }).catch(() => {});
+  const newPw = await client().auth.signInWithPassword({ email: E.email, password: `${E.password}-new` });
+  check('new password: saved through Wren for an email-code account', !!newPw.data.session, page.url());
+  E.password = `${E.password}-new`;
+
+  // --- an authenticator added while email codes can't be turned off: email codes stay visible (W-95)
+  await page.goto(`${WEB}/app/settings`);
+  await page.route('**/api/mfa/email', (r) => (r.request().method() === 'DELETE' ? r.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"down","code":"internal"}' }) : r.continue()));
+  await page.getByRole('button', { name: 'Set up an authenticator app' }).click();
+  const enrollE = page.getByRole('dialog', { name: 'Set up an authenticator app' });
+  await enrollE.getByRole('img', { name: /QR code/ }).waitFor({ timeout: 10000 });
+  const keyE = (await enrollE.locator('p.font-mono').innerText()).replace(/\s+/g, '');
+  await enrollE.getByLabel('Code from the app').fill(new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(keyE) }).generate());
+  await enrollE.getByRole('button', { name: 'Turn on' }).click();
+  check('email-off failure: the user is told email codes are still on', await seen(page.getByText(/email codes are still on/i).first()));
+  const savedE = page.getByRole('dialog', { name: 'Save your recovery codes' });
+  if (await seen(savedE, 5000)) await savedE.getByRole('button', { name: 'I’ve saved them' }).click();
+  check('email-off failure: Settings keeps showing email codes, with a way to turn them off', await seen(page.getByText(/Still on: signing in asks for a code sent to/)) && (await page.getByRole('button', { name: 'Turn off email codes' }).count()) === 1);
+  if (shots) await page.screenshot({ path: `${shots}/security-email-still-on.png`, fullPage: true });
+  await page.unroute('**/api/mfa/email');
+  await page.getByRole('button', { name: 'Turn off email codes' }).click();
+  await page.getByRole('dialog', { name: 'Turn off email codes?' }).getByRole('button', { name: 'Turn off' }).click();
+  await page.getByRole('dialog', { name: 'Turn off email codes?' }).waitFor({ state: 'hidden' }).catch(() => {});
+  check('email-off failure: turning them off afterwards works', await seen(page.getByText('Email codes turned off.')) && psql(`select count(*) from public.mfa_email e join auth.users u on u.id = e.user_id where u.email = '${E.email}'`) === '0');
+  await page.context().close();
+
+  // --- a session revoked on the server: the app sends the browser to sign in (W-89)
+  const R = await newUser('revoked');
+  page = await fresh();
+  await login(page, R);
+  await page.waitForURL(/\/app/);
+  psql(`delete from auth.sessions where user_id = (select id from auth.users where email = '${R.email}')`);
+  await page.goto(`${WEB}/app/settings`);
+  await page.waitForURL(/\/login/, { timeout: 15000 }).catch(() => {});
+  check('revoked session: opening the app leads to sign-in (no redirect loop)', new URL(page.url()).pathname === '/login', page.url());
   await page.context().close();
 
   // --- deleting an account asks to confirm with an email code
