@@ -388,12 +388,14 @@ export interface AgentCharacterProps {
   seed?: string;
   /** No motion at all (e.g. old messages in a long timeline). */
   still?: boolean;
+  /** Celebrations and stumbles hold still after a few seconds (default). Off for showcases that should keep moving. */
+  settle?: boolean;
   className?: string;
   /** Accessible name; without it the character is decorative. */
   title?: string;
 }
 
-export function AgentCharacter({ character, color = 'violet', mood = 'idle', size = 48, seed, still, className, title }: AgentCharacterProps) {
+export function AgentCharacter({ character, color = 'violet', mood = 'idle', size = 48, seed, still, settle = true, className, title }: AgentCharacterProps) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, '');
   const pal: Pal = { ...(PALETTE[color] ?? PALETTE.violet), color: PALETTE[color] ? color : 'violet' };
   const b = BUILD[character] ?? BUILD.pip;
@@ -403,10 +405,10 @@ export function AgentCharacter({ character, color = 'violet', mood = 'idle', siz
   // Celebrations and stumbles play for a moment, then hold still.
   const [settledMood, setSettledMood] = useState<Mood | null>(null);
   useEffect(() => {
-    if (mood !== 'success' && mood !== 'error') return;
+    if (!settle || (mood !== 'success' && mood !== 'error')) return;
     const t = setTimeout(() => setSettledMood(mood), 5000);
     return () => clearTimeout(t);
-  }, [mood]);
+  }, [mood, settle]);
   const animate = !still && settledMood !== mood;
   const delay = `${-((hash(seed ?? character) % 6000) / 1000).toFixed(2)}s`;
 

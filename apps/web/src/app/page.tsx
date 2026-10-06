@@ -194,7 +194,7 @@ function Crew() {
         <div className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           {crew.map((m) => (
             <div key={m.c} className="flex flex-col items-center rounded-2xl border border-border bg-surface px-3 pt-5 pb-4 text-center shadow-card">
-              <AgentCharacter character={m.c} color={m.color} mood={m.mood} size={76} seed={m.c} title={`${CHARACTERS[m.c].name}, ${m.label.toLowerCase()}`} />
+              <AgentCharacter character={m.c} color={m.color} mood={m.mood} size={76} seed={m.c} settle={false} title={`${CHARACTERS[m.c].name}, ${m.label.toLowerCase()}`} />
               <p className="mt-2 text-sm font-semibold">{CHARACTERS[m.c].name}</p>
               <p className="text-[12px] font-medium text-brand-ink">{m.label}</p>
               <p className="mt-1 text-[12px] leading-snug text-muted">{m.line}</p>
