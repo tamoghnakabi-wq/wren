@@ -256,12 +256,14 @@
   animation: wren-pulse 1.6s ease-in-out infinite;
 }
 
+/* The highlight sweeps left to right (reading direction). The gradient is twice the text's width,
+   so a falling background-position moves it rightward. */
 @keyframes wren-shimmer {
   0% {
-    background-position: -200% 0;
+    background-position: 200% 0;
   }
   100% {
-    background-position: 200% 0;
+    background-position: -200% 0;
   }
 }
 .text-shimmer {
