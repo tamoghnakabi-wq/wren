@@ -109,6 +109,20 @@ export default function SessionPage() {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [events.rows, sessionApprovals.length]);
 
+  // On a phone the keyboard covers the home-indicator area, but the page still keeps that inset as
+  // padding under the composer (a gap above the keyboard): mark the keyboard as open so it's dropped.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const root = document.documentElement;
+    const update = () => root.toggleAttribute('data-keyboard', vv.scale < 1.05 && Math.max(window.innerHeight, root.clientHeight) - vv.height > 150);
+    vv.addEventListener('resize', update);
+    update();
+    return () => {
+      vv.removeEventListener('resize', update);
+      root.removeAttribute('data-keyboard');
+    };
+  }, []);
 
   if (session.loading) return <SessionSkeleton />;
   if (!s)
@@ -322,7 +336,7 @@ export default function SessionPage() {
               {run?.status === 'failed' && run.error && !events.rows.some((e) => e.type === 'status' && e.data.text === run.error) && <p className="mt-4 text-center text-sm text-danger">{run.error}</p>}
             </div>
           </div>
-          <div className="border-t border-border bg-bg px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
+          <div className="border-t border-border bg-bg px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] kb-open:pb-3 sm:px-6">
             <div className="mx-auto max-w-3xl lg:details-off:max-w-4xl">
               {agent ? (
                 <Composer

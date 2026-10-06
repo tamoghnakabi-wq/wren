@@ -5,6 +5,8 @@
    details-off: applies while the task details panel is hidden. */
 @custom-variant rail (&:where(:root[data-sidebar='collapsed'] .wren-sidebar, :root[data-sidebar='collapsed'] .wren-sidebar *));
 @custom-variant details-off (&:where(:root[data-details='hidden'] *));
+/* The on-screen keyboard is open (set by the task page from the visual viewport). */
+@custom-variant kb-open (&:where(:root[data-keyboard] *));
 
 :root {
   --bg: #f7f5f2;
@@ -878,5 +880,16 @@ dialog[open].dialog-in::backdrop {
   .wc,
   .wc * {
     animation: none !important;
+  }
+}
+
+/* iPhone Safari zooms the page in when a field with text under 16px gets focus, and stays zoomed
+   (the page then looks shifted). Touch screens get 16px in every text field. Unlayered on purpose,
+   so it beats the text-[…] utilities. */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+  textarea,
+  select {
+    font-size: 16px;
   }
 }
