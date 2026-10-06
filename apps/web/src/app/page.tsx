@@ -111,7 +111,9 @@ function HeroMock() {
         <p className="flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
           <AgentCharacter character="bolt" color="violet" mood="waiting" size={26} seed="hero-forge" /> Approval needed
         </p>
-        <p className="mt-1 text-[13px] font-medium">Forge wants to run `git push origin fix/login`</p>
+        <p className="mt-1 text-[13px] font-medium">
+          Forge wants to run <code className="rounded bg-bg-subtle px-1 py-px font-mono text-[0.9em]">git push origin fix/login</code>
+        </p>
         <div className="mt-2.5 flex gap-1.5">
           <span className="flex-1 rounded-lg bg-primary py-1.5 text-center text-[12px] font-medium text-primary-fg">Approve</span>
           <span className="flex-1 rounded-lg border border-border py-1.5 text-center text-[12px] font-medium">Deny</span>

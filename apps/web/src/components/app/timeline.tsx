@@ -8,6 +8,7 @@ import { AgentAvatar } from '../agent-avatar';
 import { Markdown } from '../markdown';
 import { cx, formatBytes } from '../ui';
 import { ApprovalCard } from './approval-card';
+import { CodeText } from '@/components/app/code-text';
 
 const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   'computer.shell': Terminal,
@@ -109,7 +110,7 @@ function group(events: EventRow[]): Item[] {
   return items;
 }
 
-export function Timeline({ events, agent, approvals, working, stoppedRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; stoppedRuns?: string[] }) {
+export function Timeline({ events, agent, approvals, working, waitingFor, stoppedRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; /** The (offline) computer a queued task waits for. */ waitingFor?: string; stoppedRuns?: string[] }) {
   const stoppedKey = (stoppedRuns ?? []).join(',');
   const items = useMemo(() => markStopped(group(events), new Set(stoppedKey ? stoppedKey.split(',') : [])), [events, stoppedKey]);
   const last = events[events.length - 1];
@@ -145,7 +146,13 @@ export function Timeline({ events, agent, approvals, working, stoppedRuns }: { e
             );
         }
       })}
-      {showThinking && (
+      {showThinking && waitingFor && (
+        <div className="fade-in flex items-center gap-3 pl-1" role="status">
+          {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood="idle" still seed={agent.name} />}
+          <span className="text-sm text-muted">Waiting for {waitingFor} to come online. The task starts as soon as it does.</span>
+        </div>
+      )}
+      {showThinking && !waitingFor && (
         <div className="fade-in flex items-center gap-3 pl-1" role="status">
           {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={toolRunning ? 'working' : 'thinking'} seed={agent.name} />}
           <span className="text-shimmer text-sm font-medium">{toolRunning ? 'Working…' : 'Thinking…'}</span>
@@ -288,7 +295,7 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
         className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition-colors hover:bg-surface-2 focus-visible:bg-surface-2"
       >
         <Icon className="h-4 w-4 shrink-0 text-faint" aria-hidden />
-        <span className={cx('min-w-0 flex-1 truncate text-[13.5px]', status === 'running' ? 'text-text' : 'text-muted')}>{d.title || d.name}</span>
+        <span className={cx('min-w-0 flex-1 truncate text-[13.5px]', status === 'running' ? 'text-text' : 'text-muted')}><CodeText text={d.title || d.name} /></span>
         {dur !== null && status === 'done' && <span className="text-[11.5px] text-faint tabular-nums">{dur}s</span>}
         <StepStatus status={status} />
         <ChevronRight className={cx('h-3.5 w-3.5 text-faint transition-transform duration-200', open && 'rotate-90')} aria-hidden />

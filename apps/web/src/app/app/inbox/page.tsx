@@ -9,6 +9,7 @@ import { useApp } from '@/components/app/provider';
 import { Button, cx, EmptyState, PageHeader, timeAgo } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import type { Notification } from '@/lib/client/types';
+import { CodeText } from '@/components/app/code-text';
 
 const PAGE = 30;
 
@@ -93,7 +94,7 @@ export default function InboxPage() {
                         {!n.read_at && <span className="sr-only">Unread: </span>}
                         {n.title}
                       </p>
-                      {n.body && <p className="mt-0.5 line-clamp-2 text-[13px] break-words text-muted">{n.body}</p>}
+                      {n.body && <p className="mt-0.5 line-clamp-2 text-[13px] break-words text-muted"><CodeText text={n.body} /></p>}
                     </div>
                     <span className="shrink-0 text-[12px] text-faint tabular-nums">{timeAgo(n.created_at)}</span>
                     {!n.read_at && <span aria-hidden className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-brand" />}

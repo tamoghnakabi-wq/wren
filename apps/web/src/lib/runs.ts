@@ -316,32 +316,40 @@ export async function decideApproval(userId: string, approvalId: string, approve
   return { runId: a.run_id, status: r.status };
 }
 
-export async function cancelRun(userId: string, runId: string) {
+/** Stop a run. True when it ended here and now; false when the worker running it still has to notice. */
+export async function cancelRun(userId: string, runId: string): Promise<boolean> {
   const sql = db();
   const [run] = await sql`update public.runs set cancel_requested = true where id = ${runId} and user_id = ${userId} and status in ('queued', 'running', 'waiting', 'paused') returning status, runtime, session_id, lease_until`;
-  if (!run) return;
+  if (!run) return true;
+  let ended = false;
   await sql`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
   // Nothing is executing a waiting/paused/queued run: finish it here.
   if (run.status !== 'running' || !run.lease_until || new Date(run.lease_until) < new Date()) {
     await sql`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
     await finishRun(runId, { kind: 'cancelled', steps: 0 });
+    ended = true;
   } else if (run.runtime === 'cloud') {
     // A tick is mid-step: end the run's commands now so it notices Stop without waiting them out.
     const [r] = await sql`select agent_id from public.runs where id = ${runId}`;
     if (r) await SandboxHost.endRun(r.agent_id, runId);
   }
   if (run.runtime === 'desktop') await kickRun(runId);
+  return ended;
 }
 
-export async function pauseRun(userId: string, runId: string) {
+/** Pause a run. True when it paused here and now; false when it pauses after the current step. */
+export async function pauseRun(userId: string, runId: string): Promise<boolean> {
   const sql = db();
   const [run] = await sql`update public.runs set pause_requested = true where id = ${runId} and user_id = ${userId} and status in ('queued', 'running') returning status, session_id, runtime, lease_until`;
-  if (!run) return;
+  if (!run) return true;
+  let paused = false;
   if (run.status === 'queued' || !run.lease_until || new Date(run.lease_until) < new Date()) {
     await sql`update public.runs set status = 'paused' where id = ${runId}`;
     await sql`update public.sessions set status = 'paused' where id = ${run.session_id}`;
+    paused = true;
   }
   if (run.runtime === 'desktop') await kickRun(runId);
+  return paused;
 }
 
 export async function resumeRun(userId: string, runId: string) {

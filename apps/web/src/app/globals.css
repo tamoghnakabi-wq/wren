@@ -192,7 +192,8 @@
   margin-top: 0.25em;
 }
 .prose-wren a {
-  color: var(--brand);
+  /* brand-ink, not brand: links in body text need AA contrast in both themes */
+  color: var(--brand-ink);
   text-decoration: underline;
   text-underline-offset: 2px;
 }

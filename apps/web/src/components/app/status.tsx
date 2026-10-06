@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, CheckCircle2, CircleDashed, CirclePause, CircleX, Clock, Hand, Loader2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CircleDashed, CirclePause, CircleX, Clock, Hand, Laptop, Loader2 } from 'lucide-react';
 import type { SessionStatus } from '@/lib/client/types';
 import { cx } from '../ui';
 
@@ -15,8 +15,11 @@ const MAP: Record<SessionStatus, { label: string; cls: string; Icon: typeof Cloc
   cancelled: { label: 'Stopped', cls: 'bg-bg-subtle text-faint', Icon: CircleX },
 };
 
-export function StatusPill({ status, className }: { status: SessionStatus; className?: string }) {
-  const m = MAP[status] ?? MAP.idle;
+/** A queued task whose computer is offline hasn't started: it waits for the computer, not on Wren. */
+const WAITING_FOR_COMPUTER = { label: 'Waiting for computer', cls: 'bg-bg-subtle text-muted', Icon: Laptop };
+
+export function StatusPill({ status, computerOffline, className }: { status: SessionStatus; computerOffline?: boolean; className?: string }) {
+  const m = status === 'queued' && computerOffline ? WAITING_FOR_COMPUTER : (MAP[status] ?? MAP.idle);
   return (
     <span className={cx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium whitespace-nowrap', m.cls, className)}>
       <m.Icon className={cx('h-3.5 w-3.5', status === 'running' && 'motion-safe:animate-spin')} aria-hidden />

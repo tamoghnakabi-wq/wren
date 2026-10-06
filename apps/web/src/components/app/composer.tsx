@@ -41,6 +41,9 @@ export function Composer({
   const [files, setFiles] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const [pickAgent, setPickAgent] = useState(false);
+  // The list opens upward from the composer, unless there isn't room above (the composer near the
+  // top of the page): then downward, so no agent ends up off screen.
+  const [pickDown, setPickDown] = useState(false);
   const [runtime, setRuntime] = useState<'cloud' | 'desktop' | undefined>(undefined);
   const [dragging, setDragging] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -195,7 +198,12 @@ export function Composer({
           <div className="relative" ref={picker}>
             <button
               type="button"
-              onClick={() => setPickAgent((v) => !v)}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                const need = Math.min(320, agents.length * 53 + 10);
+                setPickDown(r.top < need + 8 && window.innerHeight - r.bottom > r.top);
+                setPickAgent((v) => !v);
+              }}
               aria-haspopup="listbox"
               aria-expanded={pickAgent}
               aria-label={agent ? `Agent: ${agent.name}. Change agent` : 'Choose agent'}
@@ -217,7 +225,7 @@ export function Composer({
                   const i = list.indexOf(document.activeElement as HTMLElement);
                   list[(i + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length]?.focus();
                 }}
-                className="pop-in absolute bottom-10 left-0 z-20 max-h-80 w-64 origin-bottom-left overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-pop scrollbar-thin"
+                className={cx('pop-in absolute left-0 z-20 max-h-80 w-64 overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-pop scrollbar-thin', pickDown ? 'top-10 origin-top-left' : 'bottom-10 origin-bottom-left')}
               >
                 {agents.map((a) => (
                   <button

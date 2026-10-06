@@ -67,7 +67,7 @@ export default function ConnectionsPage() {
                 where: 'On your computer',
                 device: anyDevice((d) => !!d.capabilities?.claudeCode?.installed),
                 detail: (d) => `Claude Code ${d.capabilities?.claudeCode?.version ?? ''} on ${d.name}`,
-                action: <EngineAction engine="claude-code" install="https://code.claude.com/docs/en/setup" />,
+                action: <EngineAction engine="claude-code" install="https://code.claude.com/docs/en/setup" installed={!!anyDevice((d) => !!d.capabilities?.claudeCode?.installed)} />,
               }}
               keys={keys('anthropic')}
               onAdd={() => setAdding('anthropic')}
@@ -81,7 +81,7 @@ export default function ConnectionsPage() {
                 where: 'On your computer',
                 device: anyDevice((d) => !!d.capabilities?.grokBuild?.installed),
                 detail: (d) => `Grok Build ${d.capabilities?.grokBuild?.version ?? ''} on ${d.name}`,
-                action: <EngineAction engine="grok-build" install="https://docs.x.ai/build/overview" />,
+                action: <EngineAction engine="grok-build" install="https://docs.x.ai/build/overview" installed={!!anyDevice((d) => !!d.capabilities?.grokBuild?.installed)} />,
               }}
               keys={keys('xai')}
               onAdd={() => setAdding('xai')}
@@ -261,13 +261,13 @@ function ChatGPTAction() {
   );
 }
 
-function EngineAction({ engine, install }: { engine: 'claude-code' | 'grok-build'; install: string }) {
+function EngineAction({ engine, install, installed }: { engine: 'claude-code' | 'grok-build'; install: string; /** Already on one of the user's computers. */ installed?: boolean }) {
   const d = useDesktop();
   const { desktop: status } = useApp();
   if (!d)
     return (
       <a href={install} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[12.5px] text-muted underline">
-        Install it on your computer <ExternalLink className="h-3 w-3" />
+        {installed ? 'Install it on another computer' : 'Install it on your computer'} <ExternalLink className="h-3 w-3" />
       </a>
     );
   const s = engine === 'claude-code' ? status?.engines.claudeCode : status?.engines.grokBuild;
@@ -417,7 +417,7 @@ function AddConnectionDialog({ provider, onClose, onDone }: { provider: Provider
             ? 'The token is verified and encrypted (AES-256-GCM). Wren uses it for GitHub API calls and gives it to git/gh on the agent’s cloud computer while a task with GitHub enabled runs — so keep it fine-grained.'
             : 'Keys are verified, then encrypted (AES-256-GCM) and only used by Wren’s servers to call the provider for your agents. They never enter an agent’s computer.'}
         </p>
-        {error && <p className="rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
+        {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
       </div>
     </Dialog>
   );

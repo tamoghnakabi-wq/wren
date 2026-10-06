@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { Cloud, Laptop } from 'lucide-react';
-import type { Session } from '@/lib/client/types';
+import { isLiveDevice, type Session } from '@/lib/client/types';
 import { AgentAvatar, sessionMood } from '../agent-avatar';
 import { timeAgo } from '../ui';
 import { useApp } from './provider';
@@ -16,10 +16,11 @@ export function SessionList({ sessions, showAgent = true, empty }: { sessions: S
       {sessions.map((s) => {
         const a = agentById(s.agent_id);
         const dev = devices.find((d) => d.id === s.device_id);
+        const offline = s.status === 'queued' && s.runtime === 'desktop' && !(dev && isLiveDevice(dev));
         return (
           <li key={s.id}>
             <Link href={`/app/s/${s.id}`} className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2 focus-visible:bg-surface-2">
-              {showAgent && <AgentAvatar icon={a?.icon} color={a?.color} size={36} mood={sessionMood(s.status)} still={!['running', 'queued', 'waiting'].includes(s.status)} seed={s.id} />}
+              {showAgent && <AgentAvatar icon={a?.icon} color={a?.color} size={36} mood={offline ? 'idle' : sessionMood(s.status)} still={offline || !['running', 'queued', 'waiting'].includes(s.status)} seed={s.id} />}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[14.5px] font-medium">{s.title}</p>
                 {/* Names shrink with an ellipsis; the time always stays visible. */}
@@ -32,7 +33,7 @@ export function SessionList({ sessions, showAgent = true, empty }: { sessions: S
                   <span className="shrink-0">{timeAgo(s.last_event_at)}</span>
                 </p>
               </div>
-              <StatusPill status={s.status} />
+              <StatusPill status={s.status} computerOffline={offline} />
             </Link>
           </li>
         );

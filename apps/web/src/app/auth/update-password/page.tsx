@@ -63,7 +63,7 @@ function UpdatePassword() {
         <Label htmlFor="pw">New password</Label>
         <Input id="pw" type="password" autoComplete="new-password" minLength={8} required value={password} onChange={(e) => setPassword(e.target.value)} />
       </div>
-      {error && <p className="rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
+      {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
       <Button type="submit" className="w-full" loading={busy}>
         Save password
       </Button>

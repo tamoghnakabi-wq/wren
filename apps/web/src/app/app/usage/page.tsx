@@ -87,9 +87,9 @@ export default function UsagePage() {
       <div aria-busy="true">
         <Skeleton className="h-7 w-28" />
         <Skeleton className="mt-2 mb-6 h-4 w-96 max-w-full" />
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid grid-cols-3 gap-2.5 sm:gap-4">
           {[0, 1, 2].map((i) => (
-            <Skeleton key={i} className="h-24 rounded-2xl" />
+            <Skeleton key={i} className="h-20 rounded-2xl sm:h-24" />
           ))}
         </div>
         <Skeleton className="mt-4 h-52 rounded-2xl" />
@@ -98,8 +98,9 @@ export default function UsagePage() {
   return (
     <div>
       <PageHeader title="Usage" subtitle="Model usage by your agents over the last 30 days. Each provider bills you directly; Wren adds nothing on top." />
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Stat label="Tokens (30 days)" value={formatTokens(total)} />
+      {/* Side by side on phones too: three numbers don't need three screens' worth of cards. */}
+      <div className="grid grid-cols-3 gap-2.5 sm:gap-4">
+        <Stat label="Tokens" value={formatTokens(total)} />
         <Stat label="Model calls" value={String(list.reduce((n, r) => n + r.calls, 0))} />
         <Stat label="Cached input" value={formatTokens(list.reduce((n, r) => n + r.cached_tokens, 0))} />
       </div>
@@ -199,9 +200,9 @@ export default function UsagePage() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <Card className="p-5">
-      <p className="text-[13px] text-muted">{label}</p>
-      <p className="mt-1 text-2xl font-semibold tabular-nums">{value}</p>
+    <Card className="flex flex-col justify-between p-3.5 sm:p-5">
+      <p className="text-[12px] leading-snug text-muted sm:text-[13px]">{label}</p>
+      <p className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{value}</p>
     </Card>
   );
 }

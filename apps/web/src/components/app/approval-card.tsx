@@ -9,6 +9,7 @@ import type { Approval } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { Button, cx, timeAgo, useToast } from '../ui';
 import { useApp } from './provider';
+import { CodeText } from '@/components/app/code-text';
 
 const RISK = {
   low: { label: 'Low risk', cls: 'text-muted' },
@@ -60,12 +61,17 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
         {showAgent && agent ? <AgentAvatar icon={agent.icon} color={agent.color} size={36} mood="waiting" seed={agent.id} /> : <ShieldAlert className="h-6 w-6 text-warning" />}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px]">
-            {showAgent && agent && <span className="font-semibold">{agent.name}</span>}
-            <span className="text-muted">wants to</span>
+            {showAgent && agent ? (
+              <span>
+                <span className="font-semibold">{agent.name}</span> <span className="text-muted">needs your approval</span>
+              </span>
+            ) : (
+              <span className="text-muted">Needs your approval</span>
+            )}
             <span className={cx('font-medium', r.cls)}>· {r.label}</span>
             <span className="text-faint">· {timeAgo(approval.created_at)}</span>
           </div>
-          <p className="mt-1 text-[15px] font-medium break-words">{approval.title}</p>
+          <p className="mt-1 text-[15px] font-medium break-words"><CodeText text={approval.title} /></p>
           {approval.detail?.reason && <p className="mt-0.5 text-[13px] text-muted">This {approval.detail.reason}.</p>}
           {body && !compact && <pre className="mt-2.5 max-h-48 overflow-auto rounded-xl border border-border bg-bg-subtle p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{body}</pre>}
           <div className="mt-3 flex flex-wrap items-center gap-2">

@@ -19,7 +19,7 @@ import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { supabase } from '@/lib/client/supabase';
 import { modelLabel } from '@/lib/client/sources';
-import type { Artifact, EventRow, PlanItem, Run, RunLive, Session } from '@/lib/client/types';
+import { isLiveDevice, type Artifact, type EventRow, type PlanItem, type Run, type RunLive, type Session } from '@/lib/client/types';
 
 /** Events per page of task history. */
 const PAGE = 500;
@@ -86,11 +86,15 @@ export default function SessionPage() {
   const usage = runs.rows.reduce((n, r) => n + (r.usage?.input_tokens ?? 0) + (r.usage?.output_tokens ?? 0), 0);
   const askingQuestion = events.rows.some((e) => e.type === 'tool' && e.status === 'awaiting_input');
   const device = devices.find((d) => d.id === s?.device_id);
+  // A desktop task whose computer is offline hasn't started: say so, rather than "Thinking…".
+  const waitingForComputer = !!run && run.status === 'queued' && s?.runtime === 'desktop' && !(device && isLiveDevice(device));
   const toolRunning = working && events.rows.some((e) => e.type === 'tool' && e.run_id === run?.id && e.status === 'running');
   const mood: Mood =
     sessionApprovals.length || askingQuestion || s?.status === 'waiting'
       ? 'waiting'
-      : working
+      : waitingForComputer
+        ? 'idle'
+        : working
         ? toolRunning
           ? 'working'
           : 'thinking'
@@ -130,8 +134,10 @@ export default function SessionPage() {
   const act = async (action: 'pause' | 'resume' | 'cancel') => {
     if (!run) return;
     try {
-      await api(`/api/runs/${run.id}/${action}`, { body: {} });
-      toast(action === 'cancel' ? 'Stopping…' : action === 'pause' ? 'Pausing after the current step…' : 'Resuming…');
+      const { done } = await api<{ done?: boolean }>(`/api/runs/${run.id}/${action}`, { body: {} });
+      if (action === 'cancel') toast(done ? 'Stopped.' : 'Stopping…', done ? 'success' : undefined);
+      else if (action === 'pause') toast(done ? 'Paused.' : 'Pausing after the current step…', done ? 'success' : undefined);
+      else toast('Resuming…');
     } catch (e) {
       toast((e as Error).message, 'error');
     }
@@ -211,7 +217,7 @@ export default function SessionPage() {
             {s.runtime === 'cloud' ? 'Cloud' : device?.name ?? 'Computer'}
           </p>
         </div>
-        <StatusPill status={s.status} className="hidden sm:inline-flex" />
+        <StatusPill status={s.status} computerOffline={waitingForComputer} className="hidden sm:inline-flex" />
         {run && ['queued', 'running'].includes(run.status) && (
           <Button size="sm" variant="secondary" onClick={() => act('pause')} title="Pause">
             <Pause className="h-4 w-4" />
@@ -307,7 +313,7 @@ export default function SessionPage() {
               {events.loading ? (
                 <TimelineSkeleton />
               ) : (
-                <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} stoppedRuns={runs.rows.filter((r) => r.status === 'cancelled').map((r) => r.id)} />
+                <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} waitingFor={waitingForComputer ? (device?.name ?? 'your computer') : undefined} stoppedRuns={runs.rows.filter((r) => r.status === 'cancelled').map((r) => r.id)} />
               )}
               {run?.status === 'failed' && run.error && !events.rows.some((e) => e.type === 'status' && e.data.text === run.error) && <p className="mt-4 text-center text-sm text-danger">{run.error}</p>}
             </div>
@@ -319,7 +325,7 @@ export default function SessionPage() {
                   agent={agent}
                   sessionId={id}
                   compact
-                  placeholder={askingQuestion ? 'Answer the question…' : working ? 'Add guidance while it works…' : 'Follow up or give a new instruction…'}
+                  placeholder={askingQuestion ? 'Answer the question…' : waitingForComputer ? 'Add to the task before it starts…' : working ? 'Add guidance while it works…' : 'Follow up or give a new instruction…'}
                   onSent={() => {
                     stick.current = true;
                   }}

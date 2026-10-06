@@ -84,7 +84,7 @@ function Home() {
 
       {active.filter((s) => s.status !== 'waiting').length > 0 && (
         <section>
-          <SectionTitle>Working now</SectionTitle>
+          <SectionTitle>In progress</SectionTitle>
           <SessionList sessions={active.filter((s) => s.status !== 'waiting')} />
         </section>
       )}
