@@ -229,7 +229,9 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   });
 
   // Engines and local servers list their models right here; other providers are asked.
-  const known = !source ? [] : ENGINE_MODELS[source] ?? (source === 'local' ? localModels : null);
+  // An agent still set to Wren credits while they're off (lib/platform-credits.ts): say so, ask for another brain.
+  const creditsOff = source === 'platform' && !flags.platform;
+  const known = !source || creditsOff ? [] : ENGINE_MODELS[source] ?? (source === 'local' ? localModels : null);
   const knownNote = source === 'local' && !localModels.length ? 'No local models found. Start LM Studio or Ollama on your computer, then check Settings in the desktop app.' : null;
   const fetchKey = known ? null : JSON.stringify([source, draft.model.connectionId, connections.length, chatgptModels.length]);
   const [fetched, setFetched] = useState<{ key: string; models: { id: string; name: string }[]; note: string | null } | null>(null);
@@ -319,7 +321,13 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
           })}
         </div>
       )}
-      {source && sourceInfo(source) && (
+      {creditsOff && (
+        <div role="alert" className="flex gap-2 rounded-xl bg-warning-soft px-3.5 py-2.5 text-[12.5px] leading-relaxed text-warning">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>This agent uses Wren credits, which are turned off for now. Choose another brain above; until then its tasks can’t start.</span>
+        </div>
+      )}
+      {source && !creditsOff && sourceInfo(source) && (
         <div className="flex gap-2 rounded-xl bg-bg-subtle px-3.5 py-2.5 text-[12.5px] leading-relaxed text-muted">
           <Info className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
@@ -334,7 +342,7 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
           </span>
         </div>
       )}
-      {source && (
+      {source && !creditsOff && (
         <div className="grid gap-3 sm:grid-cols-[1fr_160px]">
           <div>
             <Label htmlFor="agent-model">Model</Label>

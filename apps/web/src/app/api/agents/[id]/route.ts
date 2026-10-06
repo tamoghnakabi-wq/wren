@@ -2,6 +2,7 @@ import { requireUser } from '@/lib/auth';
 import { db, type Json } from '@/lib/db';
 import { body, json, notFound, route, uuid } from '@/lib/http';
 import { AgentSchema, normaliseAgent } from '@/lib/agents';
+import { assertPlatformAllowed } from '@/lib/platform-credits';
 import { SandboxHost } from '@/lib/runner/sandbox-host';
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -13,6 +14,8 @@ export const PATCH = route<Ctx>(async (req, ctx) => {
   const sql = db();
   const [cur] = await sql`select * from public.agents where id = ${id} and user_id = ${user.id}`;
   if (!cur) notFound('Agent not found.');
+  // Switching an agent to Wren credits needs them on; an agent already on them can still be edited (its runs are refused).
+  if (b.model?.source === 'platform' && (cur.model as { source?: string } | null)?.source !== 'platform') assertPlatformAllowed(user);
   const tools = b.tools ? { ...(cur.tools as object), ...b.tools } : cur.tools;
   const [a] = await sql`
     update public.agents set

@@ -6,10 +6,10 @@ import { readArtifactBytes } from '@/lib/blob';
 import { db, type Json } from '@/lib/db';
 import { body, json, route, uuid } from '@/lib/http';
 import { callMcp, mcpNamespace, mcpToolSpecs, type McpToolInfo } from '@/lib/mcp';
-import { canUsePlatform, connectionSecret } from '@/lib/models';
+import { connectionSecret } from '@/lib/models';
+import { assertPlatformAllowed, operatorGatewayToken } from '@/lib/platform-credits';
 import { decideApproval, finishRun } from '@/lib/runs';
 import { DbRunStore } from '@/lib/runner/store';
-import { getVercelOidcToken } from '@vercel/oidc';
 
 // Everything a desktop device needs to execute a run it owns. The device runs
 // the agent loop locally; this API is its persistence, approvals, notification
@@ -209,8 +209,8 @@ async function modelProxy(req: Request, run: Record<string, unknown>): Promise<R
   let credential: string | (() => Promise<string>);
   if (b.source === 'platform') {
     const [p] = await db()`select email from public.profiles where id = ${userId}`;
-    if (!canUsePlatform({ email: p?.email ?? '' })) throw new HttpError(403, 'Wren credits are not enabled for this account.', 'platform_denied');
-    credential = () => getVercelOidcToken();
+    assertPlatformAllowed({ email: p?.email ?? '' });
+    credential = operatorGatewayToken;
   } else {
     const key = await connectionSecret(userId, b.source, b.connectionId);
     if (!key) throw new HttpError(400, `Connect your ${b.source} API key in Connections first.`, 'no_credentials');

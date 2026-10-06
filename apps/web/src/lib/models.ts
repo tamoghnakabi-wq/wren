@@ -1,4 +1,3 @@
-import { getVercelOidcToken } from '@vercel/oidc';
 import {
   createModelClient,
   DESKTOP_ONLY_SOURCES,
@@ -15,6 +14,10 @@ import { db } from './db';
 import { decryptSecret } from './crypto';
 import { env } from './env';
 import { HttpError, type AuthUser } from './auth';
+import { assertPlatformAllowed, operatorGatewayToken } from './platform-credits';
+
+// Wren credits are switched in one place (platform-credits.ts); re-exported for existing callers.
+export { canUsePlatform } from './platform-credits';
 
 export interface ModelAccess {
   client: ModelClient;
@@ -51,10 +54,6 @@ export async function connectionSecret(userId: string, provider: string, connect
   return { id: rows[0].id, secret: decryptSecret(rows[0].ciphertext, userId) };
 }
 
-export function canUsePlatform(user: Pick<AuthUser, 'email'>) {
-  return env.platformModelUsers.includes(user.email.toLowerCase());
-}
-
 /** Model access for a run executing in our cloud (Vercel Functions). */
 export async function resolveCloudModel(
   user: Pick<AuthUser, 'id' | 'email'>,
@@ -88,8 +87,8 @@ export async function resolveCloudModel(
     return { client: createModelClient({ source: ref.source, credential: key.secret, loadImage }), source, model: ref.model, webSearch: source !== 'gateway' };
   }
   if (source === 'platform') {
-    if (!canUsePlatform(user)) throw new HttpError(403, 'Wren credits are not enabled for this account. Connect your own provider in Connections.', 'platform_denied');
-    return { client: createModelClient({ source: 'platform', credential: () => getVercelOidcToken(), loadImage }), source, model: ref.model, webSearch: false };
+    assertPlatformAllowed(user);
+    return { client: createModelClient({ source: 'platform', credential: operatorGatewayToken, loadImage }), source, model: ref.model, webSearch: false };
   }
   throw new HttpError(400, `Unknown model source "${source}".`, 'invalid');
 }

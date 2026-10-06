@@ -28,7 +28,7 @@ function greeting() {
 }
 
 function Home() {
-  const { agents, agentsLoading, approvals, active, profile, userId, devices } = useApp();
+  const { agents, agentsLoading, approvals, active, profile, userId, devices, flags } = useApp();
   const router = useRouter();
   const params = useSearchParams();
   const [picked, setAgent] = useState<Agent | undefined>();
@@ -45,7 +45,7 @@ function Home() {
 
   const name = profile?.display_name?.split(' ')[0];
   const waitingNoApproval = active.filter((s) => s.status === 'waiting' && !approvals.some((a) => a.session_id === s.id));
-  const hasModel = connections.rows.some((c) => c.kind === 'model') || devices.length > 0 || agents.some((a) => ['platform', 'test'].includes(a.model?.source as string));
+  const hasModel = connections.rows.some((c) => c.kind === 'model') || devices.length > 0 || agents.some((a) => (a.model?.source as string) === 'test' || (a.model?.source === 'platform' && flags.platform));
 
   if (agentsLoading) return <HomeSkeleton />;
 

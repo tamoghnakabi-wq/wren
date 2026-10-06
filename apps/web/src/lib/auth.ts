@@ -130,6 +130,3 @@ export async function requireDevice(request: Request): Promise<AuthDevice> {
   return { id: d.id, userId: d.user_id, name: d.name, platform: d.platform };
 }
 
-export function canUsePlatformModels(user: AuthUser): boolean {
-  return env.platformModelUsers.includes(user.email.toLowerCase());
-}

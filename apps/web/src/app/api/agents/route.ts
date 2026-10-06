@@ -3,10 +3,12 @@ import { requireUser } from '@/lib/auth';
 import { db, type Json } from '@/lib/db';
 import { body, json, route } from '@/lib/http';
 import { AgentSchema, normaliseAgent } from '@/lib/agents';
+import { assertPlatformAllowed } from '@/lib/platform-credits';
 
 export const POST = route(async (req) => {
   const user = await requireUser(req);
   const b = normaliseAgent(await body(req, AgentSchema.extend({ name: z.string().trim().min(1).max(60) })));
+  if (b.model?.source === 'platform') assertPlatformAllowed(user);
   const sql = db();
   const [count] = await sql`select count(*)::int as n from public.agents where user_id = ${user.id} and archived_at is null`;
   if (count.n >= 30) return json({ error: 'You can have up to 30 agents.' }, 400);

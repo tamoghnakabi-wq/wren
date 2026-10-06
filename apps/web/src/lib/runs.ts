@@ -3,6 +3,7 @@ import type { TransactionSql } from 'postgres';
 import { db, type Json } from './db';
 import { env, selfUrl } from './env';
 import { HttpError } from './auth';
+import { assertPlatformAllowed } from './platform-credits';
 import { notifyUser, nudgeDevice } from './notify';
 import { SandboxHost } from './runner/sandbox-host';
 
@@ -46,6 +47,11 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
 
   const modelRef = agent.model as ModelRef;
   if (!modelRef?.source || !modelRef?.model) throw new HttpError(400, 'Choose a model for this agent first.', 'no_model');
+  // Refused before a run exists, so a task (or schedule) on Wren credits never queues while they're off.
+  if (modelRef.source === 'platform') {
+    const [owner] = await sql`select email from public.profiles where id = ${i.userId}`;
+    assertPlatformAllowed({ email: owner?.email ?? '' });
+  }
   let runtime: Runtime = i.runtime ?? agent.runtime;
   if (DESKTOP_ONLY_SOURCES.includes(modelRef.source) && modelRef.source !== 'chatgpt') runtime = 'desktop';
   let deviceId: string | null = null;

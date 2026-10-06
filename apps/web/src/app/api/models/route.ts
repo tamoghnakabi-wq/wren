@@ -1,9 +1,9 @@
-import { getVercelOidcToken } from '@vercel/oidc';
 import { listModels, type ModelSource } from '@wren/core';
 import { HttpError, requireUser } from '@/lib/auth';
 import { env } from '@/lib/env';
 import { json, route } from '@/lib/http';
-import { canUsePlatform, connectionSecret } from '@/lib/models';
+import { connectionSecret } from '@/lib/models';
+import { assertPlatformAllowed, operatorGatewayToken } from '@/lib/platform-credits';
 
 // Models available to one of the user's server-side model sources.
 export const GET = route(async (req) => {
@@ -15,8 +15,8 @@ export const GET = route(async (req) => {
     return json({ models: [{ id: 'scripted', name: 'Scripted test model' }] });
   }
   if (source === 'platform') {
-    if (!canUsePlatform(user)) throw new HttpError(403, 'Wren credits are not enabled for this account.', 'platform_denied');
-    const models = await listModels('platform', await getVercelOidcToken());
+    assertPlatformAllowed(user);
+    const models = await listModels('platform', await operatorGatewayToken());
     return json({ models: models.filter((m) => /^(openai|anthropic|xai|spacexai|google)\//.test(m.id)) });
   }
   if (!['openai', 'anthropic', 'xai', 'gateway'].includes(source)) throw new HttpError(400, 'Unknown source', 'invalid');
