@@ -200,7 +200,8 @@ export default function SessionPage() {
   );
 
   return (
-    <div className="flex h-dvh flex-col">
+    // Exactly the window, never more: the page itself must not scroll (only the panes inside do).
+    <div className="relative flex h-dvh flex-col overflow-hidden">
       <header className="flex items-center gap-2 border-b border-border bg-bg/90 px-3 py-2.5 backdrop-blur-md sm:px-5" style={{ paddingTop: 'max(env(safe-area-inset-top), 10px)' }}>
         <button onClick={() => (history.length > 1 ? router.back() : router.push('/app'))} className="rounded-lg p-1.5 text-muted hover:bg-bg-subtle" aria-label="Back">
           <ArrowLeft className="h-5 w-5" />
@@ -300,7 +301,10 @@ export default function SessionPage() {
               const el = e.currentTarget;
               stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
             }}
-            className="flex-1 overflow-y-auto px-3 py-6 scrollbar-thin sm:px-6"
+            // relative: absolutely positioned bits inside (sr-only labels) stay in this pane instead of
+            // stretching the page below the window; overscroll-contain: scrolling past the end of the
+            // chat doesn't carry on to the page.
+            className="relative flex-1 overflow-y-auto overscroll-contain px-3 py-6 scrollbar-thin sm:px-6"
           >
             <div className="mx-auto max-w-3xl lg:details-off:max-w-4xl">
               {hasOlder && (
@@ -336,7 +340,7 @@ export default function SessionPage() {
             </div>
           </div>
         </div>
-        <aside id="task-details" aria-label="Task details" className={cx('w-full shrink-0 overflow-y-auto border-l border-border p-4 scrollbar-thin lg:block lg:w-[360px] xl:w-[400px] details-off:lg:hidden', panel === 'activity' ? 'hidden' : 'block')}>
+        <aside id="task-details" aria-label="Task details" className={cx('relative w-full shrink-0 overflow-y-auto overscroll-contain border-l border-border p-4 scrollbar-thin lg:block lg:w-[360px] xl:w-[400px] details-off:lg:hidden', panel === 'activity' ? 'hidden' : 'block')}>
           {panel === 'files' ? (
             shareable.length ? (
               sidePanel
@@ -356,7 +360,7 @@ export default function SessionPage() {
 
 function SessionSkeleton() {
   return (
-    <div className="flex h-dvh flex-col" aria-busy="true">
+    <div className="relative flex h-dvh flex-col overflow-hidden" aria-busy="true">
       <div className="flex items-center gap-3 border-b border-border px-3 py-3 sm:px-5">
         <Skeleton className="h-7 w-7 rounded-lg" />
         <Skeleton className="h-9 w-9 rounded-full" />
