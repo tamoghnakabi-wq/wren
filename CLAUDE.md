@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-06: production runs `d6b695b` (re-audit #6, W-86…W-98) with migration `wren_0012_mfa_hardening`; desktop **0.1.11** is released. The fixes for Codex re-audit #7 (W-99…W-107) are committed on `main` but **not yet pushed**: pushing `main` (web) and releasing desktop **0.1.12** are still to do (no migration this round). The seven Codex security audits (W-1…W-107) are otherwise all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-06: `main` is in sync with `origin/main`; the last code commit is `42f985f` (fixes for Codex re-audit #7, W-99…W-107), live in production (latest migration `wren_0012_mfa_hardening`; none this round). The desktop app is at **0.1.12**. The seven Codex security audits (W-1…W-107) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -249,7 +249,7 @@ How each part works:
 | Re-audit #4 (of 0.1.7) | W-63…W-73 | `06a8109`, 0.1.8 | See below; no migration |
 | Re-audit #5 (of 0.1.9) | W-74…W-85 | `e8caf04`, 0.1.10 | See below; migration 0008 (`wren_0010_agent_computers`) |
 | Re-audit #6 (of 0.1.10 + MFA) | W-86…W-98 | `d6b695b`, 0.1.11 | See below; migration 0010 (`wren_0012_mfa_hardening`) |
-| Re-audit #7 (of 0.1.11) | W-99…W-107 | 0.1.12 | See below; no migration |
+| Re-audit #7 (of 0.1.11) | W-99…W-107 | `42f985f`, 0.1.12 | See below; no migration |
 
 Round 7 in brief:
 - **W-99** `man -P`, `sort --compress-program` (and abbreviations) and similar options aren't read-only; neither is `--version` of toolchains behind version managers (rustup ran an agent-written cargo).
