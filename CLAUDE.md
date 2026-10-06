@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-07: production runs `42f985f` + `1d6e110` (re-audit #7, landing animation); desktop **0.1.12** is released. The fixes for Codex re-audit #8 (W-108…W-113) are committed on `main` but **not yet pushed**: production migration `wren_0013_mfa_send_state` (repo 0011), then pushing `main`, then desktop **0.1.13** are still to do. The eight Codex security audits (W-1…W-113) are otherwise all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-07: `main` is in sync with `origin/main`; the last code commit is `853a342` (fixes for Codex re-audit #8, W-108…W-113), live in production with migration `wren_0013_mfa_send_state`. The desktop app is at **0.1.13**. The eight Codex security audits (W-1…W-113) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -251,7 +251,7 @@ How each part works:
 | Re-audit #5 (of 0.1.9) | W-74…W-85 | `e8caf04`, 0.1.10 | See below; migration 0008 (`wren_0010_agent_computers`) |
 | Re-audit #6 (of 0.1.10 + MFA) | W-86…W-98 | `d6b695b`, 0.1.11 | See below; migration 0010 (`wren_0012_mfa_hardening`) |
 | Re-audit #7 (of 0.1.11) | W-99…W-107 | `42f985f`, 0.1.12 | See below; no migration |
-| Re-audit #8 (of 0.1.12) | W-108…W-113 | 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
+| Re-audit #8 (of 0.1.12) | W-108…W-113 | `853a342`, 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
 
 Round 8 in brief:
 - **W-108** agent commands get an allowlisted environment, never Wren's own (tokens, BASH_ENV, pagers); engines keep only their own sign-in and network variables, and Claude Code's commands are stripped to the allowlist by `wren-shell.sh`.
