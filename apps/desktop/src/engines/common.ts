@@ -11,7 +11,7 @@ import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
 import { engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
-import { toolEnv } from '../main/shellenv';
+import { agentEnv, SHELL_PREFIX, toolEnv } from '../main/shellenv';
 import { currentProgramTrust } from '../main/trust';
 
 // Shared plumbing for external agent engines (Claude Code, Grok Build): they
@@ -49,13 +49,25 @@ export function findCli(name: 'claude' | 'grok'): string | null {
   return p && existsSync(p) ? p : null;
 }
 
-/** Environment for engine processes: the user's own login, never our session state. */
-export function engineEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (/^(CLAUDECODE|CLAUDE_CODE_|ELECTRON_|WREN_)/.test(k) || k === 'ANTHROPIC_BASE_URL') delete env[k];
-  }
-  env.PATH = [join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', env.PATH ?? ''].join(process.platform === 'win32' ? ';' : ':');
+/**
+ * What each engine CLI may take from Wren's environment beyond the agent allowlist (agentEnv): its
+ * own sign-in and provider settings, and how to reach the network. Never Wren's session state, and
+ * nothing else Wren was started with (tokens for other services, startup hooks, W-108).
+ */
+const ENGINE_VARS: Record<Engine, RegExp> = {
+  'claude-code': /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_VERTEX_PROJECT_ID|ANTHROPIC_MODEL|CLAUDE_CONFIG_DIR|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|AWS_[A-Z_]+|CLOUD_ML_REGION|GOOGLE_APPLICATION_CREDENTIALS)$/,
+  'grok-build': /^(GROK_[A-Z_]+|XAI_[A-Z_]+)$/,
+};
+const NETWORK_VARS = /^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|ALL_PROXY|all_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|XDG_STATE_HOME)$/;
+
+/** Environment for an engine process: the user's own login for that CLI, never our session state. */
+export function engineEnv(engine: Engine): NodeJS.ProcessEnv {
+  const env = agentEnv(process.env, {});
+  delete env.WREN_AGENT;
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && (ENGINE_VARS[engine].test(k) || NETWORK_VARS.test(k))) env[k] = v;
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const pathKey = Object.keys(env).find((k) => /^path$/i.test(k)) ?? 'PATH';
+  env[pathKey] = [join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', env[pathKey] ?? ''].join(sep);
   return env;
 }
 
@@ -66,7 +78,7 @@ export function engineEnv(): NodeJS.ProcessEnv {
  * `helper` is this app's script the CLI starts for approvals (it must stay readable).
  */
 export async function spawnEngine(engine: Engine, cli: string, args: string[], run: EngineRun, helper: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<ChildProcessWithoutNullStreams> {
-  const env = { ...engineEnv(), ...extraEnv };
+  const env = { ...engineEnv(engine), ...extraEnv };
   if (!hasSeatbelt()) return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
   Object.assign(env, await toolEnv());
   const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), appPaths(helper));
@@ -106,18 +118,6 @@ function appPaths(helper: string): string[] {
   return [appBundle, dirname(helper)];
 }
 
-// Claude Code's documented CLAUDE_CODE_SHELL_PREFIX runs `<prefix> "<command>"` for every shell
-// command (and MCP server) it starts. Wren's prefix runs that command inside the shell sandbox.
-// It lives in Wren's data folder, which sandboxed commands can neither read nor change.
-const SHELL_PREFIX = `#!/bin/sh
-# Written by Wren: runs one command from Claude Code inside Wren's sandbox.
-p="$WREN_SHELL_SB"
-unset WREN_SHELL_SB
-[ -n "$p" ] || { echo "Wren: sandbox profile missing, so the command was not run." >&2; exit 126; }
-case "$SHELL" in /bin/zsh|/bin/bash) sh="$SHELL" ;; *) sh=/bin/zsh ;; esac
-exec /usr/bin/sandbox-exec -p "$p" "$sh" -c "$1"
-`;
-
 function shellPrefix(): string {
   const dir = join(dataDir(), 'bin');
   const file = join(dir, 'wren-shell.sh');
@@ -137,7 +137,7 @@ let restrictedSupport: { cli: string; ok: boolean } | null = null;
 /** Claude Code's --restricted mode (2.1.2xx+): no settings files, file tools confined to the working folders. */
 export function claudeSupportsRestricted(cli: string): boolean {
   if (restrictedSupport?.cli !== cli) {
-    const help = spawnSync(cli, ['--help'], { encoding: 'utf8', env: engineEnv(), timeout: 20_000 });
+    const help = spawnSync(cli, ['--help'], { encoding: 'utf8', env: engineEnv('claude-code'), timeout: 20_000 });
     restrictedSupport = { cli, ok: /--restricted\b/.test(`${help.stdout}${help.stderr}`) };
   }
   return restrictedSupport.ok;
@@ -150,7 +150,7 @@ export function claudeSupportsRestricted(cli: string): boolean {
  * the allowed folders and toolchains only, never the Keychain or Claude's own settings.
  */
 export async function spawnClaude(cli: string, args: string[], run: EngineRun, helper: string): Promise<ChildProcessWithoutNullStreams> {
-  const env: NodeJS.ProcessEnv = { ...engineEnv() };
+  const env: NodeJS.ProcessEnv = { ...engineEnv('claude-code') };
   if (hasSeatbelt()) {
     Object.assign(env, await toolEnv(), {
       SHELL: /^\/bin\/(zsh|bash)$/.test(process.env.SHELL ?? '') ? process.env.SHELL : '/bin/zsh',

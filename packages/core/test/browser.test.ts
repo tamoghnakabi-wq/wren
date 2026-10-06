@@ -372,6 +372,45 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
+  it('W-110/W-112: a credential\'s name, id or multi-line label is enough, and Enter\'s aliases are confirmed', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const page = context.pages()[0];
+      await page.setContent(`
+        <input id=otp name=otp aria-label="Verification"><input id=tok name=api_token placeholder="Paste here">
+        <label for=sc>Security<br>code</label><input id=sc>
+        <svg width=10 height=10><text id=svgl>Card number</text></svg><input id=sv aria-labelledby=svgl>
+        <input id=fine name=shipping_name aria-label="Name"><textarea id=ta aria-label="Notes"></textarea>`);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const typeInto = async (sel: string, text: string) => {
+        const r = (await page.locator(sel).getAttribute('data-wren-ref'))!;
+        const t = (await ctl.act({ action: 'describe', ref: r, tab: 'T' })).target!;
+        return ctl.act({ action: 'type', ref: r, text, tab: 'T', expect: t });
+      };
+      for (const sel of ['#otp', '#tok', '#sc', '#sv']) {
+        const r = await typeInto(sel, '123456');
+        expect(r.ok, sel).toBe(false);
+        expect(r.error, sel).toMatch(/credentials/);
+        expect(await page.locator(sel).inputValue(), sel).toBe('');
+      }
+      expect((await typeInto('#fine', 'Ada')).ok).toBe(true);
+      expect(await page.locator('#fine').inputValue()).toBe('Ada');
+      for (const key of ['\n', '\r']) {
+        await page.focus('#ta');
+        const t = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+        const r = await ctl.act({ action: 'press', key, tab: 'T', expect: t });
+        expect(r.ok, `${JSON.stringify(key)}: ${r.error}`).toBe(true);
+      }
+      expect(await page.locator('#ta').inputValue()).toBe('\n\n');
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
   it('W-80: closing a task closes its popups too, and says so when it can\'t', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });

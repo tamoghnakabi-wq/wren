@@ -1,6 +1,6 @@
 'use client';
 
-import { api } from './api';
+import { api, type ApiError } from './api';
 import { supabase } from './supabase';
 
 // Browser side of two-step sign-in. Authenticator apps and recovery codes go straight to Supabase
@@ -81,7 +81,17 @@ export interface CodeSent {
   wait: number;
 }
 
-export const sendEmailCode = (purpose: CodePurpose) => api<CodeSent>('/api/mfa/email/send', { body: { purpose } });
+/** Ask for a code. If this session's code is still on its way (a second click), wait for it. */
+export async function sendEmailCode(purpose: CodePurpose): Promise<CodeSent> {
+  for (let i = 0; ; i++) {
+    try {
+      return await api<CodeSent>('/api/mfa/email/send', { body: { purpose } });
+    } catch (e) {
+      if ((e as ApiError).code !== 'code_sending' || i >= 20) throw e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
 /** Check a code for the request it was sent for. */
 export const verifyEmailCode = (code: string, challengeId: string, purpose: CodePurpose) =>
   api<{ ok: true; purpose: CodePurpose }>('/api/mfa/email/verify', { body: { code, challengeId, purpose } });

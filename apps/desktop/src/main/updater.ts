@@ -201,7 +201,25 @@ export class Updater {
    */
   installerState(marker = pendingPath()): InstallerState {
     const p = readPending(marker);
-    if (!p || !Number.isInteger(p.pid) || !p.installer || !p.at || Date.now() - p.at > INSTALL_MAX_MS) return 'gone';
+    if (!p || !p.installer || !p.at || Date.now() - p.at > INSTALL_MAX_MS) return 'gone';
+    const installer = p.installer;
+    const win = process.platform === 'win32';
+    // No pid recorded (writing it failed after the installer started, W-109): look for the
+    // installer among all processes by its program (Windows) or script path (macOS).
+    if (p.pid === undefined) {
+      let all: string[];
+      try {
+        all = (
+          win
+            ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_Process).ExecutablePath'], { encoding: 'utf8', timeout: 15000, windowsHide: true })
+            : execFileSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024 })
+        ).split(/\r?\n/);
+      } catch {
+        return 'unknown';
+      }
+      return all.some((c) => (win ? c.trim().toLowerCase() === installer.toLowerCase() : c.includes(installer))) ? 'running' : 'gone';
+    }
+    if (!Number.isInteger(p.pid)) return 'gone';
     const alive = () => {
       try {
         process.kill(p.pid!, 0);
@@ -213,19 +231,18 @@ export class Updater {
     if (!alive()) return 'gone';
     let seen = '';
     try {
-      seen =
-        process.platform === 'win32'
-          ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${p.pid}").ExecutablePath`], {
-              encoding: 'utf8',
-              timeout: 15000,
-              windowsHide: true,
-            }).trim()
-          : execFileSync('/bin/ps', ['-o', 'command=', '-p', String(p.pid)], { encoding: 'utf8', timeout: 5000 }).trim();
+      seen = win
+        ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${p.pid}").ExecutablePath`], {
+            encoding: 'utf8',
+            timeout: 15000,
+            windowsHide: true,
+          }).trim()
+        : execFileSync('/bin/ps', ['-o', 'command=', '-p', String(p.pid)], { encoding: 'utf8', timeout: 5000 }).trim();
     } catch {
       /* couldn't ask */
     }
     if (!seen) return alive() ? 'unknown' : 'gone';
-    const same = process.platform === 'win32' ? seen.toLowerCase() === p.installer.toLowerCase() : seen.includes(p.installer);
+    const same = win ? seen.toLowerCase() === installer.toLowerCase() : seen.includes(installer);
     return same ? 'running' : 'gone';
   }
 
@@ -492,17 +509,20 @@ rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
       args = [script, String(process.pid), copy, join(priv, 'staging'), bundle, this.state.sha256!, join(dataDir(), 'update-failed.txt')];
     }
     rmSync(join(dataDir(), 'update-failed.txt'), { force: true });
-    writeFileSync(pending, JSON.stringify({ version: this.state.version }));
+    // Which installer and when, before it starts: enough to recognise it even if its pid can't be
+    // added below (W-109).
+    const installer = process.platform === 'win32' ? cmd : args[0];
+    writePending({ version: this.state.version ?? '', installer, at: Date.now() }, pending);
     const started = await new Promise<Error | null>((done) => {
       const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
       child.once('error', done);
       child.once('spawn', () => {
         child.unref();
         // Which process is installing, so a Wren opened again meanwhile keeps out of its way. The
-        // installer already runs, so a failed write can't stop the hand-off (the version-only
-        // marker written above stays) (W-105).
+        // installer already runs, so a failed write can't stop the hand-off; the marker written
+        // above still names the installer (W-105, W-109).
         try {
-          writePending({ version: this.state.version ?? '', pid: child.pid, installer: process.platform === 'win32' ? cmd : args[0], at: Date.now() }, pending);
+          writePending({ version: this.state.version ?? '', pid: child.pid, installer, at: Date.now() }, pending);
         } catch {
           /* best effort */
         }

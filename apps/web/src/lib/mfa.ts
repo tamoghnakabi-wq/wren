@@ -48,7 +48,7 @@ export async function mfaStatusFor(u: AuthUser): Promise<MfaStatusFor> {
   return { ...mfaStatus(facts, { aal: u.aal, amr: u.amr }), facts };
 }
 
-/** Calls to Supabase Auth give up after this long (a send holds the account's send lock meanwhile). */
+/** Calls to Supabase Auth give up after this long (well under the one-minute gap between sends). */
 const AUTH_TIMEOUT_MS = 15000;
 
 /** A fresh Supabase Auth client that keeps nothing: each code check signs in on its own. */
@@ -78,39 +78,50 @@ export async function sendEmailCode(u: AuthUser, purpose: CodePurpose): Promise<
   const allowed =
     purpose === 'sign_in' ? s.method === 'email' && !s.satisfied : purpose === 'step_up' ? s.method !== 'totp' && s.satisfied : !s.facts.email && s.facts.factors === 0 && s.satisfied;
   if (!allowed) throw new HttpError(409, purpose === 'step_up' && s.method === 'totp' ? 'Use your authenticator app to confirm.' : 'An email code isn’t needed for this.', 'not_needed');
-  // One send at a time per account, from the rate checks through Supabase's answer (W-101): the
-  // order of requests is the order Supabase made their codes in, and a request only becomes visible
-  // (to verify, or to hand out again) once Supabase has sent its code (W-100).
-  const r = await db().begin(async (tx): Promise<{ challengeId?: string; sent?: boolean; wait: number; failed?: boolean }> => {
+  // A send reserves its request under the account's lock (not usable yet), calls Supabase without
+  // holding a database connection (W-111), then marks the request delivered. Only delivered requests
+  // can be verified or handed out again (W-100). The one-minute gap between reservations, longer
+  // than the 15 s limit on Supabase calls, keeps request order and code order the same (W-101).
+  const sql = db();
+  const r = await sql.begin(async (tx): Promise<{ challengeId?: string; reserved?: string; sending?: boolean; wait: number }> => {
     await tx`select pg_advisory_xact_lock(hashtext(${`mfa-email:${u.id}`}))`;
-    const [last] = await tx`select id, session_id, purpose, email, used_at, superseded_at, extract(epoch from now() - sent_at)::float as ago
+    const [last] = await tx`select id, session_id, purpose, email, used_at, superseded_at, delivered_at, extract(epoch from now() - sent_at)::float as ago
       from public.mfa_email_requests where user_id = ${u.id} order by sent_at desc limit 1`;
     if (last && last.ago < RESEND_SECONDS) {
       const wait = Math.ceil(RESEND_SECONDS - last.ago);
-      // This session's code for the same thing went out moments ago (a reload, a second click): use that one.
-      if (last.session_id === u.sessionId && last.purpose === purpose && last.email === email && !last.used_at && !last.superseded_at) return { challengeId: last.id as string, sent: false, wait };
+      const mine = last.session_id === u.sessionId && last.purpose === purpose && last.email === email && !last.used_at && !last.superseded_at;
+      // This session's code for the same thing went out moments ago (a reload, a second click): use
+      // that one, or wait for it if it's still being sent.
+      if (mine && last.delivered_at) return { challengeId: last.id as string, wait };
+      if (mine) return { sending: true, wait };
       return { wait };
     }
     const [{ n }] = await tx`select count(*)::int as n from public.mfa_email_requests where user_id = ${u.id} and sent_at > now() - interval '1 hour'`;
     if (n >= MAX_SENDS_PER_HOUR) return { wait: -1 };
-    const [row] = await tx`insert into public.mfa_email_requests (user_id, session_id, purpose, email) values (${u.id}, ${u.sessionId!}, ${purpose}, ${email}) returning id`;
-    const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
-    if (error) {
-      // Nothing was sent: this request can't be finished (an earlier code, if any, still can). It
-      // still counts against the limits.
-      await tx`update public.mfa_email_requests set superseded_at = now() where id = ${row.id}`;
-      return { wait: RESEND_SECONDS, failed: true };
-    }
-    // Supabase keeps only the newest code for an account: older requests can't be finished any more.
-    await tx`update public.mfa_email_requests set superseded_at = now() where user_id = ${u.id} and id <> ${row.id} and used_at is null and superseded_at is null`;
-    return { challengeId: row.id as string, sent: true, wait: RESEND_SECONDS };
+    const [row] = await tx`insert into public.mfa_email_requests (user_id, session_id, purpose, email, delivered_at) values (${u.id}, ${u.sessionId!}, ${purpose}, ${email}, null) returning id`;
+    return { reserved: row.id as string, wait: RESEND_SECONDS };
   });
-  if (r.failed) throw new HttpError(502, 'The code couldn’t be sent. Try again in a minute.', 'email_failed');
-  if (!r.challengeId) {
+  if (r.sending) throw new HttpError(429, 'A code is on its way. One moment.', 'code_sending');
+  if (r.challengeId) return { challengeId: r.challengeId, sent: false, wait: r.wait };
+  if (!r.reserved) {
     if (r.wait < 0) throw new HttpError(429, 'Too many codes were sent in the last hour. Try again later.', 'code_limit');
     throw new HttpError(429, `A code was just sent. You can ask for another in ${r.wait} seconds.`, 'code_cooldown');
   }
-  return { challengeId: r.challengeId, sent: !!r.sent, wait: r.wait };
+  const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+  if (error) {
+    // Nothing was sent: this request can't be finished (an earlier code, if any, still can). It
+    // still counts against the limits.
+    await sql`update public.mfa_email_requests set superseded_at = now() where id = ${r.reserved}`;
+    throw new HttpError(502, 'The code couldn’t be sent. Try again in a minute.', 'email_failed');
+  }
+  await sql.begin(async (tx) => {
+    await tx`update public.mfa_email_requests set delivered_at = now() where id = ${r.reserved!}`;
+    // Supabase keeps only the newest code for an account: older requests can't be finished any more.
+    await tx`update public.mfa_email_requests set superseded_at = now()
+      where user_id = ${u.id} and id <> ${r.reserved!} and used_at is null and superseded_at is null
+        and sent_at < (select sent_at from public.mfa_email_requests where id = ${r.reserved!})`;
+  });
+  return { challengeId: r.reserved, sent: true, wait: RESEND_SECONDS };
 }
 
 /** Check a code with Supabase; on success record this session as verified by email. */
@@ -121,9 +132,9 @@ export async function verifyEmailCode(u: AuthUser, rawCode: string, challengeId:
   const sql = db();
   // Count the attempt before checking it, under a row lock: parallel guesses share the cap.
   const req = await sql.begin(async (tx) => {
-    const [r] = await tx`select id, purpose, email, attempts, used_at, superseded_at, sent_at > now() - make_interval(mins => ${CODE_WINDOW_MINUTES}) as fresh
+    const [r] = await tx`select id, purpose, email, attempts, used_at, superseded_at, delivered_at, sent_at > now() - make_interval(mins => ${CODE_WINDOW_MINUTES}) as fresh
       from public.mfa_email_requests where id = ${challengeId} and user_id = ${u.id} and session_id = ${u.sessionId!} for update`;
-    if (!r || r.used_at || !r.fresh) return { status: 'expired' as const };
+    if (!r || r.used_at || !r.fresh || !r.delivered_at) return { status: 'expired' as const };
     if (r.superseded_at) return { status: 'superseded' as const };
     if (r.purpose !== purpose) return { status: 'purpose' as const };
     if (r.attempts >= MAX_ATTEMPTS) return { status: 'exhausted' as const };
@@ -157,7 +168,7 @@ export async function verifyEmailCode(u: AuthUser, rawCode: string, challengeId:
   const outcome = await sql.begin(async (tx) => {
     const [{ ended }] = await tx`select public.wren_end_otp_session(${u.id}, ${extra.session_id ?? null}) as ended`;
     if (!ended) throw new HttpError(502, 'The code couldn’t be checked. Ask for a new one.', 'code_failed');
-    const [open] = await tx`select id from public.mfa_email_requests where id = ${req.id} and used_at is null and superseded_at is null for update`;
+    const [open] = await tx`select id from public.mfa_email_requests where id = ${req.id} and used_at is null and superseded_at is null and delivered_at is not null for update`;
     if (!open) return 'superseded' as const;
     const [now] = await tx`select * from public.wren_mfa_state(${u.id}, ${u.sessionId!})`;
     if (!now?.session_alive) return 'session' as const;

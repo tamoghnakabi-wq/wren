@@ -14,7 +14,7 @@ import { tracked } from './proctree';
 import { jobs, kill, release, type Job } from './jobs';
 import { spawnContained } from './winjob';
 import { hasSeatbelt, seatbeltProfile } from './sandbox';
-import { absolutePath, toolEnv } from './shellenv';
+import { agentEnv, toolEnv } from './shellenv';
 import { currentProgramTrust } from './trust';
 
 // Tool host for runs on this computer. Everything is confined to the folders
@@ -166,20 +166,18 @@ export class LocalHost implements ToolHost {
   }
 
   private async spawnShell(command: string, cwd: string): Promise<ChildProcess> {
-    const env = { ...process.env, WREN_AGENT: '1', ELECTRON_RUN_AS_NODE: undefined } as NodeJS.ProcessEnv;
-    for (const k of Object.keys(env)) if (/^(WREN_URL|WREN_DATA_DIR)$/.test(k)) delete env[k];
+    // A minimal environment, never Wren's own (it may hold tokens or startup hooks): see agentEnv().
+    const env = agentEnv(process.env, await toolEnv());
     if (process.platform === 'win32') {
-      // Programs are only looked up in absolute PATH folders, never relative to the project.
-      for (const k of Object.keys(env)) if (/^path$/i.test(k)) env[k] = absolutePath(env[k] ?? '');
       // The command first puts itself in a Job Object, so whatever it starts ends with it (winjob.ts).
       return spawnContained(command, cwd, env);
     }
     if (hasSeatbelt()) {
       // Not a login shell: startup files stay unread (and unreadable); PATH and toolchain
       // variables come from toolEnv() instead.
-      return tracked(spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-c', command], { cwd, env: { ...env, ...(await toolEnv()) }, detached: true }));
+      return tracked(spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-c', command], { cwd, env, detached: true }));
     }
-    return tracked(spawn('/bin/bash', ['-lc', command], { cwd, env, detached: true }));
+    return tracked(spawn('/bin/bash', ['-c', command], { cwd, env, detached: true }));
   }
 
   private async shell(command: string, cwd: string, timeoutSec: number, background: boolean, ctx: ToolContext, resume?: ToolCallData['background']): Promise<ToolResult | { yield: true }> {

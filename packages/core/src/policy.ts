@@ -350,14 +350,24 @@ const SAFE_OUTPUTS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
  * output files given as options or extra positional arguments, in-place edits,
  * and options that run other programs. `args` are the real (unquoted) arguments.
  */
+/**
+ * A long option, spelled out or abbreviated: getopt_long-style parsers (sort, date, less, file, ag…)
+ * accept any unambiguous prefix (`--co` for --compress-program, `--LOG` for --LOG-FILE). Ambiguous
+ * prefixes count too: refusing them is the safe side (W-113).
+ */
+function longOpt(arg: string, ...names: string[]): boolean {
+  const n = arg.split('=')[0];
+  return n.length > 2 && n.startsWith('--') && names.some((full) => full.startsWith(n));
+}
+
 function readOnlyForm(cmd: string, args: string[]): boolean {
   const positional = args.filter((w) => !w.startsWith('-'));
   switch (cmd) {
     case 'sort':
-      // --compress-program runs a program (any abbreviation: `--co=./x` works too).
-      return !args.some((w) => /^-o|^--output|^-[a-zA-Z]*o|^--co/.test(w));
+      // --output writes; --compress-program runs a program (`--co=./x` works too).
+      return !args.some((w) => /^-[a-zA-Z]*o/.test(w) || longOpt(w, '--output', '--compress-program'));
     case 'tree':
-      return !args.some((w) => /^-o|^--output/.test(w));
+      return !args.some((w) => /^-o/.test(w) || longOpt(w, '--output'));
     case 'man':
       // -P names the pager (run even without a terminal), -C a config naming programs, -M/-H others:
       // only section numbers, page names and a few listing flags.
@@ -365,24 +375,24 @@ function readOnlyForm(cmd: string, args: string[]): boolean {
     case 'less':
     case 'more':
       // +cmd runs less commands (including !shell); -o/-O write a log; -k loads key bindings.
-      return !args.some((w) => w.startsWith('+') || /^-[a-zA-Z]*[oOk]|^--(log-file|LOG-FILE|lesskey)/.test(w));
+      return !args.some((w) => w.startsWith('+') || /^-[a-zA-Z]*[oOk]/.test(w) || longOpt(w, '--log-file', '--LOG-FILE', '--lesskey-file', '--lesskey-src', '--lesskey-content'));
     case 'file':
-      return !args.some((w) => /^-[a-zA-Z]*[zZ]|^--uncompress/.test(w)); // may run decompressors found on PATH
+      return !args.some((w) => /^-[a-zA-Z]*[zZ]/.test(w) || longOpt(w, '--uncompress', '--uncompress-noreport')); // may run decompressors found on PATH
     case 'ag':
-      return !args.some((w) => /^--pager/.test(w));
+      return !args.some((w) => longOpt(w, '--pager'));
     case 'uniq':
       return positional.length <= 1; // uniq IN OUT writes OUT
     case 'xxd':
       return !args.some((w) => /^-r|^-revert/.test(w)) && positional.length <= 1;
     case 'yq':
-      return !args.some((w) => /^-[a-zA-Z]*i|^--inplace/.test(w));
+      return !args.some((w) => /^-[a-zA-Z]*i/.test(w) || longOpt(w, '--inplace'));
     case 'rg':
       // --pre runs a program; -z runs decompressors found on PATH.
-      return !args.some((w) => /^--pre(=|$)|^--search-zip|^-[a-zA-Z]*z/.test(w));
+      return !args.some((w) => /^-[a-zA-Z]*z/.test(w) || longOpt(w, '--pre', '--search-zip'));
     case 'fd':
-      return !args.some((w) => /^-[a-zA-Z]*[xX]|^--exec/.test(w));
+      return !args.some((w) => /^-[a-zA-Z]*[xX]/.test(w) || longOpt(w, '--exec', '--exec-batch'));
     case 'date':
-      return positional.every((w) => w.startsWith('+')) && !args.some((w) => /^-[a-zA-Z]*s|^--set/.test(w));
+      return positional.every((w) => w.startsWith('+')) && !args.some((w) => /^-[a-zA-Z]*s/.test(w) || longOpt(w, '--set'));
     case 'hostname':
       return positional.length === 0;
     case 'find':

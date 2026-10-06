@@ -64,7 +64,7 @@ vi.mock('node:fs', async (orig) => {
       return (real.writeFileSync as (...x: unknown[]) => void)(file, data, ...rest);
     }) as typeof real.writeFileSync,
     renameSync: ((from: string, to: string) => {
-      if (h.markerFails && String(to).endsWith('update-pending.json')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      if (h.markerFails && String(to).endsWith('update-pending.json') && real.readFileSync(from, 'utf8').includes('"pid"')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
       return real.renameSync(from, to);
     }) as typeof real.renameSync,
   };
@@ -289,7 +289,10 @@ describe('Updater install handoff (W-83)', () => {
     await u.install(async () => true, () => resumed++);
     expect(h.quits).toBe(1);
     expect(resumed).toBe(0);
-    expect(JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'))).toEqual({ version: '0.1.9' });
+    // The marker written before the launch still names the installer (W-109), just without its pid.
+    const marker = JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'));
+    expect(marker).toMatchObject({ version: '0.1.9', installer: expect.stringContaining(join(dir, 'install-')) });
+    expect(marker.pid).toBeUndefined();
   });
 
   it('at the next start, says the last install did not happen (and why), and repeats it with the next ready update', async () => {
@@ -363,6 +366,32 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     }
     // Once the process is gone a failing check doesn't matter any more.
     expect(u.installerState()).toBe('gone');
+  });
+
+  it('recognises an installer whose pid was never recorded, by its script (W-109)', async () => {
+    const { spawn: realSpawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    const staging = join(dir, 'install-ghi');
+    mkdirSync(staging, { recursive: true });
+    const script = join(staging, 'install.sh');
+    writeFileSync(script, 'sleep 30\n');
+    writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', installer: script, at: Date.now() }));
+    expect(u.installerState()).toBe('gone'); // not started (yet)
+    const child = realSpawn('/bin/sh', [script], { stdio: 'ignore' });
+    await new Promise((r) => child.once('spawn', r));
+    try {
+      expect(u.installerState()).toBe('running');
+      u.cleanup();
+      expect(existsSync(staging)).toBe(true);
+      h.probeFails = true;
+      expect(u.installerState()).toBe('unknown');
+      h.probeFails = false;
+    } finally {
+      child.kill('SIGKILL');
+      await new Promise((r) => child.once('exit', r));
+    }
+    expect(u.installerState()).toBe('gone');
+    u.cleanup();
+    expect(existsSync(staging)).toBe(false);
   });
 
   it('does not mistake another process (a reused pid) or an old marker for the installer', async () => {

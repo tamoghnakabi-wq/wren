@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-06: `main` is in sync with `origin/main`; the last code commit is `42f985f` (fixes for Codex re-audit #7, W-99…W-107), live in production (latest migration `wren_0012_mfa_hardening`; none this round). The desktop app is at **0.1.12**. The seven Codex security audits (W-1…W-107) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-07: production runs `42f985f` + `1d6e110` (re-audit #7, landing animation); desktop **0.1.12** is released. The fixes for Codex re-audit #8 (W-108…W-113) are committed on `main` but **not yet pushed**: production migration `wren_0013_mfa_send_state` (repo 0011), then pushing `main`, then desktop **0.1.13** are still to do. The eight Codex security audits (W-1…W-113) are otherwise all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -28,7 +28,7 @@ apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.12: Electron 44
+apps/desktop      wren-desktop 0.1.13: Electron 44
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
@@ -42,7 +42,7 @@ apps/desktop      wren-desktop 0.1.12: Electron 44
   src/main/updater.ts signed self-updater; chatgpt.ts Sign in with ChatGPT; config.ts (dataDir, policy, safeStorage)
   src/engines/        claude-code.ts, grok-build.ts, common.ts (spawn, TimelineWriter, approval bridge), grok-hook.ts, mcp-approve.ts
   scripts/            build.mjs (esbuild -> dist-electron), package.mjs (electron-builder), ui-smoke.mjs
-supabase/migrations   0000…0010 (production names: see Deploy and release)
+supabase/migrations   0000…0011 (production names: see Deploy and release)
 releases/vX.Y.Z.md    release notes used by the release workflow
 scripts/              gen-icons.mjs, release-manifest.mjs (signs wren-update.json)
 .github/workflows/desktop.yml   desktop build + release on `v*` tags
@@ -121,7 +121,7 @@ qa/                   empty
   - macOS: a swap script runs after quit. Windows: the per-user NSIS installer runs silently (`/S`).
   - If agents can't be confirmed stopped, nothing is installed and `runner.resume()` is called.
   - The installer launch waits for the child's `spawn` event (W-83); on `error` Wren stays open with the reason and resumes agents. Before quitting it writes `<dataDir>/update-pending.json` (version, then the installer's pid and program/script once it runs); at the next start `cleanup()` reports an update that didn't install (plus `update-failed.txt` from the macOS swap script, which puts the old app back and reopens it on any failure), and that notice is kept on the next ready update.
-  - Wren opened again while that installer may still run starts nothing and exits after a notification, leaving the staging and marker alone (W-96). `installerState()`: `running` (pid alive and its command is that installer, via `ps` or CIM), `unknown` (alive, but the check failed or came back empty; treated as running, W-104), else `gone`; only for a marker < 30 min old. The marker's pid is published with an atomic rename, and a failure there doesn't stop the hand-off (W-105).
+  - Wren opened again while that installer may still run starts nothing and exits after a notification, leaving the staging and marker alone (W-96). `installerState()`: `running` (pid alive and its command is that installer, via `ps` or CIM), `unknown` (alive, but the check failed or came back empty; treated as running, W-104), else `gone`; only for a marker < 30 min old. The marker names the installer (program or script) and the time before the launch; the pid is added after it starts, atomically, and a failure there doesn't stop the hand-off (W-105). A marker without a pid is recognised by searching all processes for that installer (W-109).
 - **Quitting** (W-78): `before-quit` is prevented until `runner.suspend()`, the browser, `stopAllEngines()` and `stopAllJobs()` are done (at most 15 s), then `app.quit()` runs again.
 - `Wren --selftest` prints JSON and exits; CI uses it. `--selftest --update` also downloads the latest published release through the real updater path, and `--selftest --proctree` checks that something a command leaves running is found and stopped (Windows: ends with its Job Object, and is found by parent id without one), and that a running installer is recognised by its process (with its own marker in a temp folder, never the data folder's, W-107). CI runs both on mac and Windows.
 
@@ -169,6 +169,7 @@ The spec says: use official subscription paths only, and never scrape sessions, 
   - it is a bare name or lives in `/bin`, `/usr/bin` or `/sbin`
   - a bare name resolves (per the host's `trustedProgram`, `desktop/src/main/trust.ts`) to a program found on PATH **before** any folder agents can write (`agentWritable()` in sandbox.ts: allowed folders, temp, package caches), following links (W-74). Applied to ratings, engine approvals and crash replay; the cloud passes none. `~/Library/pnpm` itself is no longer writable to agents (only `Library/pnpm/store`), because PNPM_HOME is usually first on PATH.
   - any leading `VAR=` assignments are safe (`LC_*`, `LANG`, `TZ`, `TERM`, colour variables; not `PAGER`/`GIT_PAGER`: `PAGER=./x man ls` runs `./x` even without a terminal)
+  - long options count in any abbreviation (`longOpt`: getopt_long accepts unambiguous prefixes; `sort --o=x` writes x, verified, W-113)
   - options that run a program don't count (W-99; verified on macOS): `man` only with page names, sections and `-a/-f/-k/-w/-W` (`-P` runs a pager even without a terminal; `-C`/`-M`/`-H` name more), `sort` without `--co…` (`--compress-program`, any abbreviation), `less`/`more` without `+cmd`/log/lesskey options, `file` without `-z`, `rg` without `--pre`/`-z`, `ag` without `--pager`.
   - `--version` counts only for `git`, `gh`, `docker`: toolchains often run through version managers that pick the binary from project files (rust-toolchain.toml `path`, .tool-versions `path:`, .yarnrc.yml `yarnPath`); `cargo --version` ran an agent-written cargo through rustup (verified).
   - git: only subcommands that read refs and config (`gitReadOnly`: branch/tag listing, `remote -v`, `rev-parse`, `describe` without `--dirty`, `config --get/--list`), matched as whole words. `status`, `diff`, `log`, `show`, `ls-files`, `blame`, `reflog`… are NOT read-only: the repository's own config (agent-writable) can make them run programs (fsmonitor and post-index-change hooks, clean filters, external diff, textconv, `gpg.program` via `log.showSignature`; all verified, W-88). They rate medium with a reason saying so, and aren't replayed after a crash.
@@ -185,8 +186,8 @@ The spec says: use official subscription paths only, and never scrape sessions, 
   - Everything that decides which node an action reaches runs in a Playwright selector engine registered with `contentScript: true` (`ENGINE` in controller.ts), i.e. Playwright's isolated world (W-75). Page scripts can't see its ids or replace the methods it uses. `page.evaluate` is NOT safe for this: Playwright's main-world helper uses the page's `Array.prototype.slice` and even `window.eval`, so a page can hijack any main-world evaluation (verified). The engine also builds the snapshot and element descriptions. Answers come back as a detached `<wren-data data-wren=JSON>` element read with `getAttribute`.
   - `registerSelectors(selectors)` must be called before the browser is launched (desktop host `controller()`, cloud daemon template).
   - Ids (`el-<uuid>`, same id for the same node via a WeakMap, max 500 per document) live only in the engine. Clicks go to `page.locator('wren=id <id>')`, so Playwright hit-tests in that world. Approved actions must still match label, role, inputType, url, href and `form`.
-  - Typing (W-77, W-92, W-103, W-106) happens inside the engine: refuse a secret field by the host's own credential rule applied to everything the field is called now (`secret`: type, autocomplete, aria-label, aria-labelledby text, `<label>` text, placeholder, title), focus the node, refuse if focus moved (a field that hands focus to a password box) or if the field changed (`fieldState`; a focus handler can make it a password box or retitle it "Password"), select all, check once more, `execCommand('insertText')` into that node. Chrome fires no `beforeinput` for `execCommand` (verified), so no page code runs between that last check and the insertion; a field an `input` handler changes right after gets its old value back (inputs and contenteditable), and the answer says whether that worked (`changed` vs `kept`). Only real input/textarea/contenteditable (labels are refused).
-  - Key presses (W-77, W-91, W-102): `arm <id> <key>` splits the chord like Playwright (`Shift+Enter` = Shift, Enter). Only trusted events count (a page can dispatch keyboard events but can't make them trusted), and each keydown must be the press's next key (`isKey`: key, code, `KeyA`/`Digit1`, `Space`, `ControlOrMeta`). Until the last one (the key itself) reaches the node, focus is put back after any move and every key event aimed elsewhere is stopped and reported; after it, the press's keypress/keyups aimed elsewhere are swallowed (the key's own effect may move focus). `disarm` reports blocked, and pressOn also refuses to claim success when the guard never saw the key arrive.
+  - Typing (W-77, W-92, W-103, W-106, W-110) happens inside the engine: refuse a secret field by the host's own credential rule applied to everything the field is called now (`secret`: type, autocomplete, aria-label, aria-labelledby text, `<label>` text, placeholder, title; whitespace collapsed, SVG text included), or whose autocomplete/name/id marks a credential (`SECRET_NAME`, the same rule that keeps such values out of descriptions), focus the node, refuse if focus moved (a field that hands focus to a password box) or if the field changed (`fieldState`; a focus handler can make it a password box or retitle it "Password"), select all, check once more, `execCommand('insertText')` into that node. Chrome fires no `beforeinput` for `execCommand` (verified), so no page code runs between that last check and the insertion; a field an `input` handler changes right after gets its old value back (inputs and contenteditable), and the answer says whether that worked (`changed` vs `kept`). Only real input/textarea/contenteditable (labels are refused).
+  - Key presses (W-77, W-91, W-102): `arm <id> <key>` splits the chord like Playwright (`Shift+Enter` = Shift, Enter). Only trusted events count (a page can dispatch keyboard events but can't make them trusted), and each keydown must be the press's next key (`isKey`: key, code, `KeyA`/`Digit1`, `Space`, `ControlOrMeta`, and Playwright's Enter aliases `\n`/`\r`, W-112). Until the last one (the key itself) reaches the node, focus is put back after any move and every key event aimed elsewhere is stopped and reported; after it, the press's keypress/keyups aimed elsewhere are swallowed (the key's own effect may move focus). `disarm` reports blocked, and pressOn also refuses to claim success when the guard never saw the key arrive.
   - Each task owns a set of pages: its tab plus every popup opened from them (W-80). `close` closes all of them, keeps the record and returns `ok:false` if any stays open (cloud cleanup then stays pending; desktop closes the whole agent browser).
   - A targeted action that needs approval but has no element ID is refused.
 - **Remote approvals off.** Pending approvals for that computer become `localOnly`, and only the desktop's native prompt (`window.wren.decideApproval`) can decide them.
@@ -203,7 +204,7 @@ How each part works:
 - **Email codes** are Supabase email OTPs: `lib/mfa.ts` calls `signInWithOtp` (code in the Magic Link template) and checks it with a throwaway `verifyOtp`. Wren adds:
   - Codes go to the account's current address from `auth.users` (`wren_mfa_state().user_email`), never the JWT's, which can predate an email change (W-86). `requireUser()` also replaces `u.email` with it.
   - Each send is a request row (`mfa_email_requests`: session, purpose, address). Send returns its `challengeId`; verify needs `{code, challengeId, purpose}` and only finishes that exact request: this session's, that purpose, not used, under 10 minutes, still the account's address, and not superseded (W-90). Supabase keeps only the newest code per account, so a successful send supersedes older requests; a failed send supersedes only itself. Asking again within the minute from the same session and purpose returns the same request (`sent: false`, e.g. after a reload).
-  - Sends are serialized per account from the rate checks through Supabase's answer (one transaction holding the advisory lock; Supabase calls time out after 15 s), so request order is code order, and a request becomes visible only once its code is sent (W-100, W-101). Recording a passed code re-checks everything under the request's row lock (still open, session alive, same address, no authenticator for "enable") after ending the extra session, which stays ended either way.
+  - A send reserves its request under the account's advisory lock (`delivered_at` null: not usable, not handed out), calls Supabase holding no database connection (W-111; Supabase calls time out after 15 s), then marks it delivered and supersedes older requests. Only delivered requests verify (W-100). The same session asking again meanwhile gets `code_sending` (the client waits and asks again); others get the cooldown at once. Reservations are ≥ 60 s apart and sends end within 15 s, so request order is code order (W-101). Recording a passed code re-checks everything under the request's row lock (still open and delivered, session alive, same address, no authenticator for "enable") after ending the extra session.
   - `verifyOtp`'s user must be the caller (W-86). The extra session it creates is deleted in the same transaction that records the check (`wren_end_otp_session`: only that user's minutes-old, otp-only session; W-97); if it can't be, nothing is recorded.
   - 5 wrong tries per request, 1 send per minute and 5 per hour per user. Supabase Auth has its own per-user gap (1 s locally).
 - **Enforcement:** `requireUser()` refuses unfinished sessions (403 `mfa_required`) unless the route passes `{ mfa: 'skip' }` (only `/api/me` and `/api/mfa/email/*`). Restrictive RLS policies "mfa" on all 14 browser-readable tables (Realtime too). The app layout redirects to `/auth/mfa?next=…` (path from the proxy's `x-wren-path`).
@@ -220,7 +221,7 @@ How each part works:
   - writes only in allowed folders, temp and package caches
   - file contents under `/Users`, `/Volumes` and home unreadable, except allowed folders, toolchains and a few dotfiles
   - credential stores (`.ssh`, `.aws`, Keychains, …) and Wren's data folder never readable
-- **Shell environment.** Commands are not login shells; PATH and toolchain variables come from `toolEnv()`.
+- **Shell environment** (W-108). Commands are not login shells and never get Wren's own environment (it may come from a terminal with tokens, `BASH_ENV`, pager or loader settings): `agentEnv()` (shellenv.ts) passes an allowlist (HOME, USER, LOGNAME, SHELL, TERM, TMPDIR, TZ; on Windows also what Windows needs, e.g. SystemRoot, ComSpec, APPDATA, PSModulePath) plus PATH and toolchain variables (`toolEnv()`, from the login shell on macOS). Engine CLIs get that plus their own sign-in/provider and network variables (`engineEnv(engine)`); Claude Code's commands go through `wren-shell.sh`, which runs them with `env -i` and only the allowlist.
 - **File tools** (`confined.ts`).
   - On macOS a tiny helper (`cat`, `sh`, `find`, `stat`) runs under `fileOpsProfile`. That profile can read only the allowed folders plus the helpers' own binaries, `/usr/lib` and the dyld cache.
   - On Windows (fallback):
@@ -250,6 +251,15 @@ How each part works:
 | Re-audit #5 (of 0.1.9) | W-74…W-85 | `e8caf04`, 0.1.10 | See below; migration 0008 (`wren_0010_agent_computers`) |
 | Re-audit #6 (of 0.1.10 + MFA) | W-86…W-98 | `d6b695b`, 0.1.11 | See below; migration 0010 (`wren_0012_mfa_hardening`) |
 | Re-audit #7 (of 0.1.11) | W-99…W-107 | `42f985f`, 0.1.12 | See below; no migration |
+| Re-audit #8 (of 0.1.12) | W-108…W-113 | 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
+
+Round 8 in brief:
+- **W-108** agent commands get an allowlisted environment, never Wren's own (tokens, BASH_ENV, pagers); engines keep only their own sign-in and network variables, and Claude Code's commands are stripped to the allowlist by `wren-shell.sh`.
+- **W-109** the update marker names the installer before it starts; a marker without a pid is recognised by searching processes.
+- **W-110** a credential's name/id counts, label whitespace is collapsed, SVG label text is read.
+- **W-111** email sends hold no database connection while Supabase sends (reserve, send, mark delivered).
+- **W-112** Playwright's `\n`/`\r` count as Enter.
+- **W-113** long options are matched in any abbreviation (`sort --o=x` wrote x).
 
 Round 7 in brief:
 - **W-99** `man -P`, `sort --compress-program` (and abbreviations) and similar options aren't read-only; neither is `--version` of toolchains behind version managers (rustup ran an agent-written cargo).
@@ -318,8 +328,8 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 60 (+8 real-Chrome skipped), desktop 30, web 17
-node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (81; needs `npm run dev`; pauses the local mail container briefly)
+npm test                               # core 61 (+9 real-Chrome skipped), desktop 37, web 17
+node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (83; needs `npm run dev`; pauses the local mail container briefly)
 node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (28)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
 WREN_BROWSER_TEST=1 npx vitest run test/browser.test.ts   # in packages/core; headless Google Chrome
@@ -387,7 +397,7 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
     - TOTP was already enabled (max 10 factors). There is no recovery-codes switch in the dashboard or Management API yet.
     - Email limit is 30 per hour project-wide; "Enable IP address forwarding" is on.
     - Order for any similar change: dashboard first, then the migration (the API calls `wren_mfa_state()`), then the web push.
-  - Production migration names are `wren_0001`…`wren_0009`: repo 0006 = `wren_0008_run_invariants`, repo 0007 = `wren_0009_run_cleanup`. Repo 0008 = `wren_0010_agent_computers`, repo 0009 = `wren_0011_mfa`, repo 0010 = `wren_0012_mfa_hardening` (adds triggers on `auth.users` and `auth.mfa_factors`; `postgres` has TRIGGER on both in production, checked).
+  - Production migration names are `wren_0001`…`wren_0009`: repo 0006 = `wren_0008_run_invariants`, repo 0007 = `wren_0009_run_cleanup`. Repo 0008 = `wren_0010_agent_computers`, repo 0009 = `wren_0011_mfa`, repo 0010 = `wren_0012_mfa_hardening` (adds triggers on `auth.users` and `auth.mfa_factors`; `postgres` has TRIGGER on both in production, checked), repo 0011 = `wren_0013_mfa_send_state`.
   - pg_cron job `wren-tick` posts every minute to `/api/internal/cron` with a Bearer token from Vault secret `wren_cron_secret`.
   - Auth: Site URL https://wren-agents.vercel.app; email confirmation off; SMTP through Gmail.
   - Realtime broadcast from the DB needs a grant plus an insert policy on `realtime.messages` for `wren_api`.
@@ -412,7 +422,9 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
 - **MFA (Wren's own triggers).**
   - The password trigger relies on Supabase Auth signing out every other session in the transaction that changes a password. Verified locally (v2.197) for the user endpoint and the Admin API (which signs out all sessions, so it can't change an email-code account's password at all). Supabase Auth has no rehash-on-sign-in; its optional hash encryption would rewrite `encrypted_password` at sign-in, but production hashes are plain bcrypt (checked 2026-10-06). Re-check if Supabase Auth is upgraded or that encryption is turned on.
   - Removing a factor while the same account is being deleted can deadlock (factor row vs user row); Postgres aborts one of the two and it can be retried. A factor demoted by UPDATE (no current Supabase path does that) wouldn't fire the recovery-code trigger.
-  - A send Supabase is still processing after Wren's 15 s time limit (e.g. stuck email delivery) could still replace a later code: that code then fails and the user asks again (no bypass).
+  - A send Supabase is still processing after Wren's 15 s time limit (e.g. stuck email delivery) could still replace a later code: that code then fails and the user asks again (no bypass). If Wren's function dies between Supabase sending and marking the request delivered, that code can't be used; the user asks again after the minute.
+  - Supabase Auth itself holds a database transaction while it emails (seen locally); Wren no longer does.
+- **Engine credentials.** An engine's own sign-in variables (e.g. `ANTHROPIC_API_KEY`, `XAI_API_KEY`, if the user set them in the environment Wren started from) stay visible to that engine's commands where Wren can't wrap them: Grok's commands, and Claude Code's on Windows. Nothing else from Wren's environment is.
 - **Upstream CLI quirks.** Claude Code itself refuses commands that start with a long `sleep`. The user's `~/.grok` has `permission_mode = always-approve`; that is why approvals are enforced with the per-run plugin hook.
 - **Out-of-date docs.** `docs/ARCHITECTURE.md` predates later rounds in places:
   - It says Windows commands need approval only "beyond read-only"; now every Windows command rates high.

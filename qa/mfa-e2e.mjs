@@ -89,6 +89,14 @@ async function emailStep(c, email, purpose) {
   const code = await emailCode(email, t0);
   return { send: s, code, verify: await api(c, '/api/mfa/email/verify', { code, challengeId: s.body.challengeId, purpose }) };
 }
+/** Ask for a code like the web client does: if this session's code is still on its way, wait for it. */
+async function sendLikeClient(c, purpose) {
+  for (let i = 0; ; i++) {
+    const r = await api(c, '/api/mfa/email/send', { purpose });
+    if (r.body.code !== 'code_sending' || i >= 20) return r;
+    await sleep(1500);
+  }
+}
 /** How many code emails an address got since `after`. */
 async function codeEmails(email, after) {
   await sleep(1500);
@@ -319,33 +327,39 @@ try {
   check('parallel sends from two sessions: one code goes out, the other waits its turn and is told to wait', both.map((r) => r.status).sort().join(',') === '200,429' && rowsP === '1' && (await codeEmails(P.email, tP)) === 1, `${both.map((r) => `${r.status} ${r.body.code ?? ''}`).join(' / ')} rows ${rowsP}`);
   await backdate(pId);
   const tP2 = Date.now() - 1000;
-  const twice = await Promise.all([api(P2, '/api/mfa/email/send', { purpose: 'step_up' }), api(P2, '/api/mfa/email/send', { purpose: 'step_up' })]);
+  const twice = await Promise.all([sendLikeClient(P2, 'step_up'), sendLikeClient(P2, 'step_up')]);
   check('a double click sends one code, and both answers name the same request', twice.every((r) => r.status === 200) && twice[0].body.challengeId === twice[1].body.challengeId && twice.map((r) => r.body.sent).sort().join(',') === 'false,true' && (await codeEmails(P.email, tP2)) === 1, twice.map((r) => `${r.status} ${r.body.sent}`).join(' / '));
   const pCode = await emailCode(P.email, tP2);
   check('…and that code finishes it', (await api(P2, '/api/mfa/email/verify', { code: pCode, challengeId: twice[0].body.challengeId, purpose: 'step_up' })).status === 200);
 
-  // ------------------------------------------------------------------ a slow send (W-100, W-101)
+  // ------------------------------------------------------------------ a slow send (W-100, W-101, W-111)
   // Pausing the local mail server stalls Supabase Auth's send (it emails before answering), while
   // the rest of Auth keeps working.
   const Q = await newUser('slow');
   const qId = await idOf(Q.c);
   const Q2 = await signIn(Q);
-  let secondDone = false;
-  let first, second, visible;
+  let first, pending, openTx, verifyEarly, other, sameAgain, otherMs;
   execSync(`docker pause ${MAILBOX}`);
   try {
     first = api(Q.c, '/api/mfa/email/send', { purpose: 'step_up' });
     await sleep(2000);
-    visible = psql(`select count(*) from public.mfa_email_requests where user_id = '${qId}'`);
-    second = api(Q2, '/api/mfa/email/send', { purpose: 'step_up' }).then((r) => ((secondDone = true), r));
-    await sleep(1500);
+    pending = psql(`select id || ' ' || (delivered_at is null)::text from public.mfa_email_requests where user_id = '${qId}' order by sent_at desc limit 1`);
+    // Wren's own connections (Supabase Auth holds a transaction of its own while it emails).
+    openTx = psql(`select count(*) from pg_stat_activity where state like 'idle in transaction%' and usename <> 'supabase_auth_admin'`);
+    verifyEarly = await api(Q.c, '/api/mfa/email/verify', { code: '000000', challengeId: pending.split(' ')[0], purpose: 'step_up' });
+    const t = Date.now();
+    other = await api(Q2, '/api/mfa/email/send', { purpose: 'step_up' });
+    otherMs = Date.now() - t;
+    sameAgain = await api(Q.c, '/api/mfa/email/send', { purpose: 'step_up' });
   } finally {
     execSync(`docker unpause ${MAILBOX}`);
   }
-  check('slow send: the request isn’t visible (or verifiable) until Supabase has sent its code', visible === '0', `rows ${visible}`);
-  check('slow send: another send waits its turn instead of racing it', !secondDone);
-  const [q1, q2] = await Promise.all([first, second]);
-  check('slow send: then the first is sent and the second is told to wait', q1.status === 200 && q1.body.sent === true && q2.status === 429, `${q1.status} / ${q2.status}`);
+  check('slow send: the request exists but isn’t usable until Supabase has sent its code', pending.endsWith(' true') && verifyEarly.body.code === 'code_expired', `${pending} / ${verifyEarly.body.code}`);
+  check('slow send: Wren keeps no database transaction open while Supabase sends', openTx === '0', `open ${openTx}`);
+  check('slow send: another session is told to wait at once, without holding anything', other.status === 429 && other.body.code === 'code_cooldown' && otherMs < 3000, `${other.status} ${other.body.code} in ${otherMs} ms`);
+  check('slow send: the same session asking again hears the code is on its way', sameAgain.status === 429 && sameAgain.body.code === 'code_sending');
+  const q1 = await first;
+  check('slow send: then the first is sent', q1.status === 200 && q1.body.sent === true && q1.body.challengeId === pending.split(' ')[0], `${q1.status}`);
   // Supabase never answering in time: the send fails, and its request can't be finished.
   await backdate(qId);
   execSync(`docker pause ${MAILBOX}`);

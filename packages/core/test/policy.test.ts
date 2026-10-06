@@ -116,6 +116,14 @@ describe('shell risk', () => {
       expect(isReadOnlyCommand(c), c).toBe(true);
     }
   });
+  it('treats any abbreviation of a writing or program-running long option as that option (W-113)', () => {
+    for (const c of ['cat notes.txt | /usr/bin/less --LOG=copy.txt', 'less --log=x f', 'less --LOG-F=x f', 'less --lesskey-f=k f', 'sort --o=out in', 'sort --outp=out in', 'sort --compress=./x in', 'date --se=2026-01-01', 'date --s 2026', 'file --uncomp a.gz', 'ag --pag=./x TODO', 'yq --inpl .a=1 f.yml', 'rg --pr=./x TODO', 'rg --search-z TODO', 'fd --exec-b rm', 'tree --out=x']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+    }
+    for (const c of ['less -N README.md', 'sort --numeric-sort data.txt', 'sort --check data.txt', 'date --utc +%s', 'rg --pretty TODO', 'file --mime a.gz', 'fd --hidden .ts']) {
+      expect(isReadOnlyCommand(c), c).toBe(true);
+    }
+  });
   it('treats pager variables as choosing a program (PAGER=./x man ls runs ./x)', () => {
     for (const c of ['PAGER=./x man ls', 'GIT_PAGER=./x git branch', 'MANPAGER=./x man ls']) expect(isReadOnlyCommand(c), c).toBe(false);
     expect(isReadOnlyCommand('TERM=dumb ls')).toBe(true);

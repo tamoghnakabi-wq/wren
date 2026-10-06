@@ -24,6 +24,8 @@ export interface BrowserAction {
 
 /** Field kinds an agent may never type into, enforced here as well as in the policy. */
 const SECRET_FIELD = /password|cc-|card|cvc|cvv|security code|one-time|otp|2fa|passcode|ssn|social security|iban|routing/i;
+/** A field's autocomplete, name or id that marks it as a credential (its value is never shown, and it is never typed into). */
+const SECRET_NAME = /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i;
 
 export interface BrowserResponse {
   ok: boolean;
@@ -135,7 +137,7 @@ const SNAPSHOT_FN = `(() => {
 const DESCRIBE_FN = `(el) => {
   if (el === document.documentElement) return { label: '', role: 'page', url: location.href };
   const t = (el.getAttribute('type') || '').toLowerCase();
-  const hidden = t === 'password' || /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i.test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
+  const hidden = t === 'password' || new RegExp(${JSON.stringify(SECRET_NAME.source)}, 'i').test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
   const label = (el.getAttribute('aria-label') || el.innerText || (hidden ? '' : el.value) || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
   const form = el.closest('form');
   const submitText = form ? Array.from(form.querySelectorAll('button,[type=submit]')).map(b => (b.innerText || b.value || '').trim()).join(' / ').slice(0, 120) : '';
@@ -193,16 +195,22 @@ const ENGINE = `({
   // title). Read again after every step that can run page code: a focus handler can turn the
   // checked text box into a password box, or retitle it "Password".
   names(el) {
-    const byId = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map((i) => { const n = i && document.getElementById(i); return n ? n.innerText : ''; });
-    const labels = el.labels ? Array.from(el.labels).map((l) => l.innerText) : [];
-    return [el.getAttribute('aria-label'), ...byId, ...labels, el.getAttribute('placeholder'), el.getAttribute('title')].join(' ');
+    // innerText for HTML (what a reader sees); SVG and other elements only have textContent.
+    const text = (n) => (n ? (typeof n.innerText === 'string' ? n.innerText : n.textContent) || '' : '');
+    const byId = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map((i) => text(i && document.getElementById(i)));
+    const labels = el.labels ? Array.from(el.labels).map(text) : [];
+    // One space between words, however the label is laid out ("Security<br>code").
+    return [el.getAttribute('aria-label'), ...byId, ...labels, el.getAttribute('placeholder'), el.getAttribute('title')].join(' ').replace(/\\s+/g, ' ');
   },
   fieldState(el) {
     return [el.tagName, el.type, el.getAttribute('type'), el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('role'), this.names(el), el.disabled, el.readOnly, el.isContentEditable].join('\u0001');
   },
   // The host's credential rule, applied here to what the field is called now.
   secret(el) {
-    return (el.tagName === 'INPUT' && el.type === 'password') || new RegExp(${JSON.stringify(SECRET_FIELD.source)}, 'i').test([el.getAttribute('type'), el.getAttribute('autocomplete'), this.names(el)].join(' '));
+    if (el.tagName === 'INPUT' && el.type === 'password') return true;
+    if (new RegExp(${JSON.stringify(SECRET_FIELD.source)}, 'i').test([el.getAttribute('type'), el.getAttribute('autocomplete'), this.names(el)].join(' '))) return true;
+    // A name or id that marks a credential (W-110): the same rule that keeps such values out of descriptions.
+    return new RegExp(${JSON.stringify(SECRET_NAME.source)}, 'i').test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
   },
   type(el, text) {
     if (!el) return { error: 'gone' };
@@ -251,6 +259,7 @@ const ENGINE = `({
   // Whether a keydown is the press's expected key (Playwright names: "Enter", "a", "KeyA", "Digit1", "Space", ...).
   isKey(e, part) {
     if (part === 'ControlOrMeta') return e.key === 'Control' || e.key === 'Meta';
+    if (part === '\\n' || part === '\\r') return e.key === 'Enter'; // Playwright's aliases for Enter (W-112)
     if (e.key === part || e.code === part || (part === 'Space' && e.key === ' ')) return true;
     if (part.length !== 1) return false;
     return e.key.toLowerCase() === part.toLowerCase() || e.code === 'Key' + part.toUpperCase() || e.code === 'Digit' + part;

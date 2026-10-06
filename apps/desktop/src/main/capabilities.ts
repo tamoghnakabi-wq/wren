@@ -22,7 +22,7 @@ function cliVersion(name: 'claude' | 'grok'): { installed: boolean; version?: st
   const cli = findCli(name);
   let v: string | undefined;
   if (cli) {
-    const r = spawnSync(cli, name === 'claude' ? ['--version'] : ['version'], { encoding: 'utf8', timeout: 8000, env: engineEnv() });
+    const r = spawnSync(cli, name === 'claude' ? ['--version'] : ['version'], { encoding: 'utf8', timeout: 8000, env: engineEnv(name === 'claude' ? 'claude-code' : 'grok-build') });
     v = (r.stdout || '').trim().split(/\s+/)[name === 'claude' ? 0 : 1] || 'installed';
   }
   versionCache.set(name, { at: Date.now(), v });

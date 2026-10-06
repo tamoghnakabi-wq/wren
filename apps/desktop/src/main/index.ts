@@ -105,7 +105,9 @@ async function procTreeSelfTest(): Promise<Record<string, unknown> & { ok: boole
   const { jobLibrary, spawnContained } = await import('./winjob');
   const child = "Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 120'; 'started'";
   const dll = await jobLibrary();
-  const contained = await spawnContained(child, process.cwd(), process.env);
+  // With the same minimal environment agent commands get (agentEnv, W-108).
+  const { agentEnv, toolEnv } = await import('./shellenv');
+  const contained = await spawnContained(child, process.cwd(), agentEnv(process.env, await toolEnv()));
   await exited(contained);
   await sleep(2000);
   const endedWithCommand = !(await treeAlive(contained));
