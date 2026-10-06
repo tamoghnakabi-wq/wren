@@ -1,9 +1,10 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AuthShell } from '@/components/auth-form';
 import { Button, Input, Label } from '@/components/ui';
+import { mfaError, mfaInfo } from '@/lib/client/mfa';
 import { supabase } from '@/lib/client/supabase';
 
 export default function UpdatePasswordPage() {
@@ -11,6 +12,11 @@ export default function UpdatePasswordPage() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // With two-step sign-in on, the reset link alone isn't enough: Supabase only changes the password
+  // of a session that finished the second step, so do that first.
+  useEffect(() => {
+    mfaInfo().then((m) => m && !m.satisfied && router.replace('/auth/mfa?next=/auth/update-password'));
+  }, [router]);
   return (
     <AuthShell>
       <form
@@ -20,7 +26,8 @@ export default function UpdatePasswordPage() {
           setBusy(true);
           const { error } = await supabase().auth.updateUser({ password });
           setBusy(false);
-          if (error) setError(error.message);
+          if (error?.code === 'insufficient_aal') router.replace('/auth/mfa?next=/auth/update-password');
+          else if (error) setError(mfaError(error));
           else router.replace('/app');
         }}
       >

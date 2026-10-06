@@ -186,6 +186,21 @@ The spec says: use official subscription paths only, and never scrape sessions, 
   - A targeted action that needs approval but has no element ID is refused.
 - **Remote approvals off.** Pending approvals for that computer become `localOnly`, and only the desktop's native prompt (`window.wren.decideApproval`) can decide them.
 
+### Two-step sign-in (MFA)
+Opt-in per account. Rule in one place: `apps/web/src/lib/mfa-rules.ts` (`mfaStatus`) for the API, `public.wren_session_ok()` (migration 0009) for the database. Same logic:
+- **Email codes on** (`public.mfa_email`): this session must have passed an email code (`public.mfa_session_checks`, joined to `auth.sessions`, so signing out ends it). Stays required even if a TOTP factor appears: a password-only attacker can enroll TOTP straight through the Auth API (tested), so the email rule is only lifted by turning email codes off from a verified session.
+- **Else any verified Supabase factor** (TOTP, recovery codes): the JWT must be `aal2`.
+- **Else** nothing more.
+
+How each part works:
+- **TOTP and recovery codes** are Supabase Auth factors, used from the browser (`supabase.auth.mfa.*`; recovery codes need `auth.experimental.recoveryCodes`, set in `lib/client/supabase.ts`). Supabase itself refuses at `aal1`: unenroll, a second factor, new recovery codes, password or email change (`insufficient_aal`, tested).
+- **Email codes** are Supabase email OTPs: `lib/mfa.ts` calls `signInWithOtp` (code in the Magic Link template) and checks it with a throwaway `verifyOtp`, ending the extra session straight away. Wren only adds: a code counts only in the session that asked for it, 5 wrong tries per code, 1 send per minute and 5 per hour per user, a 10-minute window.
+- **Enforcement:** `requireUser()` refuses unfinished sessions (403 `mfa_required`) unless the route passes `{ mfa: 'skip' }` (only `/api/me` and `/api/mfa/email/*`). Restrictive RLS policies "mfa" on all 14 browser-readable tables (Realtime too). The app layout redirects to `/auth/mfa?next=…` (path from the proxy's `x-wren-path`).
+- **Step-up:** `requireUser(req, { stepUp: true })` needs a second step within `STEP_UP_SECONDS` (10 min). TOTP accounts: an `amr` entry `totp` or `mfa/recovery_code`. Others: an email code in this session. Used by account deletion, approving a device pairing, turning email codes off. In the browser, `api()` answers `step_up_required` with the "Confirm it's you" dialog (`components/app/step-up.tsx`) and retries once. Settings also asks before Supabase-direct changes (UI-level only: Supabase's own gate there is `aal2`).
+- **UI:** `/auth/mfa` (TOTP, recovery code, email code), Settings → Security (`components/app/security-settings.tsx`). Removing the last authenticator removes the recovery codes first: Supabase leaves them as a lone factor otherwise, and still asks for `aal2`.
+- **Lost phone and codes:** `scripts/mfa-reset-user.mjs` (operator only; Supabase Admin API with the secret key, which never goes in the web app).
+- **Local stack:** `node scripts/local-auth-recovery-codes.mjs` after `supabase start` (the CLI has no config key for recovery codes yet). `config.toml` turns on TOTP, the code-only Magic Link template (`supabase/templates/verification-code.html`) and the security notification emails.
+
 ### Desktop confinement
 - **macOS shell.** Commands run under `sandbox-exec` with `seatbeltProfile`:
   - writes only in allowed folders, temp and package caches
@@ -261,7 +276,9 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 57 (+6 real-Chrome skipped), desktop 26, web 5
+npm test                               # core 57 (+6 real-Chrome skipped), desktop 26, web 14
+node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (44; needs `npm run dev`)
+node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (21)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
 WREN_BROWSER_TEST=1 npx vitest run test/browser.test.ts   # in packages/core; headless Google Chrome
 npx eslint src                         # in apps/web (0 errors, 9 existing warnings)
@@ -322,6 +339,7 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
   - Every 0.x release is marked *pre-release* on GitHub. The update channel filters on plain `x.y.z` tags, never on that flag (filtering on it once broke updates).
   - Installed apps see a new release within about 5 minutes.
 - **Supabase production:** project "Overdrive League", ref `luqeemaymnyybzyznmuh` (shared with another app; Wren tables live in `public`).
+  - **MFA rollout order** (the API calls `wren_mfa_state()`, so the migration must exist first): in the dashboard, set the Magic Link email template to `supabase/templates/verification-code.html` with subject "Your Wren verification code" (otherwise email codes and step-up for accounts without MFA can't work), and turn on the MFA-enrolled/unenrolled and password-changed security emails. Then apply migration 0009 (`wren_0011_mfa`), then push the web app.
   - Production migration names are `wren_0001`…`wren_0009`: repo 0006 = `wren_0008_run_invariants`, repo 0007 = `wren_0009_run_cleanup`. Repo 0008 = `wren_0010_agent_computers`.
   - pg_cron job `wren-tick` posts every minute to `/api/internal/cron` with a Bearer token from Vault secret `wren_cron_secret`.
   - Auth: Site URL https://wren-agents.vercel.app; email confirmation off; SMTP through Gmail.
@@ -338,6 +356,12 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
 - **Browser.** A page still decides its own content (labels, text, attributes), and there's a small window between the final check and the click (Playwright's own hit-test). A key press into a cross-origin iframe can't be guarded from the page's document; focus is held on the checked node so the key doesn't go there.
 - **Cloud VM stop (W-81).** A stop mark from a stopper that crashed mid-stop is honoured for up to 180 s (runs wait, then proceed).
 - **W-68 edge case.** If a session switches between Wren's own agent and a CLI engine while a follow-up is in flight, that follow-up can be skipped.
+- **MFA (Supabase limits).**
+  - Supabase Auth v2.197 accepts a TOTP code again within its window (and the previous window's code), in any session: no replay protection (`qa/mfa-e2e.mjs` prints a NOTE).
+  - Recovery codes are experimental. Production runs the same Auth version, but the Management API has no switch for them yet, so they may answer `mfa_recovery_codes_enroll_not_enabled` (the UI says so; the operator reset script is the fallback).
+  - Email codes can't beat an attacker who controls the inbox: password reset goes there too. An authenticator app is the strong option.
+  - A password-only attacker can enroll TOTP on an account without MFA (Supabase allows the first factor at `aal1`). The security notification email tells the owner; removing a factor they can't verify takes the operator script. Verifying a factor also signs out the account's other `aal1` sessions (Supabase behaviour).
+  - Code checks call GoTrue from the server, so its per-IP verify limit (30 per 5 min) is shared by all users behind Vercel's egress addresses.
 - **Upstream CLI quirks.** Claude Code itself refuses commands that start with a long `sleep`. The user's `~/.grok` has `permission_mode = always-approve`; that is why approvals are enforced with the per-run plugin hook.
 - **Out-of-date docs.** `docs/ARCHITECTURE.md` predates later rounds in places:
   - It says Windows commands need approval only "beyond read-only"; now every Windows command rates high.

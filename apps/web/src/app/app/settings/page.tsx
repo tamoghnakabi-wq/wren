@@ -5,6 +5,7 @@ import { BellRing, Check, ExternalLink, FolderPlus, Laptop, Moon, RefreshCw, Sun
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { enablePush, pushState, type PushState } from '@/components/app/push';
 import { useApp } from '@/components/app/provider';
+import { SecuritySettings } from '@/components/app/security-settings';
 import { Badge, Button, Card, cx, Input, Label, PageHeader, Select, Switch, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useDesktop, type DesktopPolicy, type DesktopStatus, type WrenDesktop } from '@/lib/client/desktop';
@@ -21,6 +22,7 @@ export default function SettingsPage() {
         <Notifications />
         {d && <ThisComputer d={d} />}
         <Appearance />
+        <SecuritySettings section={Section} row={Row} />
         <Account />
       </div>
     </div>

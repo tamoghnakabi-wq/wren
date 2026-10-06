@@ -5,7 +5,9 @@ import { body, json, route } from '@/lib/http';
 
 // Desktop pairing, step 2: the signed-in user confirms the code shown by the app.
 export const POST = route(async (req) => {
-  const user = await requireUser(req);
+  const peek = await body(req.clone(), z.object({ approve: z.boolean().default(true) }).passthrough());
+  // Linking a computer hands it a long-lived device token: confirm it's really the user.
+  const user = await requireUser(req, { stepUp: peek.approve });
   const b = await body(req, z.object({ code: z.string().trim().toUpperCase().max(12), approve: z.boolean().default(true) }));
   const code = b.code.replace(/[^A-Z0-9]/g, '').replace(/^(.{4})/, '$1-');
   const sql = db();

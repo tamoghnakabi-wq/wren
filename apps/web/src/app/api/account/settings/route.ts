@@ -43,9 +43,9 @@ export const POST = route(async (req) => {
   return json(p);
 });
 
-/** Delete the account and everything in it. */
+/** Delete the account and everything in it (needs a recently verified second step). */
 export const DELETE = route(async (req) => {
-  const user = await requireUser(req);
+  const user = await requireUser(req, { stepUp: true });
   const { confirm } = await body(req, z.object({ confirm: z.literal('DELETE') }));
   if (confirm !== 'DELETE') return json({ error: 'Type DELETE to confirm.' }, 400);
   const sql = db();

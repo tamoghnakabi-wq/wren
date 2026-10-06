@@ -249,6 +249,20 @@ otp_expiry = 3600
 # subject = "You have been invited"
 # content_path = "./supabase/templates/invite.html"
 
+# Wren's verification codes (two-step sign-in, confirming sensitive actions) are Supabase email OTPs
+# sent with the magic link template; this one shows only the code.
+[auth.email.template.magic_link]
+subject = "Your Wren verification code"
+content_path = "./supabase/templates/verification-code.html"
+
+# Security emails when two-step sign-in or the password changes.
+[auth.email.notification.mfa_factor_enrolled]
+enabled = true
+[auth.email.notification.mfa_factor_unenrolled]
+enabled = true
+[auth.email.notification.password_changed]
+enabled = true
+
 # Uncomment to customize notification email template
 # [auth.email.notification.password_changed]
 # enabled = true
@@ -301,8 +315,13 @@ max_enrolled_factors = 10
 
 # Control MFA via App Authenticator (TOTP)
 [auth.mfa.totp]
-enroll_enabled = false
-verify_enabled = false
+enroll_enabled = true
+verify_enabled = true
+
+# MFA recovery codes (one-time backup codes; never the only factor)
+[auth.mfa.recovery_codes]
+enroll_enabled = true
+verify_enabled = true
 
 # Configure MFA via Phone Messaging
 [auth.mfa.phone]

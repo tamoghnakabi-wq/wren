@@ -4,6 +4,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 // Refreshes the Supabase session cookie and keeps signed-out visitors out of
 // the app. Authorization itself happens in every API route.
 export async function proxy(request: NextRequest) {
+  // The app layout sends unfinished two-step sign-ins back here afterwards.
+  request.headers.set('x-wren-path', request.nextUrl.pathname + request.nextUrl.search);
   let response = NextResponse.next({ request });
   const supabase = createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!, {
     cookies: {

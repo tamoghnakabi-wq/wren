@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Eye, EyeOff, MailCheck } from 'lucide-react';
 import { useState } from 'react';
+import { mfaInfo } from '@/lib/client/mfa';
 import { supabase } from '@/lib/client/supabase';
 import { Logo } from './brand';
 import { Button, Input, Label } from './ui';
@@ -55,7 +56,9 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
       } else {
         const { error } = await sb.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        router.replace(next);
+        // Accounts with two-step sign-in finish on the next page.
+        const mfa = await mfaInfo().catch(() => null);
+        router.replace(mfa && !mfa.satisfied ? `/auth/mfa?next=${encodeURIComponent(next)}` : next);
         router.refresh();
       }
     } catch (err) {

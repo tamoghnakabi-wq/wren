@@ -75,5 +75,6 @@ export const POST = route(async (req) => {
   );
 
   await sql`delete from public.device_pairings where expires_at < now() - interval '1 day'`;
+  await sql`select public.wren_mfa_cleanup()`;
   return json(report);
 });
