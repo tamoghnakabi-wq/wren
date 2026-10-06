@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-06: two-step sign-in (`0961512`) is live in production with migration `wren_0011_mfa` and the dashboard settings below. The fixes for Codex re-audit #6 (W-86…W-98) are committed on `main` but **not yet pushed**: production migration `wren_0012_mfa_hardening` (repo 0010) and desktop **0.1.11** are still to do, in that order (see "Deploy and release"). The six Codex security audits (W-1…W-98) are otherwise all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-06: `main` is in sync with `origin/main`; the last code commit is `d6b695b` (fixes for Codex re-audit #6, W-86…W-98), live in production with migration `wren_0012_mfa_hardening` (two-step sign-in itself: `0961512`, `wren_0011_mfa`, dashboard settings below). The desktop app is at **0.1.11**. The six Codex security audits (W-1…W-98) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -245,7 +245,7 @@ How each part works:
 | Re-audit #3 (of 0.1.6) | W-51…W-62 | `1cfcd64`, 0.1.7 | Claude `--restricted` + shell prefix, Grok write-protection, shell lexer, per-task tabs, `seenSeq`, migration 0007 (`wren_0009_run_cleanup`) |
 | Re-audit #4 (of 0.1.7) | W-63…W-73 | `06a8109`, 0.1.8 | See below; no migration |
 | Re-audit #5 (of 0.1.9) | W-74…W-85 | `e8caf04`, 0.1.10 | See below; migration 0008 (`wren_0010_agent_computers`) |
-| Re-audit #6 (of 0.1.10 + MFA) | W-86…W-98 | 0.1.11 | See below; migration 0010 (`wren_0012_mfa_hardening`) |
+| Re-audit #6 (of 0.1.10 + MFA) | W-86…W-98 | `d6b695b`, 0.1.11 | See below; migration 0010 (`wren_0012_mfa_hardening`) |
 
 Round 6 in brief (details in "Two-step sign-in" and "Approvals and risk"):
 - **W-86** email codes go to the current address; `verifyOtp`'s user must be the caller; a request is tied to its address.
