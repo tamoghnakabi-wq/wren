@@ -36,7 +36,10 @@ const READ_ONLY = new Set([
   'md5sum', 'sha256sum', 'shasum', 'man', 'help', 'column', 'nl', 'tac', 'rev', 'seq', 'xxd', 'od', 'strings',
 ]);
 
-const VERSION_ONLY = /^(node|npm|npx|pnpm|yarn|bun|python3?|pip3?|go|cargo|rustc|java|ruby|git|gh|docker|deno)\s+(-v|--version|version)\s*$/i;
+// Only programs that don't pick their binary from files in the project. Toolchains are often run
+// through version managers that do (rust-toolchain.toml `path`, .tool-versions `path:`, .yarnrc.yml
+// `yarnPath`), so even `cargo --version` can run a program an agent wrote (verified with rustup).
+const VERSION_ONLY = /^(git|gh|docker)\s+(-v|--version|version)\s*$/i;
 
 /**
  * Git subcommands that only read refs and config. Everything that reads the index (status, diff,
@@ -72,7 +75,7 @@ function gitReadOnly(args: string[]): boolean {
 /** Looks like a git read (status, log, diff…) even though it isn't counted as one: for the reason shown. */
 const GIT_LOOKS_READ = /^git\s+(status|log|diff|show|ls-files|blame|shortlog|reflog|stash\s+list|grep|whatchanged|describe)(\s|$)/i;
 /** Read commands whose options can still write files or run programs: an unknown argument value makes them unsafe. */
-const OPTION_SENSITIVE = new Set(['sort', 'tree', 'uniq', 'xxd', 'yq', 'rg', 'fd', 'date', 'hostname', 'find', 'git', 'gh']);
+const OPTION_SENSITIVE = new Set(['sort', 'tree', 'uniq', 'xxd', 'yq', 'rg', 'fd', 'date', 'hostname', 'find', 'git', 'gh', 'man', 'less', 'more', 'file', 'ag']);
 
 /** Matches at a command position: start, after a control operator, or after sudo/xargs/env. */
 const CMD = String.raw`(?:^|[;&|(\x60]\s*|\$\(\s*|\b(?:sudo|xargs|env|exec|nohup|time)\s+)`;
@@ -351,8 +354,22 @@ function readOnlyForm(cmd: string, args: string[]): boolean {
   const positional = args.filter((w) => !w.startsWith('-'));
   switch (cmd) {
     case 'sort':
+      // --compress-program runs a program (any abbreviation: `--co=./x` works too).
+      return !args.some((w) => /^-o|^--output|^-[a-zA-Z]*o|^--co/.test(w));
     case 'tree':
-      return !args.some((w) => /^-o|^--output/.test(w) || (cmd === 'sort' && /^-[a-zA-Z]*o/.test(w)));
+      return !args.some((w) => /^-o|^--output/.test(w));
+    case 'man':
+      // -P names the pager (run even without a terminal), -C a config naming programs, -M/-H others:
+      // only section numbers, page names and a few listing flags.
+      return args.every((w) => (w.startsWith('-') ? /^-[afkwW]+$/.test(w) : /^[\w.:@+-]+$/.test(w)));
+    case 'less':
+    case 'more':
+      // +cmd runs less commands (including !shell); -o/-O write a log; -k loads key bindings.
+      return !args.some((w) => w.startsWith('+') || /^-[a-zA-Z]*[oOk]|^--(log-file|LOG-FILE|lesskey)/.test(w));
+    case 'file':
+      return !args.some((w) => /^-[a-zA-Z]*[zZ]|^--uncompress/.test(w)); // may run decompressors found on PATH
+    case 'ag':
+      return !args.some((w) => /^--pager/.test(w));
     case 'uniq':
       return positional.length <= 1; // uniq IN OUT writes OUT
     case 'xxd':
@@ -360,7 +377,8 @@ function readOnlyForm(cmd: string, args: string[]): boolean {
     case 'yq':
       return !args.some((w) => /^-[a-zA-Z]*i|^--inplace/.test(w));
     case 'rg':
-      return !args.some((w) => /^--pre(=|$)/.test(w));
+      // --pre runs a program; -z runs decompressors found on PATH.
+      return !args.some((w) => /^--pre(=|$)|^--search-zip|^-[a-zA-Z]*z/.test(w));
     case 'fd':
       return !args.some((w) => /^-[a-zA-Z]*[xX]|^--exec/.test(w));
     case 'date':

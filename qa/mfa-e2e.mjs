@@ -19,6 +19,7 @@ const SUPABASE = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
 const KEY = process.env.SUPABASE_KEY ?? 'sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH';
 const WEB = process.env.WEB_URL ?? 'http://localhost:5310';
 const MAILPIT = process.env.MAILPIT_URL ?? 'http://127.0.0.1:54324';
+const MAILBOX = 'supabase_inbucket_wren'; // the local mail server's container (paused to stall sends)
 for (const u of [SUPABASE, WEB, MAILPIT]) if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(u)) throw new Error(`Refusing to run against ${u}: local stack only.`);
 
 const results = [];
@@ -87,6 +88,12 @@ async function emailStep(c, email, purpose) {
   if (s.status !== 200) return { send: s };
   const code = await emailCode(email, t0);
   return { send: s, code, verify: await api(c, '/api/mfa/email/verify', { code, challengeId: s.body.challengeId, purpose }) };
+}
+/** How many code emails an address got since `after`. */
+async function codeEmails(email, after) {
+  await sleep(1500);
+  const list = await (await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${email}"`)}`)).json();
+  return (list.messages ?? []).filter((x) => Date.parse(x.Created) >= after && /verification code/i.test(x.Subject)).length;
 }
 /** Skip Wren's one-minute resend gap (Supabase Auth's own gap is a second locally). */
 async function backdate(userId) {
@@ -302,6 +309,56 @@ try {
   check('competing requests: an “enable” request superseded by a step-up can’t be finished; email codes stay off', enableReq.status === 200 && enableTry.body.code === 'code_superseded' && psql(`select count(*) from public.mfa_email where user_id = '${dId}'`) === '0', enableTry.body.code);
   check('competing requests: the step-up finishes with its own code', (await api(D2, '/api/mfa/email/verify', { code: codeS, challengeId: stepReq.body.challengeId, purpose: 'step_up' })).status === 200);
 
+  // ------------------------------------------------------------------ sends at the same moment (W-100, W-101)
+  const P = await newUser('parallel');
+  const pId = await idOf(P.c);
+  const P2 = await signIn(P);
+  const tP = Date.now() - 1000;
+  const both = await Promise.all([api(P.c, '/api/mfa/email/send', { purpose: 'step_up' }), api(P2, '/api/mfa/email/send', { purpose: 'step_up' })]);
+  const rowsP = psql(`select count(*) from public.mfa_email_requests where user_id = '${pId}'`);
+  check('parallel sends from two sessions: one code goes out, the other waits its turn and is told to wait', both.map((r) => r.status).sort().join(',') === '200,429' && rowsP === '1' && (await codeEmails(P.email, tP)) === 1, `${both.map((r) => `${r.status} ${r.body.code ?? ''}`).join(' / ')} rows ${rowsP}`);
+  await backdate(pId);
+  const tP2 = Date.now() - 1000;
+  const twice = await Promise.all([api(P2, '/api/mfa/email/send', { purpose: 'step_up' }), api(P2, '/api/mfa/email/send', { purpose: 'step_up' })]);
+  check('a double click sends one code, and both answers name the same request', twice.every((r) => r.status === 200) && twice[0].body.challengeId === twice[1].body.challengeId && twice.map((r) => r.body.sent).sort().join(',') === 'false,true' && (await codeEmails(P.email, tP2)) === 1, twice.map((r) => `${r.status} ${r.body.sent}`).join(' / '));
+  const pCode = await emailCode(P.email, tP2);
+  check('…and that code finishes it', (await api(P2, '/api/mfa/email/verify', { code: pCode, challengeId: twice[0].body.challengeId, purpose: 'step_up' })).status === 200);
+
+  // ------------------------------------------------------------------ a slow send (W-100, W-101)
+  // Pausing the local mail server stalls Supabase Auth's send (it emails before answering), while
+  // the rest of Auth keeps working.
+  const Q = await newUser('slow');
+  const qId = await idOf(Q.c);
+  const Q2 = await signIn(Q);
+  let secondDone = false;
+  let first, second, visible;
+  execSync(`docker pause ${MAILBOX}`);
+  try {
+    first = api(Q.c, '/api/mfa/email/send', { purpose: 'step_up' });
+    await sleep(2000);
+    visible = psql(`select count(*) from public.mfa_email_requests where user_id = '${qId}'`);
+    second = api(Q2, '/api/mfa/email/send', { purpose: 'step_up' }).then((r) => ((secondDone = true), r));
+    await sleep(1500);
+  } finally {
+    execSync(`docker unpause ${MAILBOX}`);
+  }
+  check('slow send: the request isn’t visible (or verifiable) until Supabase has sent its code', visible === '0', `rows ${visible}`);
+  check('slow send: another send waits its turn instead of racing it', !secondDone);
+  const [q1, q2] = await Promise.all([first, second]);
+  check('slow send: then the first is sent and the second is told to wait', q1.status === 200 && q1.body.sent === true && q2.status === 429, `${q1.status} / ${q2.status}`);
+  // Supabase never answering in time: the send fails, and its request can't be finished.
+  await backdate(qId);
+  execSync(`docker pause ${MAILBOX}`);
+  let hung;
+  const tq = Date.now();
+  try {
+    hung = await api(Q2, '/api/mfa/email/send', { purpose: 'step_up' });
+  } finally {
+    execSync(`docker unpause ${MAILBOX}`);
+  }
+  const hungRow = psql(`select (superseded_at is not null)::text from public.mfa_email_requests where user_id = '${qId}' order by sent_at desc limit 1`);
+  check('slow send: a send Supabase doesn’t answer fails within its time limit, unusable', hung.status === 502 && hung.body.code === 'email_failed' && hungRow === 'true' && Date.now() - tq < 25000, `${hung.status} after ${Date.now() - tq} ms, superseded ${hungRow}`);
+
   // ------------------------------------------------------------------ email address changes (W-86)
   const E = await newUser('rename');
   const eId = await idOf(E.c);
@@ -345,6 +402,14 @@ try {
   check('password: through Wren, right after the email code, it changes', viaWren.status === 200 && !!newPw.data.session, `${viaWren.status} ${viaWren.body.code ?? ''}`);
   check('password: the account’s other sessions end with it', (await api(F.c, '/api/me')).status === 401 && (await api(F1, '/api/usage')).status === 200);
   check('password: no permit is left over', psql(`select count(*) from public.mfa_password_permits where user_id = '${fId}'`) === '0');
+  // The Admin API signs out every session when it sets a password, so even a permit doesn't let it
+  // through for an account with email codes on (the operator turns email codes off first).
+  const localSecret = /^SECRET_KEY="?([^"\n]+)"?$/m.exec(execSync('npx supabase status -o env', { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] }).toString())?.[1];
+  psql(`insert into public.mfa_password_permits (user_id, session_id) values ('${fId}', '${await sessionOf(F1)}')`);
+  const adminPw = await fetch(`${SUPABASE}/auth/v1/admin/users/${fId}`, { method: 'PUT', headers: { apikey: localSecret, authorization: `Bearer ${localSecret}`, 'content-type': 'application/json' }, body: JSON.stringify({ password: `${F.password}-admin` }) });
+  const adminTook = !!(await client().auth.signInWithPassword({ email: F.email, password: `${F.password}-admin` })).data.session;
+  check('password: not even the Admin API can change it while email codes are on', !!localSecret && !adminPw.ok && !adminTook, `admin ${adminPw.status}`);
+  psql(`delete from public.mfa_password_permits where user_id = '${fId}'`);
 
   // ------------------------------------------------------------------ removing authenticators at once (W-94)
   const G = await newUser('two-apps');
@@ -405,6 +470,11 @@ try {
 } catch (e) {
   check(`unexpected error: ${e.message}`, false);
 } finally {
+  try {
+    execSync(`docker unpause ${MAILBOX}`, { stdio: 'ignore' });
+  } catch {
+    /* wasn't paused */
+  }
   for (const email of users) psql(`delete from auth.users where email = '${email}'`);
 }
 

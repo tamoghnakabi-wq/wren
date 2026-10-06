@@ -188,22 +188,34 @@ const ENGINE = `({
     return id;
   },
   out(v) { const d = document.createElement('wren-data'); d.setAttribute('data-wren', JSON.stringify(v)); return d; },
-  // What makes a field a secret one (or not typeable), read again after every step that runs page
-  // code: a focus or beforeinput handler can turn the checked text box into a password box.
+  // Everything that decides whether a field is a secret one (and typeable), apart from its contents:
+  // its type, autocomplete and every source of its name (aria-label/labelledby, <label>, placeholder,
+  // title). Read again after every step that can run page code: a focus handler can turn the
+  // checked text box into a password box, or retitle it "Password".
+  names(el) {
+    const byId = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map((i) => { const n = i && document.getElementById(i); return n ? n.innerText : ''; });
+    const labels = el.labels ? Array.from(el.labels).map((l) => l.innerText) : [];
+    return [el.getAttribute('aria-label'), ...byId, ...labels, el.getAttribute('placeholder'), el.getAttribute('title')].join(' ');
+  },
   fieldState(el) {
-    return [el.tagName, el.type, el.getAttribute('type'), el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.disabled, el.readOnly, el.isContentEditable].join('\u0001');
+    return [el.tagName, el.type, el.getAttribute('type'), el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('role'), this.names(el), el.disabled, el.readOnly, el.isContentEditable].join('\u0001');
+  },
+  // The host's credential rule, applied here to what the field is called now.
+  secret(el) {
+    return (el.tagName === 'INPUT' && el.type === 'password') || new RegExp(${JSON.stringify(SECRET_FIELD.source)}, 'i').test([el.getAttribute('type'), el.getAttribute('autocomplete'), this.names(el)].join(' '));
   },
   type(el, text) {
     if (!el) return { error: 'gone' };
     const input = el.tagName === 'INPUT', area = el.tagName === 'TEXTAREA', kind = input ? el.type : '';
     const SET = ['color', 'date', 'time', 'datetime-local', 'month', 'range', 'week'];
-    if (kind === 'password') return { error: 'secret' };
+    if (this.secret(el)) return { error: 'secret' };
     if (!(input && (SET.includes(kind) || ['text', 'email', 'number', 'search', 'tel', 'url'].includes(kind)) || area || el.isContentEditable)) return { error: 'field' };
     if (el.disabled || el.readOnly) return { error: 'disabled' };
     const state = this.fieldState(el);
+    const same = () => this.fieldState(el) === state && !this.secret(el);
     el.focus();
     if (this.focused() !== el) return { error: 'focus' };
-    if (this.fieldState(el) !== state) return { error: 'changed' };
+    if (!same()) return { error: 'changed' };
     const setValue = Object.getOwnPropertyDescriptor(input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype, 'value');
     if (SET.includes(kind)) {
       setValue.set.call(el, text.trim());
@@ -211,31 +223,44 @@ const ENGINE = `({
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return { ok: true };
     }
-    const before = input || area ? setValue.get.call(el) : null;
+    const read = () => (input || area ? setValue.get.call(el) : el.innerHTML);
+    const before = read();
     if (input || area) el.select();
     else { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
     // Last check: nothing of the page's runs between it and the insertion (Chrome fires no
     // beforeinput for the editing command; select fires its event later).
-    if (this.fieldState(el) !== state || this.focused() !== el) return { error: 'changed' };
+    if (!same() || this.focused() !== el) return { error: 'changed' };
     const done = document.execCommand(text ? 'insertText' : 'delete', false, text);
-    // An input handler turned it into something else right after: take the text back out.
-    if (this.fieldState(el) !== state) {
-      if (before !== null) setValue.set.call(el, before);
-      return { error: 'changed' };
+    // An input handler changed the field right after: put its old contents back, and say whether
+    // that worked.
+    if (!same()) {
+      if (input || area) setValue.set.call(el, before);
+      else el.innerHTML = before;
+      return { error: read() === before ? 'changed' : 'kept' };
     }
     return done ? { ok: true } : { error: 'rejected' };
   },
   // Playwright's key syntax: "Shift+Enter" is two keydowns, the modifier's first; "Shift++" ends in "+".
-  keyCount(key) {
-    let n = 1, part = '';
-    for (const c of key) { if (c === '+' && part) { n++; part = ''; } else part += c; }
-    return n;
+  keyParts(key) {
+    const parts = [];
+    let part = '';
+    for (const c of key) { if (c === '+' && part) { parts.push(part); part = ''; } else part += c; }
+    parts.push(part);
+    return parts;
+  },
+  // Whether a keydown is the press's expected key (Playwright names: "Enter", "a", "KeyA", "Digit1", "Space", ...).
+  isKey(e, part) {
+    if (part === 'ControlOrMeta') return e.key === 'Control' || e.key === 'Meta';
+    if (e.key === part || e.code === part || (part === 'Space' && e.key === ' ')) return true;
+    if (part.length !== 1) return false;
+    return e.key.toLowerCase() === part.toLowerCase() || e.code === 'Key' + part.toUpperCase() || e.code === 'Digit' + part;
   },
   arm(el, key) {
     this.disarm();
     if (!el || this.focused() !== el) return { error: 'focus' };
     const page = el === document.documentElement;
-    const g = { delivered: false, blocked: false, fixes: 0, downs: 0, needs: this.keyCount(key || 'Enter') };
+    const parts = this.keyParts(key || 'Enter');
+    const g = { delivered: false, blocked: false, fixes: 0, downs: 0 };
     const mine = (t) => t === el || (page && (t === document.body || t === document.documentElement || t === document));
     // Something moved focus before the key itself arrived (a timer, or a handler of one of the
     // chord's modifiers): put it back (after the mover's script ends).
@@ -250,12 +275,15 @@ const ENGINE = `({
     // Every event of the press is checked, modifiers included. Until the last keydown (the key
     // itself) has reached the node, an event aimed elsewhere is stopped and reported. After it, the
     // key's own effect may move focus; the rest of the press (keypress, keyups) is then kept from
-    // landing on whatever has focus now.
+    // landing on whatever has focus now. Only real input counts (a page can dispatch its own
+    // keyboard events, but can't make them trusted), and each keydown must be the next key of the
+    // press, so a page can't fake "the key arrived".
     const onKey = (e) => {
+      if (!e.isTrusted) return;
       const ok = mine(e.composedPath()[0]);
       if (!g.delivered) {
         if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); g.blocked = true; return; }
-        if (e.type === 'keydown' && ++g.downs >= g.needs) g.delivered = true;
+        if (e.type === 'keydown' && g.downs < parts.length && this.isKey(e, parts[g.downs]) && ++g.downs === parts.length) g.delivered = true;
         return;
       }
       if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); }
@@ -548,4 +576,5 @@ const TYPE_ERRORS: Record<string, string> = {
   focus: 'Focus moved to something else when Wren selected that field, so nothing was typed. Take a new snapshot and check the page.',
   rejected: 'The page did not accept the text.',
   changed: 'The field changed while Wren was typing into it (for example into a password field), so nothing was typed. Take a new snapshot and check the page.',
+  kept: 'The field changed while Wren was typing into it (for example into a password field), and Wren could not take the text back out. Take a new snapshot and check the field.',
 };

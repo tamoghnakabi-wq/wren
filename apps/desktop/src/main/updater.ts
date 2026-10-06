@@ -131,13 +131,25 @@ interface Pending {
 /** An installer still running after this long is treated as gone (it never takes nearly this long). */
 const INSTALL_MAX_MS = 30 * 60_000;
 
-function readPending(): Pending | null {
+const pendingPath = () => join(dataDir(), 'update-pending.json');
+
+function readPending(marker = pendingPath()): Pending | null {
   try {
-    return JSON.parse(readFileSync(join(dataDir(), 'update-pending.json'), 'utf8')) as Pending;
+    return JSON.parse(readFileSync(marker, 'utf8')) as Pending;
   } catch {
     return null;
   }
 }
+
+/** Replace the marker in one step (a reader never sees half of it). */
+function writePending(p: Pending, marker = pendingPath()) {
+  const tmp = `${marker}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(p));
+  renameSync(tmp, marker);
+}
+
+/** Where the installer from the last run of Wren stands: at work, gone, or alive but not identifiable. */
+export type InstallerState = 'running' | 'gone' | 'unknown';
 
 export class Updater {
   state: UpdateState = { available: false };
@@ -155,7 +167,7 @@ export class Updater {
   cleanup() {
     // Reopened while the installer still runs: its files and its marker are still in use (W-96).
     if (this.installerRunning()) return;
-    const pending = join(dataDir(), 'update-pending.json');
+    const pending = pendingPath();
     if (existsSync(pending)) {
       const p = readPending();
       if (p?.version) {
@@ -183,30 +195,43 @@ export class Updater {
 
   /**
    * Whether the installer the last run of Wren handed off to is still at work: its process is alive
-   * and is that installer (not another program that got the pid later). Wren started again in the
-   * middle of an install must leave it alone.
+   * and is that installer (not another program that got the pid later). `unknown` (alive, but which
+   * program it is couldn't be read) counts as running: a failed check must never let Wren delete
+   * files an installer may be using (W-104). The marker's age bounds all of this.
    */
-  installerRunning(): boolean {
-    const p = readPending();
-    if (!p || !Number.isInteger(p.pid) || !p.installer || !p.at || Date.now() - p.at > INSTALL_MAX_MS) return false;
-    try {
-      process.kill(p.pid!, 0);
-    } catch {
-      return false;
-    }
-    try {
-      if (process.platform === 'win32') {
-        const exe = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${p.pid}").ExecutablePath`], {
-          encoding: 'utf8',
-          timeout: 15000,
-          windowsHide: true,
-        }).trim();
-        return exe.toLowerCase() === p.installer.toLowerCase();
+  installerState(marker = pendingPath()): InstallerState {
+    const p = readPending(marker);
+    if (!p || !Number.isInteger(p.pid) || !p.installer || !p.at || Date.now() - p.at > INSTALL_MAX_MS) return 'gone';
+    const alive = () => {
+      try {
+        process.kill(p.pid!, 0);
+        return true;
+      } catch {
+        return false; // gone, or another user's process (the installer runs as this user)
       }
-      return execFileSync('/bin/ps', ['-o', 'command=', '-p', String(p.pid)], { encoding: 'utf8', timeout: 5000 }).includes(p.installer);
+    };
+    if (!alive()) return 'gone';
+    let seen = '';
+    try {
+      seen =
+        process.platform === 'win32'
+          ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${p.pid}").ExecutablePath`], {
+              encoding: 'utf8',
+              timeout: 15000,
+              windowsHide: true,
+            }).trim()
+          : execFileSync('/bin/ps', ['-o', 'command=', '-p', String(p.pid)], { encoding: 'utf8', timeout: 5000 }).trim();
     } catch {
-      return false;
+      /* couldn't ask */
     }
+    if (!seen) return alive() ? 'unknown' : 'gone';
+    const same = process.platform === 'win32' ? seen.toLowerCase() === p.installer.toLowerCase() : seen.includes(p.installer);
+    return same ? 'running' : 'gone';
+  }
+
+  /** The installer may still be at work (running, or alive and not identifiable): leave its files alone. */
+  installerRunning(marker?: string): boolean {
+    return this.installerState(marker) !== 'gone';
   }
 
   /** The signed update for this platform, if the server has one newer than `version`. */
@@ -473,8 +498,14 @@ rm -rf "$BUNDLE.old" "$STAGING" "$FILE"
       child.once('error', done);
       child.once('spawn', () => {
         child.unref();
-        // Which process is installing, so a Wren opened again meanwhile keeps out of its way.
-        writeFileSync(pending, JSON.stringify({ version: this.state.version ?? '', pid: child.pid, installer: process.platform === 'win32' ? cmd : args[0], at: Date.now() } satisfies Pending));
+        // Which process is installing, so a Wren opened again meanwhile keeps out of its way. The
+        // installer already runs, so a failed write can't stop the hand-off (the version-only
+        // marker written above stays) (W-105).
+        try {
+          writePending({ version: this.state.version ?? '', pid: child.pid, installer: process.platform === 'win32' ? cmd : args[0], at: Date.now() }, pending);
+        } catch {
+          /* best effort */
+        }
         done(null);
       });
     });

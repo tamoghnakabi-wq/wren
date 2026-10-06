@@ -48,9 +48,15 @@ export async function mfaStatusFor(u: AuthUser): Promise<MfaStatusFor> {
   return { ...mfaStatus(facts, { aal: u.aal, amr: u.amr }), facts };
 }
 
+/** Calls to Supabase Auth give up after this long (a send holds the account's send lock meanwhile). */
+const AUTH_TIMEOUT_MS = 15000;
+
 /** A fresh Supabase Auth client that keeps nothing: each code check signs in on its own. */
 function authClient() {
-  return createClient(env.supabaseUrl, env.supabaseKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+  return createClient(env.supabaseUrl, env.supabaseKey, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(AUTH_TIMEOUT_MS) }) },
+  });
 }
 
 const jwtClaims = (token: string) => JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString()) as { sub?: string; session_id?: string };
@@ -72,37 +78,37 @@ export async function sendEmailCode(u: AuthUser, purpose: CodePurpose): Promise<
   const allowed =
     purpose === 'sign_in' ? s.method === 'email' && !s.satisfied : purpose === 'step_up' ? s.method !== 'totp' && s.satisfied : !s.facts.email && s.facts.factors === 0 && s.satisfied;
   if (!allowed) throw new HttpError(409, purpose === 'step_up' && s.method === 'totp' ? 'Use your authenticator app to confirm.' : 'An email code isn’t needed for this.', 'not_needed');
-  const sql = db();
-  const r = await sql.begin(async (tx): Promise<{ challengeId?: string; sent?: boolean; wait: number }> => {
+  // One send at a time per account, from the rate checks through Supabase's answer (W-101): the
+  // order of requests is the order Supabase made their codes in, and a request only becomes visible
+  // (to verify, or to hand out again) once Supabase has sent its code (W-100).
+  const r = await db().begin(async (tx): Promise<{ challengeId?: string; sent?: boolean; wait: number; failed?: boolean }> => {
     await tx`select pg_advisory_xact_lock(hashtext(${`mfa-email:${u.id}`}))`;
     const [last] = await tx`select id, session_id, purpose, email, used_at, superseded_at, extract(epoch from now() - sent_at)::float as ago
       from public.mfa_email_requests where user_id = ${u.id} order by sent_at desc limit 1`;
     if (last && last.ago < RESEND_SECONDS) {
       const wait = Math.ceil(RESEND_SECONDS - last.ago);
-      // This session's code for the same thing is on its way (a reload, a second click): use that one.
+      // This session's code for the same thing went out moments ago (a reload, a second click): use that one.
       if (last.session_id === u.sessionId && last.purpose === purpose && last.email === email && !last.used_at && !last.superseded_at) return { challengeId: last.id as string, sent: false, wait };
       return { wait };
     }
     const [{ n }] = await tx`select count(*)::int as n from public.mfa_email_requests where user_id = ${u.id} and sent_at > now() - interval '1 hour'`;
     if (n >= MAX_SENDS_PER_HOUR) return { wait: -1 };
     const [row] = await tx`insert into public.mfa_email_requests (user_id, session_id, purpose, email) values (${u.id}, ${u.sessionId!}, ${purpose}, ${email}) returning id`;
+    const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+    if (error) {
+      // Nothing was sent: this request can't be finished (an earlier code, if any, still can). It
+      // still counts against the limits.
+      await tx`update public.mfa_email_requests set superseded_at = now() where id = ${row.id}`;
+      return { wait: RESEND_SECONDS, failed: true };
+    }
+    // Supabase keeps only the newest code for an account: older requests can't be finished any more.
+    await tx`update public.mfa_email_requests set superseded_at = now() where user_id = ${u.id} and id <> ${row.id} and used_at is null and superseded_at is null`;
     return { challengeId: row.id as string, sent: true, wait: RESEND_SECONDS };
   });
+  if (r.failed) throw new HttpError(502, 'The code couldn’t be sent. Try again in a minute.', 'email_failed');
   if (!r.challengeId) {
     if (r.wait < 0) throw new HttpError(429, 'Too many codes were sent in the last hour. Try again later.', 'code_limit');
     throw new HttpError(429, `A code was just sent. You can ask for another in ${r.wait} seconds.`, 'code_cooldown');
-  }
-  if (r.sent) {
-    const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
-    if (error) {
-      // Nothing was sent: this request can't be finished (an earlier code, if any, still can).
-      await sql`update public.mfa_email_requests set superseded_at = now() where id = ${r.challengeId}`;
-      throw new HttpError(502, 'The code couldn’t be sent. Try again in a minute.', 'email_failed');
-    }
-    // Supabase keeps only the newest code for an account: older requests can't be finished any more.
-    await sql`update public.mfa_email_requests set superseded_at = now()
-      where user_id = ${u.id} and id <> ${r.challengeId} and sent_at <= (select sent_at from public.mfa_email_requests where id = ${r.challengeId})
-        and used_at is null and superseded_at is null`;
   }
   return { challengeId: r.challengeId, sent: !!r.sent, wait: r.wait };
 }
@@ -144,14 +150,29 @@ export async function verifyEmailCode(u: AuthUser, rawCode: string, challengeId:
     throw new HttpError(400, 'That code isn’t right.', 'code_invalid');
   }
 
-  await sql.begin(async (tx) => {
+  // Recording: the extra session ends first and stays ended whatever happens next (W-97). Then,
+  // under the request's row lock, everything is checked again as it is now (W-100): the request is
+  // still the account's open one, this session still exists, the address is still the one the
+  // code went to, and "enable" still has no authenticator to give way to.
+  const outcome = await sql.begin(async (tx) => {
     const [{ ended }] = await tx`select public.wren_end_otp_session(${u.id}, ${extra.session_id ?? null}) as ended`;
     if (!ended) throw new HttpError(502, 'The code couldn’t be checked. Ask for a new one.', 'code_failed');
+    const [open] = await tx`select id from public.mfa_email_requests where id = ${req.id} and used_at is null and superseded_at is null for update`;
+    if (!open) return 'superseded' as const;
+    const [now] = await tx`select * from public.wren_mfa_state(${u.id}, ${u.sessionId!})`;
+    if (!now?.session_alive) return 'session' as const;
+    if (now.user_email !== req.email) return 'email' as const;
+    if (purpose === 'enable' && Number(now.factors) > 0) return 'factor' as const;
     await tx`update public.mfa_email_requests set used_at = now() where id = ${req.id}`;
     await tx`insert into public.mfa_session_checks (session_id, user_id, email_verified_at) values (${u.sessionId!}, ${u.id}, now())
       on conflict (session_id) do update set email_verified_at = now() where public.mfa_session_checks.user_id = excluded.user_id`;
     if (purpose === 'enable') await tx`insert into public.mfa_email (user_id) values (${u.id}) on conflict do nothing`;
+    return 'ok' as const;
   });
+  if (outcome === 'superseded') throw new HttpError(400, 'A newer code was sent. Use the code from the newest email, or ask for a new one.', 'code_superseded');
+  if (outcome === 'session') throw new HttpError(401, 'This sign-in has ended. Sign in again.', 'session_ended');
+  if (outcome === 'email') throw new HttpError(400, 'Your email address changed since that code was sent. Ask for a new one.', 'code_expired');
+  if (outcome === 'factor') throw new HttpError(409, 'Email codes can’t be turned on while an authenticator app is set up.', 'not_needed');
   return purpose;
 }
 

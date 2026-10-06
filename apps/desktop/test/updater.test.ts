@@ -17,6 +17,10 @@ const h = vi.hoisted(() => ({
   quits: 0,
   launch: 'spawn' as 'spawn' | 'error',
   launched: [] as string[],
+  /** The process check (ps / CIM) fails, as on a timeout or a refused query. */
+  probeFails: false,
+  /** Publishing the installer's pid in the marker fails (disk error), after the installer started. */
+  markerFails: false,
 }));
 
 vi.mock('electron', () => ({
@@ -35,14 +39,34 @@ vi.mock('electron', () => ({
 // The installer launch: emits 'spawn' or 'error' like a real child process would.
 vi.mock('node:child_process', async (orig) => {
   const { EventEmitter } = await import('node:events');
+  const real = await orig<typeof import('node:child_process')>();
   return {
-    ...(await orig<typeof import('node:child_process')>()),
+    ...real,
+    execFileSync: ((...a: Parameters<typeof real.execFileSync>) => {
+      if (h.probeFails) throw new Error('timed out');
+      return real.execFileSync(...a);
+    }) as typeof real.execFileSync,
     spawn: (cmd: string) => {
       h.launched.push(cmd);
       const child = Object.assign(new EventEmitter(), { unref: () => {}, pid: 4242 });
       setTimeout(() => (h.launch === 'spawn' ? child.emit('spawn') : child.emit('error', new Error('spawn EPERM'))), 0);
       return child;
     },
+  };
+});
+// Writing the full marker (with the installer's pid) fails on demand.
+vi.mock('node:fs', async (orig) => {
+  const real = await orig<typeof import('node:fs')>();
+  return {
+    ...real,
+    writeFileSync: ((file: Parameters<typeof real.writeFileSync>[0], data: Parameters<typeof real.writeFileSync>[1], ...rest: unknown[]) => {
+      if (h.markerFails && String(data).includes('"pid"')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      return (real.writeFileSync as (...x: unknown[]) => void)(file, data, ...rest);
+    }) as typeof real.writeFileSync,
+    renameSync: ((from: string, to: string) => {
+      if (h.markerFails && String(to).endsWith('update-pending.json')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      return real.renameSync(from, to);
+    }) as typeof real.renameSync,
   };
 });
 // Manifest signatures are covered by the release tooling; here every manifest counts as signed.
@@ -108,6 +132,8 @@ beforeEach(() => {
   h.quits = 0;
   h.launch = 'spawn';
   h.launched = [];
+  h.probeFails = false;
+  h.markerFails = false;
   changes = 0;
   u = new Updater(() => changes++);
 });
@@ -255,6 +281,17 @@ describe('Updater install handoff (W-83)', () => {
     expect(pending.installer).toContain(join(dir, 'install-'));
   });
 
+  it('still hands off (and settles) when the installer\'s pid can\'t be written to the marker (W-105)', async () => {
+    ready();
+    h.markerFails = true;
+    let resumed = 0;
+    vi.useRealTimers();
+    await u.install(async () => true, () => resumed++);
+    expect(h.quits).toBe(1);
+    expect(resumed).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'))).toEqual({ version: '0.1.9' });
+  });
+
   it('at the next start, says the last install did not happen (and why), and repeats it with the next ready update', async () => {
     writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9' }));
     writeFileSync(join(dir, 'update-failed.txt'), 'the update could not be unpacked\n');
@@ -302,6 +339,30 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     expect(existsSync(staging)).toBe(false);
     expect(existsSync(join(dir, 'update-pending.json'))).toBe(false);
     expect(u.state.error).toMatch(/last attempt to install 0\.1\.9 failed/);
+  });
+
+  it('keeps the install\'s files when the process check fails for a live pid (W-104)', async () => {
+    const { spawn: realSpawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    const staging = join(dir, 'install-def');
+    mkdirSync(staging, { recursive: true });
+    const script = join(staging, 'install.sh');
+    writeFileSync(script, 'sleep 30\n');
+    const child = realSpawn('/bin/sh', [script], { stdio: 'ignore' });
+    await new Promise((r) => child.once('spawn', r));
+    try {
+      writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', pid: child.pid, installer: script, at: Date.now() }));
+      h.probeFails = true;
+      expect(u.installerState()).toBe('unknown');
+      expect(u.installerRunning()).toBe(true);
+      u.cleanup();
+      expect(existsSync(staging)).toBe(true);
+      expect(existsSync(join(dir, 'update-pending.json'))).toBe(true);
+    } finally {
+      child.kill('SIGKILL');
+      await new Promise((r) => child.once('exit', r));
+    }
+    // Once the process is gone a failing check doesn't matter any more.
+    expect(u.installerState()).toBe('gone');
   });
 
   it('does not mistake another process (a reused pid) or an old marker for the installer', async () => {

@@ -58,29 +58,29 @@ if (process.argv.includes('--selftest')) {
 }
 /**
  * A stand-in installer (a long-running system program) recorded the way launchInstaller records the
- * real one: recognised while it runs, not once it has ended. Uses the data folder's marker, so it
- * only runs where there is no pending update.
+ * real one: recognised while it runs, not once it has ended. Uses its own marker in a temporary
+ * folder, never the data folder's (a real update may be pending there) (W-107).
  */
 async function installerSelfTest(): Promise<Record<string, unknown> & { ok: boolean }> {
-  const { existsSync, rmSync } = await import('node:fs');
-  const { dataDir } = await import('./config');
-  const marker = join(dataDir(), 'update-pending.json');
-  if (existsSync(marker)) return { ok: true, skipped: 'an update is pending' };
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'wren-installer-test-'));
+  const marker = join(dir, 'update-pending.json');
   const win = process.platform === 'win32';
   const cmd = win ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'PING.EXE') : '/bin/sleep';
   const child = spawn(cmd, win ? ['-n', '30', '127.0.0.1'] : ['30'], { stdio: 'ignore', windowsHide: true });
-  await new Promise<void>((ok, fail) => (child.once('spawn', ok), child.once('error', fail)));
   try {
+    await new Promise<void>((ok, fail) => (child.once('spawn', ok), child.once('error', fail)));
     writeFileSync(marker, JSON.stringify({ version: '0.0.0', pid: child.pid, installer: cmd, at: Date.now() }));
     const probe = new Updater(() => {});
-    const running = probe.installerRunning();
+    const running = probe.installerState(marker);
     child.kill();
     await new Promise((r) => child.once('exit', r));
-    const after = probe.installerRunning();
-    return { ok: running && !after, running, after };
+    const after = probe.installerState(marker);
+    return { ok: running === 'running' && after === 'gone', running, after };
   } finally {
     child.kill();
-    rmSync(marker, { force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 

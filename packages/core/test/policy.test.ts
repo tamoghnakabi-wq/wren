@@ -5,7 +5,7 @@ import { isPrivateAddress } from '../src/net';
 describe('shell risk', () => {
   const desk = (c: string) => assessShell(c, 'desktop');
   it('treats read-only commands as low', () => {
-    for (const c of ['ls -la', 'git branch -v', 'git rev-parse --abbrev-ref HEAD', 'cat README.md | head -20', 'node --version', 'rg TODO src', 'gh pr list']) {
+    for (const c of ['ls -la', 'git branch -v', 'git rev-parse --abbrev-ref HEAD', 'cat README.md | head -20', 'git --version', 'rg TODO src', 'gh pr list']) {
       expect(desk(c).risk, c).toBe('low');
     }
   });
@@ -106,6 +106,16 @@ describe('shell risk', () => {
       expect(isReadOnlyCommand(c), c).toBe(false);
     }
   });
+  it('never counts options that run a program as read-only (W-99)', () => {
+    // All verified to run the helper on macOS: man -P (even without a terminal), sort's compressor
+    // (abbreviations too), and `cargo --version` through a rust-toolchain.toml `path`.
+    for (const c of ["/usr/bin/man -P '/bin/sh helper.sh' ls", 'man -P ./helper ls', 'man -C cfg ls', 'man -M ./pages ls', 'man -H ls', 'sort --compress-program=./helper -S 1K in.txt', 'sort --compress-prog=./x in', 'sort --co=./x in', 'sort --compress-program ./x in', "less '+!./x' a.txt", 'less -o log a.txt', 'more +!x a.txt', 'file -z a.gz', 'rg -z TODO', 'rg --search-zip TODO', 'ag --pager ./x TODO', 'cargo --version', 'rustc --version', 'node --version', 'yarn --version', 'python3 --version']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+    }
+    for (const c of ['man ls', 'man 3 printf', 'man -k socket', 'sort -n data.txt', 'sort -k2 -t, data.csv', 'less README.md', 'file a.gz', 'rg TODO src', 'git --version', 'gh --version', 'docker --version']) {
+      expect(isReadOnlyCommand(c), c).toBe(true);
+    }
+  });
   it('treats pager variables as choosing a program (PAGER=./x man ls runs ./x)', () => {
     for (const c of ['PAGER=./x man ls', 'GIT_PAGER=./x git branch', 'MANPAGER=./x man ls']) expect(isReadOnlyCommand(c), c).toBe(false);
     expect(isReadOnlyCommand('TERM=dumb ls')).toBe(true);
@@ -127,10 +137,11 @@ describe('shell risk', () => {
     expect(isReadOnlyCommand('echo hi > x')).toBe(false);
   });
   it('W-74: a bare name counts as read-only only if the host vouches for the program it resolves to', () => {
-    const trust = (name: string) => name !== 'ls' && name !== 'node';
+    const trust = (name: string) => name !== 'ls' && name !== 'git';
     expect(assessShell('ls -la', 'desktop', trust)).toMatchObject({ risk: 'medium', reason: expect.stringMatching(/folder agents can write/) });
     expect(assessShell('cat a.txt | ls', 'desktop', trust).risk).toBe('medium');
-    expect(assessShell('node --version', 'desktop', trust).risk).toBe('medium');
+    expect(assessShell('git --version', 'desktop', trust).risk).toBe('medium');
+    expect(assessShell('git --version', 'desktop', () => true).risk).toBe('low');
     expect(isReadOnlyCommand('ls', trust)).toBe(false);
     expect(assessShell('cat a.txt', 'desktop', trust).risk).toBe('low');
     // The system's own utility by full path doesn't depend on PATH.

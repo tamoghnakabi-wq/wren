@@ -304,6 +304,74 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
+  it('W-102/W-103/W-106: no faked key delivery, every name of a field is re-checked, and a refused edit is undone', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const page = context.pages()[0];
+      await page.setContent(`
+        <input id=t title="Query"><label for=lab>Card number</label><input id=lab>
+        <span id=l1>Security</span> <span id=l2>code</span><input id=lby aria-labelledby="l1 l2">
+        <div id=ce contenteditable aria-label="Draft">old text</div>
+        <input id=k aria-label="Search box"><textarea id=keys aria-label="Keys"></textarea>
+        <script>
+          // Only the title changes on focus (it is the field's label: "Password" makes it a secret field).
+          document.getElementById('t').addEventListener('focus', (e) => { e.target.title = 'Password'; });
+          // Renamed as soon as text goes in: the old text must come back.
+          document.getElementById('ce').addEventListener('input', (e) => { e.target.setAttribute('aria-label', 'Password'); });
+          // A capture listener registered before Wren's: swallows the real Enter and fakes keydowns instead.
+          window.addEventListener('keydown', (e) => {
+            if (!e.isTrusted || e.target.id !== 'k' || e.key !== 'Enter') return;
+            e.preventDefault(); e.stopImmediatePropagation();
+            for (let i = 0; i < 3; i++) e.target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          }, true);
+        </script>`);
+      const snap = (await ctl.act({ action: 'snapshot', tab: 'T' })).snapshot ?? '';
+      const typeIntoRef = async (r: string, text: string) => {
+        const t = (await ctl.act({ action: 'describe', ref: r, tab: 'T' })).target!;
+        return ctl.act({ action: 'type', ref: r, text, tab: 'T', expect: t });
+      };
+      // The snapshot tags each field with its ref.
+      const refOf = async (sel: string) => (await page.locator(sel).getAttribute('data-wren-ref'))!;
+      expect(snap).toContain('Search box');
+
+      const titled = await typeIntoRef(await refOf('#t'), 'my-text');
+      expect(titled.ok).toBe(false);
+      expect(await page.locator('#t').inputValue()).toBe('');
+      const labelled = await typeIntoRef(await refOf('#lab'), '4111');
+      expect(labelled.ok).toBe(false);
+      expect(labelled.error).toMatch(/credentials/);
+      const byIds = await typeIntoRef(await refOf('#lby'), '123');
+      expect(byIds.ok).toBe(false);
+      expect(await page.locator('#lby').inputValue()).toBe('');
+      const draft = await typeIntoRef(await refOf('#ce'), 'new text');
+      expect(draft.ok).toBe(false);
+      expect(draft.error).toMatch(/changed/);
+      expect(await page.locator('#ce').textContent()).toBe('old text');
+
+      // The real Enter never reaches Wren's guard; the page's fakes don't count as it.
+      await page.focus('#k');
+      const k = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+      const faked = await ctl.act({ action: 'press', key: 'Enter', tab: 'T', expect: k });
+      expect(faked.ok).toBe(false);
+      expect(faked.error).toMatch(/could not confirm/);
+
+      // Ordinary keys and chords still confirm.
+      await page.focus('#keys');
+      for (const key of ['Enter', 'a', 'Shift+A', 'Shift+1', 'Digit2', 'Space', 'ArrowLeft', 'Backspace', 'Escape', 'PageDown', 'ControlOrMeta+a', 'Control+Shift+ArrowLeft', 'Shift++']) {
+        await page.focus('#keys');
+        const t = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+        const r = await ctl.act({ action: 'press', key, tab: 'T', expect: t });
+        expect(r.ok, `${key}: ${r.error}`).toBe(true);
+      }
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
   it('W-80: closing a task closes its popups too, and says so when it can\'t', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });
