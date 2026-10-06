@@ -41,9 +41,11 @@ export function Composer({
   const [files, setFiles] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const [pickAgent, setPickAgent] = useState(false);
-  // The list opens upward from the composer, unless there isn't room above (the composer near the
-  // top of the page): then downward, so no agent ends up off screen.
-  const [pickDown, setPickDown] = useState(false);
+  // The list drops down from the composer (it sits near the top of the home page), unless there
+  // isn't room below and there's more above: then it opens upward, so no agent ends up off screen.
+  const [pickDown, setPickDown] = useState(true);
+  // If neither side has room for every agent (a short window), the list shrinks to fit and scrolls.
+  const [pickMax, setPickMax] = useState(320);
   const [runtime, setRuntime] = useState<'cloud' | 'desktop' | undefined>(undefined);
   const [dragging, setDragging] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -201,7 +203,10 @@ export function Composer({
               onClick={(e) => {
                 const r = e.currentTarget.getBoundingClientRect();
                 const need = Math.min(320, agents.length * 53 + 10);
-                setPickDown(r.top < need + 8 && window.innerHeight - r.bottom > r.top);
+                const below = window.innerHeight - r.bottom;
+                const down = below >= need + 8 || below >= r.top;
+                setPickDown(down);
+                setPickMax(Math.max(120, Math.min(320, (down ? below : r.top) - 12)));
                 setPickAgent((v) => !v);
               }}
               aria-haspopup="listbox"
@@ -225,7 +230,8 @@ export function Composer({
                   const i = list.indexOf(document.activeElement as HTMLElement);
                   list[(i + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length]?.focus();
                 }}
-                className={cx('pop-in absolute left-0 z-20 max-h-80 w-64 overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-pop scrollbar-thin', pickDown ? 'top-10 origin-top-left' : 'bottom-10 origin-bottom-left')}
+                style={{ maxHeight: pickMax }}
+                className={cx('pop-in absolute left-0 z-20 w-64 overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-pop scrollbar-thin', pickDown ? 'top-10 origin-top-left' : 'bottom-10 origin-bottom-left')}
               >
                 {agents.map((a) => (
                   <button
