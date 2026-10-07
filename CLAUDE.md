@@ -106,7 +106,7 @@ qa/                   empty
 - **Policy is local and re-read before every action** (`loadPolicy()`): allowed folders, shell, browser and screen switches, and remote approvals. The server can't change it. Reducing permissions kills running jobs and ends engine runs.
 - **Engines.** The user's own CLIs are driven unmodified:
   - Claude Code via stream-json, `--permission-prompt-tool` (`mcp-approve.mjs`), `--restricted --tools … --strict-mcp-config`.
-  - Grok Build via `grok agent stdio` (ACP), with a per-run plugin PreToolUse hook (`grok-hook.mjs`).
+  - Grok Build via `grok agent stdio` (ACP), with a per-run plugin PreToolUse hook (`grok-hook.mjs`). A follow-up resumes the CLI session with `session/load`, which replays the whole conversation as `session/update` notifications before it answers (verified with the real CLI); those are ignored until the load's response, or every old reply and tool call is written again (fixed in 0.1.14, `test/grok-build.test.ts` drives the engine against a fake ACP agent). A `tool_call` that arrives already `completed` is closed at once.
   - Engine tool calls are mirrored into the timeline by `TimelineWriter` and approved by the same policy.
   - After each completed engine turn a `reasoning` event `{engine, consumedSeq}` is appended. The next turn's prompt is `pendingAsks(events)`. A separate `reasoning` event `{engine, resumeId}` stores the CLI session; the resume lookup must require `resumeId`.
 - **Updater.** It reads `/api/updates` (GitHub releases, revalidated every 300 s) and checks the manifest's ed25519 signature against the public key built into the app. It downloads to `<dataDir>/updates`.
@@ -126,7 +126,8 @@ qa/                   empty
 - `Wren --selftest` prints JSON and exits; CI uses it. `--selftest --update` also downloads the latest published release through the real updater path, and `--selftest --proctree` checks that something a command leaves running is found and stopped (Windows: ends with its Job Object, and is found by parent id without one), and that a running installer is recognised by its process (with its own marker in a temp folder, never the data folder's, W-107). CI runs both on mac and Windows.
 
 ### Models (`packages/core/src/models`, `apps/web/src/lib/models.ts`)
-- The model sources are: `openai`, `anthropic`, `xai`, `gateway` (Vercel AI Gateway), `platform` (operator's Gateway credits, only for `PLATFORM_MODEL_USERS`), `chatgpt` (desktop only), `local`, `claude-code`, `grok-build`.
+- The model sources are: `openai`, `anthropic`, `xai`, `gateway` (Vercel AI Gateway), `platform` ("Wren credits": the operator's Gateway credits, only for `PLATFORM_MODEL_USERS`), `chatgpt` (desktop only), `local`, `claude-code`, `grok-build`.
+- **Wren credits are switched OFF for every account (2026-10-07).** One switch, `PLATFORM_CREDITS_ENABLED = false` in `apps/web/src/lib/platform-credits.ts`. Every path that could spend them goes through that file: cloud runs (`resolveCloudModel`), the desktop model proxy, `/api/models?source=platform`, starting a task (`startTask`, so schedules too) and choosing them for an agent (`/api/agents`). Each calls `assertPlatformAllowed()` (403 `platform_disabled`), and the operator token only comes from `operatorGatewayToken()`, which refuses too. `/api/me` reports `flags.platform: false`, so the UI hides the card. An agent still set to Wren credits can be edited; its Settings say they're off and its tasks are refused. `test/platform-credits.test.ts` fails if anything else imports `@vercel/oidc`. To re-enable: set the constant to `true` and deploy (`PLATFORM_MODEL_USERS` still limits accounts). It is deliberately not an env var.
 - Desktop API-key runs go through `/api/device/runs/:id/model`, so keys stay on the server.
 - `ResponsesClient` sends every tool namespace as `wren_<ns>`, because OpenAI rejects namespaces that collide with its own reserved ones, such as `computer`.
 - `WREN_TEST_MODEL=1` enables the `#script` model (`models/scripted.ts`). A user message `#script [{"call":"computer.shell","args":{…}}, {"calls":[…]}, {"fail":"…"}, {"say":"done"}]` runs one step per model turn.
@@ -328,7 +329,7 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 61 (+9 real-Chrome skipped), desktop 37, web 17
+npm test                               # core 61 (+9 real-Chrome skipped), desktop 40, web 22
 node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (83; needs `npm run dev`; pauses the local mail container briefly)
 node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (28)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
@@ -434,7 +435,7 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
 
 ## Remaining work / open items
 - User actions:
-  - add a card for Vercel AI Gateway (Wren credits return 403 until then)
+  - Wren credits are switched off (see Models); before turning them back on, add a card for Vercel AI Gateway (they return 403 without one)
   - optionally install the desktop app into /Applications
   - optionally move SMTP to Resend once there's a domain
 - Optional cleanups (not started; nothing is half-done):

@@ -35,6 +35,12 @@ function toolFor(call: { kind?: string; title?: string; rawInput?: Record<string
   return { name, args, paths: (call.locations ?? []).map((l) => l.path).filter(Boolean) };
 }
 
+/** What a finished tool call printed, from a `tool_call` or `tool_call_update`. */
+function toolOutput(u: Record<string, unknown>): string {
+  const content = (u.content as { type: string; content?: { text?: string }; text?: string }[] | undefined) ?? [];
+  return content.map((c) => c.content?.text ?? c.text ?? '').join('\n') || (typeof u.rawOutput === 'string' ? u.rawOutput : JSON.stringify(u.rawOutput ?? ''));
+}
+
 /** Grok tool names -> Wren policy names (for the PreToolUse hook). */
 function mapGrokTool(name: string, input: Record<string, unknown>) {
   const n = name.toLowerCase();
@@ -81,10 +87,16 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   const pending = new Map<number, { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }>();
   let nextId = 1;
   let steps = 0;
+  // Resuming a session (`session/load`) makes Grok replay the whole conversation as session/update
+  // notifications before it answers (ACP). That history is already in the timeline: writing it again repeated
+  // every earlier reply at the start of each new one and left the old tool calls "running". Nothing is written
+  // until the load has answered.
+  let replayingUntil: number | null = null;
   const send = (m: RpcMsg) => proc.stdin.write(JSON.stringify(m) + '\n');
   const request = (method: string, params: Record<string, unknown>) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
       const id = nextId++;
+      if (method === 'session/load') replayingUntil = id;
       pending.set(id, { resolve, reject });
       send({ jsonrpc: '2.0', id, method, params });
     });
@@ -98,6 +110,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
       return;
     }
     if (msg.id !== undefined && !msg.method) {
+      if (Number(msg.id) === replayingUntil) replayingUntil = null; // what follows is this turn
       const p = pending.get(Number(msg.id));
       if (!p) return;
       pending.delete(Number(msg.id));
@@ -105,6 +118,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
       else p.resolve(msg.result ?? {});
       return;
     }
+    if (replayingUntil !== null && msg.method === 'session/update') return; // history, replayed by session/load
     chain = chain
       .then(async () => {
         if (msg.method === 'session/update') {
@@ -117,13 +131,11 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
             steps++;
             const t = toolFor(u as never);
             await writer.toolStart(String(u.toolCallId), t.name, (u.rawInput as Record<string, unknown>) ?? t.args, String(u.title ?? t.name));
+            // A call can arrive already finished; without an update to follow, it would spin forever.
+            if (u.status === 'completed' || u.status === 'failed') await writer.toolEnd(String(u.toolCallId), toolOutput(u), u.status === 'failed');
           } else if (kind === 'tool_call_update') {
             const status = u.status as string;
-            if (status === 'completed' || status === 'failed') {
-              const content = (u.content as { type: string; content?: { text?: string }; text?: string }[] | undefined) ?? [];
-              const text = content.map((c) => c.content?.text ?? c.text ?? '').join('\n') || (typeof u.rawOutput === 'string' ? u.rawOutput : JSON.stringify(u.rawOutput ?? ''));
-              await writer.toolEnd(String(u.toolCallId), text, status === 'failed');
-            }
+            if (status === 'completed' || status === 'failed') await writer.toolEnd(String(u.toolCallId), toolOutput(u), status === 'failed');
           } else if (kind === 'plan') {
             const entries = (u.entries as { content: string; status: string }[]) ?? [];
             await run.store.append('plan', { items: entries.map((e) => ({ text: e.content, status: e.status === 'completed' ? 'done' : e.status === 'in_progress' ? 'in_progress' : 'pending' })) }, 'done');

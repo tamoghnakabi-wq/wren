@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
 import { GithubMark as Github } from '../brand';
-import { useId, useMemo, useState } from 'react';
+import { createContext, useContext, useId, useMemo, useState } from 'react';
 import type { Approval, EventRow, PlanItem } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { Markdown } from '../markdown';
@@ -63,6 +63,10 @@ const itemRuns = (it: Item): (string | null | undefined)[] =>
   it.kind === 'tools' ? it.tools.map((t) => t.run_id) : it.kind === 'assistant' ? [it.ev.run_id, ...it.tools.map((t) => t.run_id)] : it.kind === 'stopped' ? [] : [it.ev.run_id];
 
 /** After the last thing a stopped run did, a line says it was stopped. */
+/** Runs that have ended: a step of theirs still marked running never finished (a crash, or history an engine
+ * replayed), so it shows as stopped rather than spinning forever. */
+const EndedRuns = createContext<Set<string>>(new Set());
+
 function markStopped(items: Item[], stopped: Set<string>): Item[] {
   if (!stopped.size) return items;
   const lastIndex = new Map<string, number>();
@@ -110,13 +114,16 @@ function group(events: EventRow[]): Item[] {
   return items;
 }
 
-export function Timeline({ events, agent, approvals, working, waitingFor, stoppedRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; /** The (offline) computer a queued task waits for. */ waitingFor?: string; stoppedRuns?: string[] }) {
+export function Timeline({ events, agent, approvals, working, waitingFor, stoppedRuns, endedRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; /** The (offline) computer a queued task waits for. */ waitingFor?: string; stoppedRuns?: string[]; endedRuns?: string[] }) {
   const stoppedKey = (stoppedRuns ?? []).join(',');
+  const endedKey = (endedRuns ?? []).join(',');
+  const ended = useMemo(() => new Set(endedKey ? endedKey.split(',') : []), [endedKey]);
   const items = useMemo(() => markStopped(group(events), new Set(stoppedKey ? stoppedKey.split(',') : [])), [events, stoppedKey]);
   const last = events[events.length - 1];
   const showThinking = working && !(last?.type === 'message' && last.status === 'streaming' && String(last.data.text ?? ''));
   const toolRunning = events.some((e) => e.type === 'tool' && e.status === 'running');
   return (
+    <EndedRuns.Provider value={ended}>
     <div className="space-y-5">
       {items.map((it, i) => {
         switch (it.kind) {
@@ -159,6 +166,7 @@ export function Timeline({ events, agent, approvals, working, waitingFor, stoppe
         </div>
       )}
     </div>
+    </EndedRuns.Provider>
   );
 }
 
@@ -268,7 +276,9 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const Icon = d.name?.startsWith('mcp_') ? Plug : TOOL_ICONS[d.name] ?? Code2;
-  const status = ev.status ?? 'pending';
+  const ended = useContext(EndedRuns);
+  const raw = ev.status ?? 'pending';
+  const status = (raw === 'running' || raw === 'pending') && ev.run_id && ended.has(ev.run_id) ? 'cancelled' : raw;
   const dur = d.startedAt && d.endedAt ? Math.max(0, Math.round((d.endedAt - d.startedAt) / 100) / 10) : null;
   const images = d.result?.images?.filter((i) => i.artifactId) ?? [];
   const artifacts = d.result?.artifacts ?? [];
