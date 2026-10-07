@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-07: `main` is in sync with `origin/main`; the last code commit is `853a342` (fixes for Codex re-audit #8, W-108…W-113), live in production with migration `wren_0013_mfa_send_state`. The desktop app is at **0.1.13**. The eight Codex security audits (W-1…W-113) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-07: `main` is in sync with `origin/main`; the last code commit is `9003658` (Grok Build follow-ups no longer replay old turns), live in production with migration `wren_0013_mfa_send_state`. The desktop app is at **0.1.14**. Wren credits are switched off for every account (`70afa23`, see Models). The eight Codex security audits (W-1…W-113) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -28,7 +28,7 @@ apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.13: Electron 44
+apps/desktop      wren-desktop 0.1.14: Electron 44
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
