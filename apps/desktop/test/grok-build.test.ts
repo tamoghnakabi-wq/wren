@@ -32,6 +32,12 @@ rl.on('line', (line) => {
   if (m.method === 'session/prompt') {
     const s = m.params.sessionId;
     if (m.params.prompt[0].text.includes('hang')) return; // never answers, ignores session/cancel too
+    const parts = m.params.prompt.map((b) => (b.type === 'text' ? b.text : b.type + ':' + b.mimeType + ':' + b.data));
+    if (parts.length > 1 || m.params.prompt[0].text.includes('[The user attached')) {
+      if (m.params.prompt[0].text.includes('picky') && parts.length > 1) return out({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid params: image content is not supported' } });
+      text(s, parts.join(' | '));
+      return out({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } });
+    }
     text(s, 'New reply.');
     update(s, { sessionUpdate: 'tool_call', toolCallId: 'new-1', title: 'Execute new', kind: 'execute', status: 'pending', rawInput: { command: 'echo new' } });
     update(s, { sessionUpdate: 'tool_call_update', toolCallId: 'new-1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'new' } }] });
@@ -82,7 +88,7 @@ vi.mock('../src/engines/common', () => {
 });
 const { runGrokBuild } = await import('../src/engines/grok-build');
 
-const run = (resumeId?: string, prompt = 'how are you') => {
+const run = (resumeId?: string, prompt = 'how are you', images?: { mime: string; data: string }[]) => {
   const saved: string[] = [];
   const abort = new AbortController();
   return {
@@ -96,6 +102,7 @@ const run = (resumeId?: string, prompt = 'how are you') => {
       instructions: '',
       model: 'default',
       prompt,
+      images,
       cwd: dir,
       folders: [dir],
       allow: { shell: true, browser: true, screen: true },
@@ -142,6 +149,18 @@ describe('Grok Build follow-ups', () => {
       expect(Date.now() - started).toBeLessThan(8000);
     }
   }, 20_000);
+
+  it('sends attached images as ACP image blocks', async () => {
+    const { run: r } = run(undefined, 'What is this?', [{ mime: 'image/png', data: 'iVBORw0' }]);
+    expect(await runGrokBuild(r, () => true, '/dev/null')).toMatchObject({ kind: 'completed', result: 'What is this? | image:image/png:iVBORw0' });
+  });
+
+  it('asks again without them, saying so, when Grok refuses images', async () => {
+    const { run: r } = run(undefined, 'picky: what is this?', [{ mime: 'image/png', data: 'iVBORw0' }]);
+    const outcome = await runGrokBuild(r, () => true, '/dev/null');
+    expect(outcome).toMatchObject({ kind: 'completed' });
+    expect((outcome as { result: string }).result).toMatch(/^picky: what is this\?\n\n\[The user attached an image, but this version of Grok Build couldn’t receive it\.\]$/);
+  });
 
   it('starts a new session when the old one is gone, and remembers it', async () => {
     const { run: r, saved } = run('gone');

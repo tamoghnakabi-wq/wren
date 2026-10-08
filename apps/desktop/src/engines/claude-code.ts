@@ -119,7 +119,11 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   if (run.resumeId) args.push('--resume', run.resumeId);
 
   const proc = await spawnClaude(cli, args, run, approveScript);
-  proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: run.prompt } }) + '\n');
+  // Attached images go in the same message, as Anthropic image blocks (stream-json input, checked with 2.1.294).
+  const content = run.images?.length
+    ? [{ type: 'text', text: run.prompt }, ...run.images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } }))]
+    : run.prompt;
+  proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n');
   const onAbort = () => void stopEngine(proc);
   run.signal.addEventListener('abort', onAbort, { once: true });
 

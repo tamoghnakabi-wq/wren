@@ -210,7 +210,17 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
       await run.saveResumeId(sessionId);
     }
     const prompt = `${run.instructions ? `Instructions from the user for you as the agent "${run.agentName}": ${run.instructions}\n\n` : ''}${run.prompt}`;
-    const res = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt }] });
+    // Attached images as ACP image blocks. Grok 1.0.46 reads them though it reports promptCapabilities.image
+    // false (checked); a version that refuses them gets the prompt again without them, and is told why.
+    const images = (run.images ?? []).map((i) => ({ type: 'image', mimeType: i.mime, data: i.data }));
+    let res: Record<string, unknown>;
+    try {
+      res = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt }, ...images] });
+    } catch (e) {
+      if (!images.length || gone || run.signal.aborted || !/image|invalid params/i.test((e as Error).message)) throw e;
+      const note = `\n\n[The user attached ${images.length === 1 ? 'an image' : `${images.length} images`}, but this version of Grok Build couldn’t receive ${images.length === 1 ? 'it' : 'them'}.]`;
+      res = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt + note }] });
+    }
     await new Promise((r) => setTimeout(r, 300));
     await chain;
     const finalText = writer.currentText;

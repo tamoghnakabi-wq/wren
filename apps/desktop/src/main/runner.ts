@@ -20,6 +20,7 @@ import {
 import { runClaudeCode } from '../engines/claude-code';
 import { runGrokBuild } from '../engines/grok-build';
 import { deviceJson } from './api';
+import { engineImages, withSkipped } from '../engines/images';
 import { detect, type Capabilities } from './capabilities';
 import * as chatgpt from './chatgpt';
 import { loadDevice, loadPolicy, type Policy } from './config';
@@ -251,7 +252,9 @@ export class DeviceRunner {
     const asks = pendingAsks(events);
     const firstAsk = (asks[0]?.data ?? {}) as MessageData & { context?: string };
     const text = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
-    const prompt = `${firstAsk.context ? `${firstAsk.context}\n\n` : ''}${text}`;
+    // Attached images go with the prompt; the server only hands out this run's account's images.
+    const { images, skipped } = await engineImages(asks, (id) => deviceJson(`/api/device/runs/${c.run.id}/artifact`, { id }, { lease: store.lease }));
+    const prompt = withSkipped(`${firstAsk.context ? `${firstAsk.context}\n\n` : ''}${text}`, skipped);
     const engine = c.run.model.source;
     // The engine's own session to continue (reasoning events also carry the follow-up cursor).
     const resume = [...events].reverse().find((e) => e.type === 'reasoning' && (e.data as { engine?: string }).engine === engine && typeof (e.data as { resumeId?: unknown }).resumeId === 'string') as SessionEvent<{ resumeId?: string }> | undefined;
@@ -263,6 +266,7 @@ export class DeviceRunner {
       instructions: c.agent.instructions.split('## Your instructions from the user\n')[1] ?? '',
       model: c.run.model.model,
       prompt,
+      images,
       cwd: policy.folders[0],
       folders: policy.folders,
       // Getters: the switches are checked as they are now on every permission request.

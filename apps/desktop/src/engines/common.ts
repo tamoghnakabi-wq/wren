@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
+import type { EngineImage } from './images';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
@@ -26,6 +27,8 @@ export interface EngineRun {
   instructions: string;
   model: string;
   prompt: string;
+  /** Images the user attached to the messages in `prompt`. */
+  images?: EngineImage[];
   cwd: string;
   folders: string[];
   /** This computer's switches (Settings → This computer); engines must respect them too. */

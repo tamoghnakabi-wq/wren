@@ -17,7 +17,15 @@ const say = (text) => {
   out({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'text', text }] } });
 };
 rl.once('line', (line) => {
-  if (JSON.parse(line).message.content === 'delegate') return delegate();
+  const content = JSON.parse(line).message.content;
+  if (content === 'delegate') return delegate();
+  if (Array.isArray(content)) {
+    // What it was given: the text, then image blocks.
+    out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+    say(content.map((b) => (b.type === 'text' ? b.text : b.type + ':' + b.source.media_type + ':' + b.source.data)).join(' | '));
+    out({ type: 'result', subtype: 'success', is_error: false, result: 'seen', num_turns: 1 });
+    return;
+  }
   out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
   say('Planning.');
   use('c1', 'TaskCreate', { subject: 'Count lines', description: 'Read notes.txt' });
@@ -116,6 +124,13 @@ const engineRun = (prompt: string, extra: Record<string, unknown> = {}) => ({
   signal: new AbortController().signal,
   saveResumeId: async (id: string) => void h.log.push(`session:${id}`),
   ...extra,
+});
+
+describe('Claude Code attached images', () => {
+  it('go in the same message as image blocks', async () => {
+    await runClaudeCode(engineRun('What is in these?', { images: [{ mime: 'image/png', data: 'iVBORw0' }, { mime: 'image/jpeg', data: '/9j/4AAQ' }] }), () => true, '/dev/null');
+    expect(h.log).toContain('message:What is in these? | image:image/png:iVBORw0 | image:image/jpeg:/9j/4AAQ');
+  });
 });
 
 describe('Claude Code background sub-agents', () => {
