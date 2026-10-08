@@ -8,12 +8,12 @@ import { z } from 'zod';
 
 // The bridge's address and token come from Wren's private file (only this server's sandbox profile can
 // read it), never from the command line or the environment, which other processes can read (W-121).
-// The variables are the fallback for an app that didn't write the file.
+// Without it, every request is denied ("Wren is not reachable").
 const { url, token } = (() => {
   try {
     return JSON.parse(readFileSync(process.env.WREN_APPROVAL_FILE ?? '', 'utf8')) as { url: string; token: string };
   } catch {
-    return { url: process.env.WREN_APPROVAL_URL ?? '', token: process.env.WREN_APPROVAL_TOKEN ?? '' };
+    return { url: '', token: '' };
   }
 })();
 

@@ -58,6 +58,8 @@ const agentPath = join(dir, 'fake-grok.cjs');
 writeFileSync(agentPath, AGENT);
 
 const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0 }));
+vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
+process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-grok-data-'));
 vi.mock('../src/engines/common', () => {
   class TimelineWriter {
     text = '';

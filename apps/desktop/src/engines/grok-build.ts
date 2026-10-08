@@ -1,8 +1,8 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import readline from 'node:readline';
 import type { LoopOutcome } from '@wren/core';
+import { dataDir } from '../main/config';
 import { decide, findCli, finishEngine, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
 // Grok Build engine: drives xAI's official `grok` CLI through its documented
@@ -23,6 +23,12 @@ const KIND_TO_TOOL: Record<string, string> = { execute: 'computer.shell', edit: 
 
 function toolFor(call: { kind?: string; title?: string; rawInput?: Record<string, unknown>; locations?: { path: string }[] }) {
   const kind = call.kind ?? 'other';
+  // Grok reports some tools (its "write") with kind "other": name them as its hook does, so the step and the
+  // permission request for the same call agree.
+  if (!KIND_TO_TOOL[kind] || kind === 'other') {
+    const m = mapGrokTool(String(call.title ?? ''), call.rawInput ?? {});
+    if (!m.name.startsWith('grok.')) return { name: m.name, args: m.args, paths: (call.locations ?? []).map((l) => l.path).filter(Boolean).concat(m.paths).filter((p, i, a) => a.indexOf(p) === i) };
+  }
   const input = call.rawInput ?? {};
   const name = KIND_TO_TOOL[kind] ?? 'grok.tool';
   const command = typeof input.command === 'string' ? input.command : Array.isArray(input.command) ? (input.command as string[]).join(' ') : undefined;
@@ -73,15 +79,18 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   // Wren enforces its own approvals with a per-run plugin whose PreToolUse
   // hook asks Wren; Grok's own prompts are turned off for this process so a
   // personal "always-approve" setting can't bypass Wren's policy.
-  const bridge = await startApprovalBridge(async ({ tool_name, input, tool_use_id }) => {
+  const bridge = await startApprovalBridge(async ({ tool_name, input, tool_use_id, signal }) => {
     promptWork++; // a tool is about to run
     const m = mapGrokTool(tool_name, input);
-    if (m.name === 'computer.read_file' && !m.paths.length) return { allow: true };
-    return decide(run, writer, { callId: tool_use_id ?? `hook-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: m.name, args: m.args, title: m.title, paths: m.paths }, inFolders);
+    // A read with no path to check (Grok's own listing tools) needs no decision, but a stopped run still gets none (W-122).
+    if (m.name === 'computer.read_file' && !m.paths.length) return run.signal.aborted || signal.aborted ? { allow: false, message: 'Stopped by the user.' } : { allow: true };
+    return decide(run, writer, { callId: tool_use_id ?? `hook-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: m.name, args: m.args, title: m.title, paths: m.paths }, inFolders, signal);
   });
-  const pluginDir = join(tmpdir(), `wren-grok-${run.runId}`);
-  mkdirSync(join(pluginDir, '.claude-plugin'), { recursive: true });
-  mkdirSync(join(pluginDir, 'hooks'), { recursive: true });
+  // In Wren's data folder, which no agent can write (W-128): in a temp folder another task's command could
+  // change the hook (or remove it) before Grok loads it. Grok's profile may read this folder only.
+  const pluginDir = join(dataDir(), 'engines', `grok-${run.runId}`);
+  mkdirSync(join(pluginDir, '.claude-plugin'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(pluginDir, 'hooks'), { recursive: true, mode: 0o700 });
   writeFileSync(join(pluginDir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wren-approvals', version: '0.1.0', description: 'Routes Grok tool calls through Wren approvals.' }));
   const hookCmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(hookScript)}`;
   writeFileSync(join(pluginDir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: hookCmd, timeout: 3600 }] }] } }));
@@ -89,7 +98,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   const args = ['--no-auto-update', 'agent'];
   if (run.model && run.model !== 'default') args.push('-m', run.model);
   args.push('--always-approve', '--plugin-dir', pluginDir, 'stdio');
-  const proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token });
+  const proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token }, [pluginDir]);
   let stderr = '';
   proc.stderr.on('data', (c) => (stderr = (stderr + c).slice(-4000)));
   const rl = readline.createInterface({ input: proc.stdout });

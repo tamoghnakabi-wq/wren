@@ -18,7 +18,7 @@ const MAX_LOADS = 20;
 function looksLike(mime: string, b64: string): boolean {
   const b = Buffer.from(b64.slice(0, 24), 'base64');
   const ascii = (from: number, to: number) => b.subarray(from, to).toString('latin1');
-  if (mime === 'image/png') return b[0] === 0x89 && ascii(1, 4) === 'PNG';
+  if (mime === 'image/png') return b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   if (mime === 'image/jpeg') return b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
   if (mime === 'image/gif') return ascii(0, 4) === 'GIF8';
   if (mime === 'image/webp') return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP';

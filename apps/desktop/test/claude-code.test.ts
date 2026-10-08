@@ -66,7 +66,7 @@ const dir = mkdtempSync(join(tmpdir(), 'wren-claude-test-'));
 const cliPath = join(dir, 'fake-claude.cjs');
 writeFileSync(cliPath, CLI);
 
-const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[] }));
+const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[], bridgesOpen: 0, spawnFails: false }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-claude-data-'));
 vi.mock('../src/engines/common', () => {
@@ -102,8 +102,13 @@ vi.mock('../src/engines/common', () => {
     findCli: () => '/fake/claude',
     claudeSupportsRestricted: () => true,
     decide: async () => ({ allow: true }),
-    startApprovalBridge: async () => ({ url: 'http://127.0.0.1:9', token: 't', close() {} }),
-    spawnClaude: async (_cli: string, args: string[]) => (h.spawned++, (h.args = args), spawn(process.execPath, [cliPath], { stdio: ['pipe', 'pipe', 'pipe'] })),
+    startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
+    spawnClaude: async (_cli: string, args: string[]) => {
+      if (h.spawnFails) throw new Error('spawn failed');
+      h.spawned++;
+      h.args = args;
+      return spawn(process.execPath, [cliPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+    },
     appPaths: () => [],
     stopEngine: async (p: { kill: () => void }) => p.kill(),
     finishEngine: async (p: { kill: () => void }) => (p.kill(), true),
@@ -155,6 +160,23 @@ describe('Claude Code approval bridge credentials (W-121)', () => {
     expect(file).toBe(join(process.env.WREN_DATA_DIR!, 'approvals', 'r-w121', 'mcp.json'));
     expect(h.args.join(' ')).not.toMatch(/Bearer|token|127\.0\.0\.1/);
     expect(existsSync(file)).toBe(false); // removed when the run ends
+  });
+});
+
+describe('Claude Code setup failures (W-131)', () => {
+  it('close the bridge and remove the private folder whatever fails', async () => {
+    const { existsSync, mkdirSync, writeFileSync: write } = await import('node:fs');
+    h.bridgesOpen = 0;
+    h.spawnFails = true;
+    await expect(runClaudeCode(engineRun('hello', { runId: 'r-spawnfail' }), () => true, '/dev/null')).rejects.toThrow('spawn failed');
+    h.spawnFails = false;
+    expect(h.bridgesOpen).toBe(0);
+    expect(existsSync(join(process.env.WREN_DATA_DIR!, 'approvals', 'r-spawnfail'))).toBe(false);
+    // The private folder can't even be made (a file is in the way).
+    mkdirSync(join(process.env.WREN_DATA_DIR!, 'approvals'), { recursive: true });
+    write(join(process.env.WREN_DATA_DIR!, 'approvals', 'r-blocked'), 'not a folder');
+    await expect(runClaudeCode(engineRun('hello', { runId: 'r-blocked' }), () => true, '/dev/null')).rejects.toThrow();
+    expect(h.bridgesOpen).toBe(0);
   });
 });
 

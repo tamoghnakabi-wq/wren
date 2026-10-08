@@ -71,10 +71,13 @@ async function approveHelperSelfTest(script: string): Promise<boolean> {
   const port = (bridge.address() as { port: number }).port;
   writeFileSync(join(dir, 'approval.json'), JSON.stringify({ url: `http://127.0.0.1:${port}/approve`, token: 'selftest' }));
   const child = spawn(process.execPath, [script], { env: { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_FILE: join(dir, 'approval.json') }, stdio: ['pipe', 'pipe', 'ignore'] });
+  child.stdin.on('error', () => {});
   const send = (m: object) => child.stdin.write(`${JSON.stringify(m)}\n`);
+  let timer: NodeJS.Timeout | undefined;
   try {
     return await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), 20_000);
+      timer = setTimeout(() => resolve(false), 20_000);
+      child.on('error', () => resolve(false));
       let buf = '';
       child.on('exit', () => resolve(false));
       child.stdout.on('data', (d) => {
@@ -93,7 +96,6 @@ async function approveHelperSelfTest(script: string): Promise<boolean> {
             send({ jsonrpc: '2.0', method: 'notifications/initialized' });
             send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'approve', arguments: { tool_name: 'Bash', input: { command: 'ls' } } } });
           } else if (m.id === 2) {
-            clearTimeout(timer);
             resolve(/"behavior":"allow"/.test(m.result?.content?.[0]?.text ?? ''));
           }
         }
@@ -101,6 +103,7 @@ async function approveHelperSelfTest(script: string): Promise<boolean> {
       send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'wren-selftest', version: '1' } } });
     });
   } finally {
+    clearTimeout(timer);
     child.kill();
     bridge.close();
     rmSync(dir, { recursive: true, force: true });
@@ -388,8 +391,8 @@ function shutdown(e: Electron.Event) {
     // a browser that won't close doesn't hold up the rest (W-124).
     const all = (async () => {
       const runs = await runner.suspend(8_000).catch(() => false);
-      const [, engines, jobs] = await Promise.all([closeBrowser(), stopAllEngines().catch(() => false), stopAllJobs().catch(() => false)]);
-      return runs && engines && jobs;
+      const [browser, engines, jobs] = await Promise.all([closeBrowser(), stopAllEngines().catch(() => false), stopAllJobs().catch(() => false)]);
+      return runs && browser && engines && jobs;
     })();
     const confirmed = await Promise.race([all, new Promise<false>((r) => setTimeout(() => r(false), QUIT_WAIT_MS))]);
     // Quitting never waits longer than that (W-78). What couldn't be confirmed stopped is reported at the
@@ -418,9 +421,8 @@ function installUpdate() {
   return updater.install(
     async () => {
       const runsDone = await runner.suspend();
-      await closeBrowser();
-      const [engines, jobs] = await Promise.all([stopAllEngines(), stopAllJobs()]);
-      return runsDone && engines && jobs;
+      const [browser, engines, jobs] = await Promise.all([closeBrowser(), stopAllEngines(), stopAllJobs()]);
+      return runsDone && browser && engines && jobs;
     },
     () => runner.resume(),
   );
@@ -576,9 +578,13 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
 
 /** The last quit couldn't confirm every agent run, engine and command stopped (W-124): say so once. */
 function reportUnconfirmedQuit() {
-  const f = join(dataDir(), 'quit-unconfirmed.json');
-  if (!existsSync(f)) return;
-  rmSync(f, { force: true });
+  try {
+    const f = join(dataDir(), 'quit-unconfirmed.json');
+    if (!existsSync(f)) return;
+    rmSync(f, { force: true });
+  } catch {
+    return; // never in the way of starting
+  }
   console.warn('[wren] the last quit could not confirm that every agent process stopped');
   if (Notification.isSupported()) {
     new Notification({ title: 'Wren', body: 'When Wren last quit, it couldn’t confirm that every agent command had stopped. If something is still running, you can end it in Activity Monitor (Task Manager on Windows).' }).show();

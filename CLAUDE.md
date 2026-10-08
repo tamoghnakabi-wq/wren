@@ -28,7 +28,7 @@ apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.17: Electron 44
+apps/desktop      wren-desktop 0.1.18: Electron 44
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
@@ -109,7 +109,7 @@ qa/                   empty
     - `--resume` does **not** replay history (unlike Grok's `session/load`); the session id stays the same.
     - The to-do list is TaskCreate/TaskUpdate/TaskList/TaskGet (TodoWrite is gone; both are in `--tools`, unknown names are ignored). They become the plan (items carry the task id, and a follow-up starts from the last plan), not steps.
     - The sub-agent tool is `Agent` (listed as `Task`) and runs in the background: the run gets a `result`, then the sub-agent's events (with `parent_tool_use_id`), then a second turn with its own `system init` and `result`. Each `result` closes that turn's message (filled from `result` if nothing streamed); usage and turns are summed; the session is saved once. Sub-agent tool results close the steps their permission prompts made; their other calls aren't shown.
-  - Grok Build via `grok agent stdio` (ACP), with a per-run plugin PreToolUse hook (`grok-hook.mjs`). A follow-up resumes the CLI session with `session/load`, which replays the whole conversation as `session/update` notifications before it answers (verified with the real CLI); those are ignored until the load's response, or every old reply and tool call is written again (fixed in 0.1.14, `test/grok-build.test.ts` drives the engine against a fake ACP agent). A `tool_call` that arrives already `completed` is closed at once (that is the engine's report, not an approval record: approvals are only the hook's). Every ACP request settles (W-116): Grok exiting, a write error or Stop (after 3 s, once the CLI is stopped) rejects whatever is pending, and the setup steps have time limits (60 s; `session/load` 180 s); a load that fails because Grok stopped or hung ends the run instead of starting a new session. The run reports its outcome only after the CLI is confirmed stopped.
+  - Grok Build via `grok agent stdio` (ACP), with a per-run plugin PreToolUse hook (`grok-hook.mjs`) in `<dataDir>/engines/grok-<runId>` (W-128; check with a write in careful mode that an approval is asked: a hook Grok can't load fails silently). A follow-up resumes the CLI session with `session/load`, which replays the whole conversation as `session/update` notifications before it answers (verified with the real CLI); those are ignored until the load's response, or every old reply and tool call is written again (fixed in 0.1.14, `test/grok-build.test.ts` drives the engine against a fake ACP agent). A `tool_call` that arrives already `completed` is closed at once (that is the engine's report, not an approval record: approvals are only the hook's). Every ACP request settles (W-116): Grok exiting, a write error or Stop (after 3 s, once the CLI is stopped) rejects whatever is pending, and the setup steps have time limits (60 s; `session/load` 180 s); a load that fails because Grok stopped or hung ends the run instead of starting a new session. The run reports its outcome only after the CLI is confirmed stopped.
   - **Attached images** (0.1.16): the runner loads the images on the messages in the prompt through `/api/device/runs/:id/artifact` (this run's account only) and `engines/images.ts` keeps PNG/JPEG/GIF/WebP up to 5 MB, 10 per prompt, naming the rest in the prompt. Claude Code gets them as Anthropic image blocks in its stream-json message; Grok as ACP `image` blocks. Grok 1.0.46 reports `promptCapabilities.image: false` but reads them (checked with two colours); if a version answers the prompt with an image/invalid-params error, it is asked again without them and told so. Other attachments reach engines as names only, as with Wren's own agents.
   - Engine tool calls are mirrored into the timeline by `TimelineWriter` and approved by the same policy.
   - After each completed engine turn a `reasoning` event `{engine, consumedSeq}` is appended. The next turn's prompt is `pendingAsks(events)`. A separate `reasoning` event `{engine, resumeId}` stores the CLI session; the resume lookup must require `resumeId`.
@@ -260,6 +260,15 @@ How each part works:
 | Re-audit #8 (of 0.1.12) | W-108…W-113 | `853a342`, 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
 | Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
 | Re-audit #10 (of 0.1.16) | W-121…W-127 | `c1e8237`, 0.1.17 | See below; no migration |
+| Re-audit #11 (of 0.1.17) | W-128…W-132 | 0.1.18 | See below; no migration |
+
+Round 11 in brief:
+- **W-128** (High) what enforces approvals can't be changed by agents: every agent profile (commands, engines, Wren's own file helper) ends with `(deny file-write* …)` for this app's folders (`appDirs()`: the bundle from `process.execPath`, the built `dist-electron`) and for the `readOnly` paths, even inside an allowed folder; `writeConfined` refuses them too (Windows). Grok's per-run plugin (its PreToolUse hook) moved from the temp folder to `<dataDir>/engines/grok-<runId>`; Grok's profile alone may read it, plus `file-read-metadata` on its parent folders inside the data folder (Grok resolves the path: without that it silently loaded no hook and wrote without asking; caught in an end-to-end run).
+- **W-129** a bridge request holds its place (32 at most, 512 KB by bytes) until its decision ends, not just its connection; when the asker leaves, the handler's signal fires, `decide()` withdraws the approval (`RemoteStore.withdrawApproval`, the device `decide` action, denied) and closing the bridge calls everything off.
+- **W-130** after an unconfirmed engine stop, Wren only watches (every 15 s) and never signals again: the group number could be another program's once it's gone. A stop confirmed by anyone (quit, update) ends the watch; a group seen gone is no longer tracked.
+- **W-131** Claude Code's bridge, private folder, Stop listener and final engine stop are released in a `finally`, each on its own.
+- **W-132** a call the stream reports after its permission prompt made the step still ends the agent's message there.
+- Also: a stopped run gets no answer from Grok's pathless-read shortcut, and `decide()` re-checks before every allow; the browser counts toward "confirmed stopped" (quit and update); the approval helper has no environment fallback any more; PNG needs the full 8-byte signature; the self-test's timer and errors are handled. Found while testing: 0.1.17's step-matching rule made a second, never-finishing step for every approved Grok action (Grok's stream called it `grok.tool`): generic engine steps can be taken over again, and Grok's stream names "other" tools the way its hook does.
 
 Round 10 in brief:
 - **W-121** Claude Code's approval bridge token is no longer on any command line or in any environment (agent commands can read both for every same-user process on macOS, tested): `--mcp-config` is a file in `<dataDir>/approvals/<runId>/` (0700, removed after the run) next to `approval.json` (url, token). `wren-shell.sh` runs the approval server, and only it (its config sets `WREN_APPROVAL_SB`), under `approvalServerProfile` = the command profile plus a final `(allow file-read* (subpath <that folder>))`, which wins over the data folder's deny; commands can't read the folder (tested: "Operation not permitted") and can't start a second sandbox. The bridge compares the token in constant time, takes at most 8 open requests and 512 KB each; `decide()` won't attach a request to a step for another kind of action. Grok's bridge token stays in Grok's environment (its commands are its children; see Known limitations).
@@ -355,7 +364,7 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 62 (+9 real-Chrome skipped), desktop 63, web 24
+npm test                               # core 62 (+9 real-Chrome skipped), desktop 72, web 24
 node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (83; needs `npm run dev`; pauses the local mail container briefly)
 node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (28)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
@@ -381,7 +390,8 @@ npm run dev                 # web on http://localhost:5310 (Claude preview confi
 cd apps/desktop && node scripts/build.mjs
 WREN_DATA_DIR=<scratch dir> WREN_URL=http://localhost:5310 ../../node_modules/.bin/electron . --remote-debugging-port=9233
 ```
-- `WREN_AUTOPAIR=1` prints `WREN_PAIR_CODE=…` to approve from a signed-in session. Drive the window over CDP; `scripts/ui-smoke.mjs` shows how.
+- `WREN_AUTOPAIR=1` prints `WREN_PAIR_CODE=…` to approve from a signed-in session.
+- A dev Wren protects its own files from its agents (W-128): `apps/desktop/dist-electron` and `node_modules/electron/dist/Electron.app` are read-only to them, so an agent working on this repo through a dev Wren can't rebuild the desktop app; use the installed app for that. Drive the window over CDP; `scripts/ui-smoke.mjs` shows how.
 - The app holds a single-instance lock. Kill the old dev instance before relaunching, or the new one exits because port 9233 is busy.
 - To test an update end to end: copy `dist-electron` into a scratch folder with a `package.json` whose version is older (e.g. 0.1.7) and `main: dist-electron/main.js`, symlink `node_modules`, and launch that folder. It downloads the real latest release. `--proxy-server=127.0.0.1:9` forces download errors (localhost bypasses the proxy, so the check still works). The local `/api/updates` may first answer 204 from Next's stale fetch cache; ask again.
 - `node scripts/package.mjs mac|win` builds packages. Builds are unsigned: macOS is ad-hoc signed, Windows has no code signing.

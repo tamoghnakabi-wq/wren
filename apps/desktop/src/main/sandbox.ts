@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 // macOS Seatbelt profiles (sandbox-exec) for everything an agent runs on this
 // computer: shell commands, Wren's own file operations, and the Claude Code /
@@ -89,8 +89,39 @@ interface Spec {
   /** Commands also get temp folders, toolchains and caches; Wren's own file operations don't. */
   tools: boolean;
   engine?: Engine;
-  /** Extra read-only paths (e.g. this app, whose helper the engine starts). */
+  /** Extra read-only paths (e.g. this app, whose helper the engine starts): readable, never writable. */
   readOnly?: string[];
+  /** Private folders in Wren's data folder this profile alone may read (an approval server's, Grok's plugin). */
+  privateRead?: string[];
+}
+
+/** `p`'s parent folders from `root` down (root included), for path lookups. */
+function ancestorsWithin(p: string, root: string): string[] {
+  const out: string[] = [];
+  for (let d = dirname(p); d.length >= root.length && d.startsWith(root); d = dirname(d)) {
+    out.push(d);
+    if (d === root) break;
+  }
+  return out;
+}
+
+/**
+ * Wren itself: the app (its approval helper and Grok hook among it) and its built files. No agent may
+ * change them, even when an allowed folder contains them (a build inside a project, W-128): the next
+ * engine run would start a rewritten helper.
+ */
+export function appDirs(): string[] {
+  const dirs = [resolve(__dirname)];
+  if (process.platform === 'darwin') dirs.push(resolve(process.execPath, '..', '..', '..'));
+  else dirs.push(dirname(process.execPath));
+  return [...new Set(dirs.map((d) => realpathOr(d)))];
+}
+function realpathOr(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
 }
 
 const tempDirs = () => [realpathSync(tmpdir()), '/private/tmp', '/private/var/folders'];
@@ -112,6 +143,7 @@ function build(s: Spec): string {
   const writable = [...s.roots, ...temp, ...caches, ...engineDirs];
   const readable = [...s.roots, ...caches, ...engineDirs, ...(s.tools ? TOOLCHAINS.map(h) : []), ...(s.readOnly ?? [])];
   const ownState = new Set(engineDirs);
+  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? [])])];
   const secrets = [...SECRETS.map(h).filter((p) => !ownState.has(p)), s.dataDir];
   const otherEngines = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== s.engine);
   for (const e of otherEngines) for (const d of ENGINE_STATE[e].dirs) secrets.push(h(d));
@@ -127,7 +159,11 @@ function build(s: Spec): string {
     s.tools ? `(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath ${q(home)}))` : '(deny file-read-data (subpath "/"))',
     `(allow file-read-data ${sub(readable)} ${enginePrefixes} ${s.tools ? lit(HOME_FILES.map(h)) : `${sub(SYSTEM_RUNTIME)} ${lit(HELPER_PROGRAMS)} (literal "/")`})`,
     ...(protect.length ? [`(deny file-write* ${sub(protect)} ${lit(protect)})`] : []),
+    `(deny file-write* ${sub(noWrite)} ${lit(noWrite)})`,
     `(deny file-read* file-write* ${sub(secrets)} ${secretPrefixes})`,
+    // Last, so it wins over the data folder's deny: read access to this profile's own private folders, and
+    // to the folders above them inside the data folder for looking the path up (no listing, no contents).
+    ...(s.privateRead?.length ? [`(allow file-read* ${sub(s.privateRead)})`, `(allow file-read-metadata ${lit(s.privateRead.flatMap((p) => ancestorsWithin(p, s.dataDir)))})`] : []),
   ].join('\n');
 }
 
@@ -142,7 +178,7 @@ export function seatbeltProfile(roots: string[], dataDir: string, home = homedir
  * comes last, so it wins over the data folder's deny (W-121).
  */
 export function approvalServerProfile(roots: string[], dataDir: string, readOnly: string[], privateDir: string, home = homedir()): string {
-  return `${build({ roots, dataDir, home, tools: true, readOnly })}\n(allow file-read* (subpath ${q(privateDir)}))`;
+  return build({ roots, dataDir, home, tools: true, readOnly, privateRead: [privateDir] });
 }
 
 /** Wren's own file reads/writes for the agent: the allowed folders and nothing else. */
@@ -151,8 +187,8 @@ export function fileOpsProfile(roots: string[], dataDir: string, home = homedir(
 }
 
 /** A CLI engine and everything it runs: like shell commands, plus that CLI's own state. */
-export function engineProfile(engine: Engine, roots: string[], dataDir: string, readOnly: string[], home = homedir()): string {
-  return build({ roots, dataDir, home, tools: true, engine, readOnly });
+export function engineProfile(engine: Engine, roots: string[], dataDir: string, readOnly: string[], home = homedir(), privateRead: string[] = []): string {
+  return build({ roots, dataDir, home, tools: true, engine, readOnly, privateRead });
 }
 
 export const hasSeatbelt = () => process.platform === 'darwin' && sandboxExecExists();

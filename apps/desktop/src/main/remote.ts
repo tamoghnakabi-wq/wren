@@ -41,6 +41,10 @@ export class RemoteStore implements RunStore {
     this.onApproval?.(id, req);
     return id;
   }
+  /** Deny an approval nobody waits for any more (the engine withdrew its request). */
+  async withdrawApproval(id: string): Promise<void> {
+    await this.call('decide', { id, approve: false });
+  }
   async approvalState(id: string): Promise<ApprovalState> {
     return (await this.call<{ state: ApprovalState }>('approval-state', { id })).state;
   }

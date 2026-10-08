@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, rmdirSync, statSync, unlinkSync, writeSync, type BigIntStats } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { confinePath } from './paths';
-import { fileOpsProfile, hasSeatbelt } from './sandbox';
+import { appDirs, fileOpsProfile, hasSeatbelt } from './sandbox';
 
 // File reads, writes and listings the agent asks for. A path is checked against
 // the allowed folders first (paths.ts), but a folder could be swapped for a link
@@ -140,6 +140,8 @@ export async function readConfined(path: string, roots: string[], dataDir: strin
 
 /** Create or replace a file already checked to be inside `roots` (parent folders included). */
 export async function writeConfined(path: string, content: Buffer, roots: string[], dataDir: string): Promise<void> {
+  // Never Wren's own files, even inside an allowed folder (W-128; on macOS the profile denies it too).
+  if (appDirs().some((d) => within(path, d))) throw new Error(`"${path}" is part of Wren itself, so Wren won't change it.`);
   if (hasSeatbelt()) {
     await helper(['/bin/sh', '-c', '/bin/mkdir -p -- "$(/usr/bin/dirname -- "$1")" && /bin/cat > "$1"', 'sh', path], roots, dataDir, content, 0);
     return;

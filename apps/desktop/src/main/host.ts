@@ -315,9 +315,15 @@ function tail(s: string, n = 28_000) {
 
 export { killRunJobs, stopAllJobs } from './jobs';
 
-export async function closeBrowser() {
-  if (browserCtl) await browserCtl.close().catch(() => {});
+/** Close the agent browser; true when it's closed (or wasn't open). */
+export async function closeBrowser(): Promise<boolean> {
+  const ctl = browserCtl;
   browserCtl = null;
+  if (!ctl) return true;
+  return ctl.close().then(
+    () => true,
+    () => false,
+  );
 }
 
 /** Close a finished run's browser tab (other runs keep theirs). */

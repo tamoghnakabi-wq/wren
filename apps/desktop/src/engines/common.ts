@@ -82,17 +82,17 @@ export function engineEnv(engine: Engine): NodeJS.ProcessEnv {
  * can't read or change files outside the allowed folders any more than Wren's own can.
  * `helper` is this app's script the CLI starts for approvals (it must stay readable).
  */
-export async function spawnEngine(engine: Engine, cli: string, args: string[], run: EngineRun, helper: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<ChildProcessWithoutNullStreams> {
+export async function spawnEngine(engine: Engine, cli: string, args: string[], run: EngineRun, helper: string, extraEnv: NodeJS.ProcessEnv = {}, privateRead: string[] = []): Promise<ChildProcessWithoutNullStreams> {
   const env = { ...engineEnv(engine), ...extraEnv };
   if (!hasSeatbelt()) return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
   Object.assign(env, await toolEnv());
-  const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), appPaths(helper));
+  const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), appPaths(helper), undefined, privateRead);
   return track(spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...args], { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true }));
 }
 
 // Engine CLIs run as the leader of their own process group (detached), so stopping one also stops
 // every command and server it started. They stay tracked until nothing of theirs is left running.
-const engines = new Set<ChildProcess>();
+export const engines = new Set<ChildProcess>();
 
 function track<P extends ChildProcess>(p: P): P {
   engines.add(tracked(p));
@@ -113,17 +113,32 @@ export async function stopEngine(p: ChildProcess, graceMs = 3000): Promise<boole
 
 /**
  * After an engine's turn: stop whatever is left of its process tree (commands it left running too). If
- * that can't be confirmed, the task says so and Wren keeps trying in the background; the engine stays
- * tracked, so quitting or updating Wren also waits for it (W-126).
+ * that can't be confirmed, the task says so (W-126) and Wren keeps watching, without signalling again: the
+ * group's number could belong to another program once it's gone (W-130). When it's gone, or anyone else
+ * (quit, an update) confirms the stop, the engine is no longer tracked; until then quitting or updating
+ * still tries to stop it.
  */
-export async function finishEngine(p: ChildProcess, writer: { status: TimelineWriter['status'] }, stop: (p: ChildProcess) => Promise<boolean> = stopEngine): Promise<boolean> {
+export async function finishEngine(
+  p: ChildProcess,
+  writer: { status: TimelineWriter['status'] },
+  stop: (p: ChildProcess) => Promise<boolean> = stopEngine,
+  alive: (p: ChildProcess) => Promise<boolean> = treeAlive,
+): Promise<boolean> {
   if (await stop(p)) return true;
-  await writer.status('Wren couldn’t confirm that this engine’s processes stopped. It keeps trying, and quitting or updating Wren waits for them.', 'warn').catch(() => {});
-  let tries = 0;
-  const retry = setInterval(() => {
-    void stop(p).then((ok) => (ok || ++tries >= 10) && clearInterval(retry));
-  }, 30_000);
-  retry.unref();
+  await writer.status('Wren couldn’t confirm that this engine’s processes stopped. It keeps checking, and quitting or updating Wren tries to stop them again.', 'warn').catch(() => {});
+  const watch = setInterval(() => {
+    if (!engines.has(p)) return clearInterval(watch); // someone else confirmed it
+    void alive(p).then(
+      (still) => {
+        if (!still) {
+          engines.delete(p);
+          clearInterval(watch);
+        }
+      },
+      () => {},
+    );
+  }, 15_000);
+  watch.unref();
   return false;
 }
 
@@ -246,9 +261,17 @@ export class TimelineWriter {
    */
   async toolStart(callId: string, name: string, args: Record<string, unknown>, title?: string, keepMessage = false): Promise<string> {
     const known = this.tools.get(callId);
-    if (known) return known.id;
+    if (known) {
+      // The stream reporting a call its permission prompt already showed: that's still where the agent's
+      // message ends (W-132).
+      if (!keepMessage) await this.endMessage();
+      return known.id;
+    }
     const pending = this.starting.get(callId);
-    if (pending) return pending;
+    if (pending) {
+      if (!keepMessage) await this.endMessage();
+      return pending;
+    }
     const p = this.createTool(callId, name, args, title, keepMessage).finally(() => this.starting.delete(callId));
     this.starting.set(callId, p);
     return p;
@@ -306,9 +329,13 @@ export async function decide(
   writer: TimelineWriter,
   call: { callId: string; name: string; args: Record<string, unknown>; title: string; paths?: string[] },
   inFolders: (p: string) => boolean,
+  /** The asker's own lifetime (the permission prompt's connection): once it's gone, nothing is allowed. */
+  asker?: AbortSignal,
 ): Promise<{ allow: boolean; message?: string }> {
-  // A stopped run allows nothing, even what wouldn't need approval (W-122).
-  if (run.signal.aborted) return { allow: false, message: 'Stopped by the user.' };
+  // A stopped run allows nothing, even what wouldn't need approval (W-122); neither does an asker that left.
+  const over = () => run.signal.aborted || !!asker?.aborted;
+  const stopped = { allow: false, message: 'Stopped by the user.' };
+  if (over()) return stopped;
   for (const p of call.paths ?? []) if (!inFolders(p)) return { allow: false, message: `Blocked by Wren: ${p} is outside the folders allowed on this computer.` };
   if (call.name === 'computer.shell' && !run.allow.shell) return { allow: false, message: 'Blocked by Wren: terminal access is turned off on this computer (Wren → Settings → This computer).' };
   if (call.name.startsWith('browser.') && !run.allow.browser) return { allow: false, message: 'Blocked by Wren: browser use is turned off on this computer.' };
@@ -316,11 +343,11 @@ export async function decide(
   // On macOS the engine (and everything it runs) is inside Wren's sandbox; elsewhere it isn't.
   const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: !hasSeatbelt(), trustedProgram: call.name === 'computer.shell' ? await currentProgramTrust(allowedRoots(run.folders)) : undefined });
   if (a.blocked) return { allow: false, message: a.blocked };
-  if (!needsApproval(a.risk as Risk, run.autonomy)) return { allow: true };
+  if (!needsApproval(a.risk as Risk, run.autonomy)) return over() ? stopped : { allow: true };
   let t = writer.tools.get(call.callId);
   // A step only takes the approval for the same kind of action: a request naming another call's id can't
-  // take over that step (W-121).
-  if (t && t.data.name !== call.name) {
+  // take over that step (W-121). A generic engine step (the stream didn't say what kind of tool) can.
+  if (t && t.data.name !== call.name && !/^(grok|claude)\./.test(t.data.name)) {
     t = undefined;
     call = { ...call, callId: `perm-${randomBytes(6).toString('hex')}` };
   }
@@ -340,10 +367,16 @@ export async function decide(
   // Engines treat a hook timeout as "allow", so always answer well before theirs.
   const giveUpAt = Date.now() + 50 * 60_000;
   for (;;) {
-    if (run.signal.aborted) return { allow: false, message: 'Stopped by the user.' };
+    if (over()) {
+      // Nobody waits for this answer any more: the approval is withdrawn (denied), not left to be granted.
+      await run.store.withdrawApproval?.(approvalId).catch(() => {});
+      await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: 'Withdrawn: the task stopped or the request was cancelled.', isError: true } });
+      return stopped;
+    }
     if (Date.now() > giveUpAt) return { allow: false, message: 'No approval arrived in time, so the action was not taken. Ask the user and try again later.' };
     const state = await run.store.approvalState(approvalId).catch(() => 'pending' as const);
     if (state === 'approved') {
+      if (over()) return stopped;
       await writer.setStep(step, 'running', {});
       return { allow: true };
     }
@@ -355,16 +388,23 @@ export async function decide(
   }
 }
 
-export type BridgeHandler = (req: { tool_name: string; input: Record<string, unknown>; tool_use_id?: string }) => Promise<{ allow: boolean; message?: string }>;
+export type BridgeHandler = (req: { tool_name: string; input: Record<string, unknown>; tool_use_id?: string; signal: AbortSignal }) => Promise<{ allow: boolean; message?: string }>;
 
 /** Localhost endpoint that engine permission hooks call back into (per-run bearer token). */
-const MAX_OPEN_PROMPTS = 8;
+/** Requests being decided at once: an engine runs several tools in parallel, background sub-agents too. */
+const MAX_OPEN_PROMPTS = 32;
 const MAX_PROMPT_BYTES = 512 * 1024;
 
+/**
+ * The local endpoint an engine's permission prompts call (W-121, W-129). A request holds its place until
+ * Wren has decided it, not just while its connection is open; if the asker goes away, the handler's
+ * signal fires (the approval is withdrawn), and closing the bridge does the same for everything open.
+ */
 export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
-  let open = 0;
+  const active = new Set<AbortController>();
+  let admitted = 0;
   const server = createServer((req, res) => {
     const auth = Buffer.from(req.headers.authorization ?? '');
     if (req.method !== 'POST' || auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
@@ -372,32 +412,52 @@ export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url
       res.end();
       return;
     }
-    // One engine asks one thing at a time (a few at most): anything beyond that isn't the engine (W-121).
-    if (open >= MAX_OPEN_PROMPTS) {
+    if (admitted >= MAX_OPEN_PROMPTS) {
       res.statusCode = 429;
       res.end(JSON.stringify({ behavior: 'deny', message: 'Too many permission requests at once.' }));
       return;
     }
-    open++;
-    res.on('close', () => open--);
-    let body = '';
-    req.on('data', (c) => {
-      body += c;
-      if (body.length > MAX_PROMPT_BYTES) {
+    admitted++;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        admitted--;
+      }
+    };
+    const gone = new AbortController();
+    let started = false;
+    // The asker went away: before its request was complete nothing runs; after, the decision is called off.
+    res.on('close', () => {
+      if (!res.writableFinished) gone.abort();
+      if (!started) release();
+    });
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    req.on('data', (c: Buffer) => {
+      bytes += c.length;
+      if (bytes > MAX_PROMPT_BYTES) {
         res.statusCode = 413;
         res.end(JSON.stringify({ behavior: 'deny', message: 'Permission request too large.' }));
         req.destroy();
+        return;
       }
+      chunks.push(c);
     });
     req.on('end', async () => {
-      if (res.writableEnded) return;
+      if (res.writableEnded || gone.signal.aborted) return;
+      started = true;
+      active.add(gone);
       res.setHeader('content-type', 'application/json');
       try {
-        const r = JSON.parse(body);
-        const d = await handler({ tool_name: String(r.tool_name ?? 'unknown'), input: (r.input ?? {}) as Record<string, unknown>, tool_use_id: r.tool_use_id });
-        res.end(JSON.stringify(d.allow ? { behavior: 'allow', updatedInput: r.input } : { behavior: 'deny', message: d.message ?? 'Denied.' }));
+        const r = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const d = await handler({ tool_name: String(r.tool_name ?? 'unknown'), input: (r.input ?? {}) as Record<string, unknown>, tool_use_id: r.tool_use_id, signal: gone.signal });
+        res.end(JSON.stringify(d.allow && !gone.signal.aborted ? { behavior: 'allow', updatedInput: r.input } : { behavior: 'deny', message: d.message ?? 'Denied.' }));
       } catch (e) {
         res.end(JSON.stringify({ behavior: 'deny', message: `Wren could not evaluate this action: ${(e as Error).message}` }));
+      } finally {
+        active.delete(gone);
+        release();
       }
     });
   });
@@ -405,7 +465,14 @@ export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url
   server.headersTimeout = 0;
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as AddressInfo).port;
-  return { url: `http://127.0.0.1:${port}/approve`, token, close: () => server.close() };
+  return {
+    url: `http://127.0.0.1:${port}/approve`,
+    token,
+    close: () => {
+      for (const c of active) c.abort();
+      server.close();
+    },
+  };
 }
 
 export type { LoopOutcome };
