@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -164,11 +164,17 @@ describe('Updater download', () => {
     expect(u.state).toMatchObject({ available: true, version: '0.1.9', downloading: false });
     expect(u.state.error).toMatch(/stopped receiving data/);
     expect(u.state.retryAt).toBe(Date.now() + 5 * 60_000);
+    // It resumes from what reached the disk: a chunk counted as received can still have been on its way
+    // there when the stall was cut off (seen on CI's slower disk).
+    const part = readdirSync(versionDir()).find((f) => f.endsWith('.part'))!;
+    const kept = statSync(join(versionDir(), part)).size;
+    expect(kept).toBeGreaterThan(0);
+    expect(kept).toBeLessThanOrEqual(have);
 
     h.serve = good;
     await vi.advanceTimersByTimeAsync(5 * 60_000); // the scheduled retry
     await done();
-    expect(h.requests).toEqual([undefined, have]);
+    expect(h.requests).toEqual([undefined, kept]);
     expect(u.state.ready).toBe(true);
     expect(readFileSync(u.state.file!).equals(BODY)).toBe(true);
   });
