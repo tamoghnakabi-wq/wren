@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `c1e8237` (re-audit #10 fixes W-121…W-127), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.17**. Wren credits are switched off for every account (`70afa23`, see Models). The ten Codex security audits (W-1…W-127) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `a37d43b` (re-audit #11 fixes W-128…W-132; `592a584` after it only fixes a flaky updater test), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.18**. Wren credits are switched off for every account (`70afa23`, see Models). The eleven Codex security audits (W-1…W-132) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -260,7 +260,7 @@ How each part works:
 | Re-audit #8 (of 0.1.12) | W-108…W-113 | `853a342`, 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
 | Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
 | Re-audit #10 (of 0.1.16) | W-121…W-127 | `c1e8237`, 0.1.17 | See below; no migration |
-| Re-audit #11 (of 0.1.17) | W-128…W-132 | 0.1.18 | See below; no migration |
+| Re-audit #11 (of 0.1.17) | W-128…W-132 | `a37d43b`, 0.1.18 | See below; no migration |
 
 Round 11 in brief:
 - **W-128** (High) what enforces approvals can't be changed by agents: every agent profile (commands, engines, Wren's own file helper) ends with `(deny file-write* …)` for this app's folders (`appDirs()`: the bundle from `process.execPath`, the built `dist-electron`) and for the `readOnly` paths, even inside an allowed folder; `writeConfined` refuses them too (Windows). Grok's per-run plugin (its PreToolUse hook) moved from the temp folder to `<dataDir>/engines/grok-<runId>`; Grok's profile alone may read it, plus `file-read-metadata` on its parent folders inside the data folder (Grok resolves the path: without that it silently loaded no hook and wrote without asking; caught in an end-to-end run).
