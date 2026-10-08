@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-07: `main` is in sync with `origin/main`; the last code commit is `9003658` (Grok Build follow-ups no longer replay old turns), live in production with migration `wren_0013_mfa_send_state`. The desktop app is at **0.1.14**. Wren credits are switched off for every account (`70afa23`, see Models). The eight Codex security audits (W-1…W-113) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-08: `main` is in sync with `origin/main`; the last code commit is `ca370e6` (round 9 fixes `8fcfc9a` plus a self-test fix), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.15**. Wren credits are switched off for every account (`70afa23`, see Models). The nine Codex security audits (W-1…W-120) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -123,7 +123,7 @@ qa/                   empty
   - The installer launch waits for the child's `spawn` event (W-83); on `error` Wren stays open with the reason and resumes agents. Before quitting it writes `<dataDir>/update-pending.json` (version, then the installer's pid and program/script once it runs); at the next start `cleanup()` reports an update that didn't install (plus `update-failed.txt` from the macOS swap script, which puts the old app back and reopens it on any failure), and that notice is kept on the next ready update.
   - Wren opened again while that installer may still run starts nothing and exits after a notification, leaving the staging and marker alone (W-96). `installerState()`: `running` (pid alive and its command is that installer, via `ps` or CIM), `unknown` (alive, but the check failed or came back empty; treated as running, W-104), else `gone`; only for a marker < 30 min old. The marker names the installer (program or script) and the time before the launch; the pid is added after it starts, atomically, and a failure there doesn't stop the hand-off (W-105). A marker without a pid is recognised by searching all processes for that installer (W-109): on macOS only a command line that is `/bin/bash <script> …` counts, never one that merely mentions the script (W-120). The installer's last step opens the new Wren, so at startup Wren waits up to 8 s for an installer that's just finishing before giving up and quitting.
 - **Quitting** (W-78): `before-quit` is prevented until `runner.suspend()`, the browser, `stopAllEngines()` and `stopAllJobs()` are done (at most 15 s), then `app.quit()` runs again.
-- `Wren --selftest` prints JSON and exits; CI uses it. `--selftest --update` also downloads the latest published release through the real updater path, and `--selftest --proctree` checks that something a command leaves running is found and stopped (Windows: ends with its Job Object, and is found by parent id without one), and that a running installer is recognised by its process (with its own marker in a temp folder, never the data folder's, W-107). CI runs both on mac and Windows.
+- `Wren --selftest` prints JSON and exits; CI uses it. `--selftest --update` also downloads the latest published release through the real updater path, and `--selftest --proctree` checks that something a command leaves running is found and stopped (Windows: ends with its Job Object, and is found by parent id without one), and that a running installer is recognised by its process (with its own marker in a temp folder, never the data folder's, W-107; on macOS the stand-in is bash running a script, as the real installer is, and is also found without its pid). CI runs both on mac and Windows.
 
 ### Models (`packages/core/src/models`, `apps/web/src/lib/models.ts`)
 - The model sources are: `openai`, `anthropic`, `xai`, `gateway` (Vercel AI Gateway), `platform` ("Wren credits": the operator's Gateway credits, only for `PLATFORM_MODEL_USERS`), `chatgpt` (desktop only), `local`, `claude-code`, `grok-build`.
@@ -253,7 +253,7 @@ How each part works:
 | Re-audit #6 (of 0.1.10 + MFA) | W-86…W-98 | `d6b695b`, 0.1.11 | See below; migration 0010 (`wren_0012_mfa_hardening`) |
 | Re-audit #7 (of 0.1.11) | W-99…W-107 | `42f985f`, 0.1.12 | See below; no migration |
 | Re-audit #8 (of 0.1.12) | W-108…W-113 | `853a342`, 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
-| Re-audit #9 (of 0.1.14) | W-114…W-120 | 0.1.15 | See below; no migration |
+| Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
 
 Round 9 in brief:
 - **W-114** an email send held up after reserving can't reach Supabase late (20 s start deadline in the fetch); one that took over 50 s ends its own and newer requests.
