@@ -80,6 +80,27 @@ describe('the approval bridge (W-129)', () => {
     }
   });
 
+  it('drops a request still arriving when the bridge closes: it never reaches a decision (W-135)', async () => {
+    const { request } = await import('node:http');
+    let decided = 0;
+    const b = await startApprovalBridge(async () => (decided++, { allow: true }));
+    const u = new URL(b.url);
+    const req = request({ host: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers: { authorization: `Bearer ${b.token}`, 'content-type': 'application/json', 'content-length': '40' } });
+    req.on('error', () => {});
+    const answer = new Promise<number | null>((r) => {
+      req.on('response', (res) => r(res.statusCode ?? null));
+      req.on('error', () => r(null));
+      req.on('close', () => r(null));
+    });
+    req.write('{"tool_name":"Bash",'); // half the body
+    await new Promise((r) => setTimeout(r, 100));
+    b.close();
+    req.end('"input":{}}            '); // the rest, after the close
+    await answer;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(decided).toBe(0);
+  });
+
   it('refuses a body over 512 KB, a wrong token, and calls everything off when closed', async () => {
     let signal: AbortSignal | undefined;
     const b = await startApprovalBridge(async (r) => {
@@ -156,7 +177,7 @@ describe('engine approvals on the timeline', () => {
     setTimeout(() => asker.abort(), 100);
     expect(await decide(run(store), writer, call, () => true, asker.signal)).toMatchObject({ allow: false });
     expect(store.withdrawn).toEqual(['ap1']);
-    expect([...store.rows.values()].find((r) => r.data?.name === 'computer.write_file')?.status).toBe('denied');
+    expect([...store.rows.values()].find((r) => r.data?.name === 'computer.write_file')?.status).toBe('cancelled');
   });
 
   it("a sub-agent's permission prompt doesn't cut the message being written", async () => {

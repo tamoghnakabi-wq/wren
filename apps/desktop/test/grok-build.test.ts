@@ -57,7 +57,7 @@ const dir = mkdtempSync(join(tmpdir(), 'wren-grok-test-'));
 const agentPath = join(dir, 'fake-grok.cjs');
 writeFileSync(agentPath, AGENT);
 
-const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0 }));
+const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0, bridgesOpen: 0, spawnFails: false }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-grok-data-'));
 vi.mock('../src/engines/common', () => {
@@ -88,8 +88,12 @@ vi.mock('../src/engines/common', () => {
     TimelineWriter,
     findCli: () => '/fake/grok',
     decide: async () => ({ allow: true }),
-    startApprovalBridge: async () => ({ url: 'http://127.0.0.1:9', token: 't', close() {} }),
-    spawnEngine: async () => (h.spawned++, spawn(process.execPath, [agentPath], { stdio: ['pipe', 'pipe', 'pipe'] })),
+    startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
+    spawnEngine: async () => {
+      if (h.spawnFails) throw new Error('spawn failed');
+      h.spawned++;
+      return spawn(process.execPath, [agentPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+    },
     stopEngine: async (p: { kill: () => void }) => p.kill(),
     finishEngine: async (p: { kill: () => void }) => (p.kill(), true),
   };
@@ -175,6 +179,20 @@ describe('Grok Build follow-ups', () => {
     const outcome = await runGrokBuild(r, () => true, '/dev/null');
     expect(outcome).toMatchObject({ kind: 'failed', code: 'engine_error' });
     expect(h.log.filter((l) => l.startsWith('start:'))).toEqual(['start:late-1']); // the prompt ran once
+  });
+
+  it('leaves nothing behind when Grok fails to start: bridge closed, plugin folder removed (W-137)', async () => {
+    const { existsSync } = await import('node:fs');
+    const { run: r } = run();
+    h.bridgesOpen = 0;
+    h.spawnFails = true;
+    try {
+      await expect(runGrokBuild(r, () => true, '/dev/null')).rejects.toThrow('spawn failed');
+    } finally {
+      h.spawnFails = false;
+    }
+    expect(h.bridgesOpen).toBe(0);
+    expect(existsSync(join(process.env.WREN_DATA_DIR!, 'engines', `grok-${r.runId}`))).toBe(false);
   });
 
   it('never starts Grok for a run stopped before it began (W-122)', async () => {

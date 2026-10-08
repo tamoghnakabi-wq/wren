@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, rmdirSync, statSync, unlinkSync, writeSync, type BigIntStats } from 'node:fs';
+import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync, unlinkSync, writeSync, type BigIntStats } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { confinePath } from './paths';
 import { appDirs, fileOpsProfile, hasSeatbelt } from './sandbox';
@@ -62,6 +62,27 @@ function verifyOpened(fd: number, path: string, roots: string[]) {
 const sameFile = (a: BigIntStats, b: BigIntStats) => a.ino === b.ino && a.dev === b.dev;
 const within = (p: string, root: string) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
 
+/**
+ * Wren's own data (its policy, the device's sign-in, updates, approval folders) and Wren itself: the file
+ * tools never read, write or list them, whatever folders are allowed (W-128, W-134). On macOS the helper's
+ * profile denies them as well; on Windows this check is all there is. Windows paths compare without case.
+ */
+function privateRoots(dataDir: string): string[] {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  return [real(dataDir), ...appDirs()];
+}
+const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+const isPrivate = (p: string, dataDir: string) => privateRoots(dataDir).some((r) => within(fold(p), fold(r)));
+function refusePrivate(p: string, dataDir: string) {
+  if (isPrivate(p, dataDir)) throw new Error(`"${p}" is part of Wren itself, so the agent can't use it.`);
+}
+
 function lstatOrNull(p: string): BigIntStats | null {
   try {
     return lstatSync(p, { bigint: true });
@@ -118,6 +139,7 @@ function ensureFolder(dir: string, roots: string[]) {
 
 /** Read a file already checked to be inside `roots`. */
 export async function readConfined(path: string, roots: string[], dataDir: string, max: number): Promise<Buffer> {
+  refusePrivate(path, dataDir);
   if (hasSeatbelt()) return helper(['/bin/cat', '--', path], roots, dataDir, null, max);
   // Elsewhere: never follow a link at the last component, and check what was opened.
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -140,8 +162,7 @@ export async function readConfined(path: string, roots: string[], dataDir: strin
 
 /** Create or replace a file already checked to be inside `roots` (parent folders included). */
 export async function writeConfined(path: string, content: Buffer, roots: string[], dataDir: string): Promise<void> {
-  // Never Wren's own files, even inside an allowed folder (W-128; on macOS the profile denies it too).
-  if (appDirs().some((d) => within(path, d))) throw new Error(`"${path}" is part of Wren itself, so Wren won't change it.`);
+  refusePrivate(path, dataDir);
   if (hasSeatbelt()) {
     await helper(['/bin/sh', '-c', '/bin/mkdir -p -- "$(/usr/bin/dirname -- "$1")" && /bin/cat > "$1"', 'sh', path], roots, dataDir, content, 0);
     return;
@@ -179,6 +200,7 @@ function removeIfSame(path: string, fd: number) {
 
 /** Entries under a folder already checked to be inside `roots`: "d|f|l size path" lines, links never followed. */
 export async function listConfined(root: string, depth: number, roots: string[], dataDir: string, limit = 500): Promise<string[]> {
+  refusePrivate(root, dataDir);
   if (hasSeatbelt()) {
     const script = '/usr/bin/find -P "$1" -mindepth 1 -maxdepth "$2" \\( -name node_modules -o -name .git \\) -prune -o -print0 | /usr/bin/xargs -0 /usr/bin/stat -f "%HT|%z|%N" | /usr/bin/head -n "$3"';
     const out = (await helper(['/bin/sh', '-c', script, 'sh', root, String(depth), String(limit)], roots, dataDir, null, 4 * 1024 * 1024)).toString('utf8');
@@ -202,6 +224,7 @@ export async function listConfined(root: string, depth: number, roots: string[],
     for (const name of names) {
       if (name === 'node_modules' || name === '.git' || out.length >= limit) continue;
       const full = join(d, name);
+      if (isPrivate(full, dataDir)) continue; // Wren's own folders aren't listed either
       let st;
       try {
         st = lstatSync(full); // never follow links out of the folder

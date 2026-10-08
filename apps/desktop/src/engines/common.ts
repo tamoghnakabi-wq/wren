@@ -305,8 +305,8 @@ export class TimelineWriter {
 
   async toolEnd(callId: string, output: string, isError: boolean) {
     const t = this.tools.get(callId);
-    // A denied step has already ended: the engine's "denied" result mustn't turn it into a failure.
-    if (!t || t.status === 'denied') return;
+    // A denied or withdrawn step has already ended: the engine's refusal mustn't turn it into a failure.
+    if (!t || t.status === 'denied' || t.status === 'cancelled') return;
     t.data = { ...t.data, endedAt: Date.now(), result: { output: output.slice(0, 30000), isError } };
     await this.store.update(t.id, { status: isError ? 'error' : 'done', data: t.data });
   }
@@ -370,7 +370,8 @@ export async function decide(
     if (over()) {
       // Nobody waits for this answer any more: the approval is withdrawn (denied), not left to be granted.
       await run.store.withdrawApproval?.(approvalId).catch(() => {});
-      await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: 'Withdrawn: the task stopped or the request was cancelled.', isError: true } });
+      // Shown as stopped, not as something the user denied.
+      await writer.setStep(step, 'cancelled', { endedAt: Date.now(), result: { output: 'Withdrawn: the task stopped or the request was cancelled.', isError: true } });
       return stopped;
     }
     if (Date.now() > giveUpAt) return { allow: false, message: 'No approval arrived in time, so the action was not taken. Ask the user and try again later.' };
@@ -378,7 +379,7 @@ export async function decide(
     if (state === 'approved') {
       if (over()) return stopped;
       await writer.setStep(step, 'running', {});
-      return { allow: true };
+      return over() ? stopped : { allow: true }; // a Stop during that write still counts (W-122)
     }
     if (state !== 'pending') {
       await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: 'Denied by the user.', isError: true } });
@@ -403,9 +404,16 @@ const MAX_PROMPT_BYTES = 512 * 1024;
 export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
+  // Every admitted request, from admission (still sending its body) until its decision ends (W-135).
   const active = new Set<AbortController>();
   let admitted = 0;
+  let closing = false;
   const server = createServer((req, res) => {
+    if (closing) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ behavior: 'deny', message: 'The task has ended.' }));
+      return;
+    }
     const auth = Buffer.from(req.headers.authorization ?? '');
     if (req.method !== 'POST' || auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
       res.statusCode = 403;
@@ -426,11 +434,19 @@ export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url
       }
     };
     const gone = new AbortController();
+    active.add(gone);
     let started = false;
+    // Called off (the asker left, or the bridge closed): a request still arriving is dropped.
+    gone.signal.addEventListener('abort', () => {
+      if (!started) req.destroy();
+    });
     // The asker went away: before its request was complete nothing runs; after, the decision is called off.
     res.on('close', () => {
       if (!res.writableFinished) gone.abort();
-      if (!started) release();
+      if (!started) {
+        active.delete(gone);
+        release();
+      }
     });
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -445,9 +461,8 @@ export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url
       chunks.push(c);
     });
     req.on('end', async () => {
-      if (res.writableEnded || gone.signal.aborted) return;
+      if (res.writableEnded || gone.signal.aborted || closing) return;
       started = true;
-      active.add(gone);
       res.setHeader('content-type', 'application/json');
       try {
         const r = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -461,14 +476,18 @@ export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url
       }
     });
   });
-  server.requestTimeout = 0;
-  server.headersTimeout = 0;
+  // A request must arrive in full quickly (it's a few KB from a local helper); its decision may then take as
+  // long as the user needs: these limits cover receiving the request only (W-135).
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  server.timeout = 0;
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as AddressInfo).port;
   return {
     url: `http://127.0.0.1:${port}/approve`,
     token,
     close: () => {
+      closing = true;
       for (const c of active) c.abort();
       server.close();
     },

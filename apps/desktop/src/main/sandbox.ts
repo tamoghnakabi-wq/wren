@@ -1,6 +1,6 @@
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 // macOS Seatbelt profiles (sandbox-exec) for everything an agent runs on this
 // computer: shell commands, Wren's own file operations, and the Claude Code /
@@ -98,9 +98,10 @@ interface Spec {
 /** `p`'s parent folders from `root` down (root included), for path lookups. */
 function ancestorsWithin(p: string, root: string): string[] {
   const out: string[] = [];
-  for (let d = dirname(p); d.length >= root.length && d.startsWith(root); d = dirname(d)) {
+  const r = resolve(root);
+  for (let d = dirname(resolve(p)); d === r || d.startsWith(r + '/'); d = dirname(d)) {
     out.push(d);
-    if (d === root) break;
+    if (d === r) break;
   }
   return out;
 }
@@ -112,8 +113,21 @@ function ancestorsWithin(p: string, root: string): string[] {
  */
 export function appDirs(): string[] {
   const dirs = [resolve(__dirname)];
-  if (process.platform === 'darwin') dirs.push(resolve(process.execPath, '..', '..', '..'));
-  else dirs.push(dirname(process.execPath));
+  if (process.platform === 'darwin') {
+    const bundle = resolve(process.execPath, '..', '..', '..');
+    if (bundle.endsWith('.app')) dirs.push(bundle); // not when run by plain Node (tests): that would be /usr or /opt
+  } else dirs.push(dirname(process.execPath));
+  // A development Wren (`electron .` from the repo, not packaged) also runs code from outside its build:
+  // modules from the package's node_modules (playwright-core loads at the first browser use) and the start
+  // file package.json names. Those are its code too (W-133).
+  if (!__dirname.includes('app.asar') && basename(__dirname) === 'dist-electron') {
+    const pkg = dirname(__dirname);
+    dirs.push(join(pkg, 'package.json'));
+    for (let d = pkg; ; d = dirname(d)) {
+      if (existsSync(join(d, 'node_modules'))) dirs.push(join(d, 'node_modules'));
+      if (dirname(d) === d) break;
+    }
+  }
   return [...new Set(dirs.map((d) => realpathOr(d)))];
 }
 function realpathOr(p: string): string {

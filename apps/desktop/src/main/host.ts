@@ -1,5 +1,5 @@
 import { desktopCapturer, screen } from 'electron';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
@@ -246,18 +246,15 @@ export class LocalHost implements ToolHost {
     if (browserCtl) return browserCtl.controller;
     const { chromium, selectors } = await import('playwright-core');
     await registerSelectors(selectors);
-    const profile = join(dataDir(), 'agent-browser');
+    const profile = browserProfile();
     const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chrome', 'msedge', 'chromium'];
     let lastErr: unknown;
     for (const channel of channels) {
       try {
         const context = await chromium.launchPersistentContext(profile, { channel, headless: false, viewport: { width: 1280, height: 800 }, args: ['--no-first-run', '--no-default-browser-check'] });
-        browserCtl = {
-          controller: new BrowserController(context),
-          close: () => context.close(),
-        };
-        context.on('close', () => (browserCtl = null));
-        return browserCtl.controller;
+        const ctl = adoptBrowser({ controller: new BrowserController(context), close: () => context.close() });
+        context.on('close', () => browserCtl === ctl && (browserCtl = null));
+        return ctl.controller;
       } catch (e) {
         lastErr = e;
       }
@@ -315,15 +312,85 @@ function tail(s: string, n = 28_000) {
 
 export { killRunJobs, stopAllJobs } from './jobs';
 
-/** Close the agent browser; true when it's closed (or wasn't open). */
-export async function closeBrowser(): Promise<boolean> {
+/** The agent browser Wren now owns (what closeBrowser closes). */
+export function adoptBrowser<T extends NonNullable<typeof browserCtl>>(ctl: T): T {
+  browserCtl = ctl;
+  return ctl;
+}
+
+let closingBrowser: Promise<boolean> | null = null;
+
+/**
+ * Close the agent browser; true once it's confirmed closed (or wasn't open). It stays known until then, so
+ * a later try (an update retried) checks again instead of finding nothing; callers at the same time share
+ * one attempt (W-136). If Playwright can't close it, its processes (found by Wren's own profile folder) are
+ * stopped and checked gone.
+ */
+export function closeBrowser(): Promise<boolean> {
+  if (closingBrowser) return closingBrowser;
   const ctl = browserCtl;
-  browserCtl = null;
-  if (!ctl) return true;
-  return ctl.close().then(
-    () => true,
-    () => false,
-  );
+  if (!ctl) return Promise.resolve(true);
+  closingBrowser = (async () => {
+    const closed = await Promise.race([
+      ctl.close().then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 15_000).unref()),
+    ]);
+    const gone = closed || (await stopProfileBrowser(browserProfile()));
+    if (gone && browserCtl === ctl) browserCtl = null;
+    return gone;
+  })().finally(() => {
+    closingBrowser = null;
+  });
+  return closingBrowser;
+}
+
+const browserProfile = () => join(dataDir(), 'agent-browser');
+
+/** The browser processes started with this profile folder (`--user-data-dir=<profile>`). */
+function profilePids(profile: string): number[] | null {
+  const flag = `--user-data-dir=${profile}`;
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress'], { encoding: 'utf8', timeout: 15_000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+      const rows = JSON.parse(out || '[]') as { ProcessId: number; CommandLine: string | null }[] | { ProcessId: number; CommandLine: string | null };
+      return (Array.isArray(rows) ? rows : [rows]).filter((r) => r.CommandLine?.includes(flag)).map((r) => r.ProcessId);
+    }
+    const out = execFileSync('/bin/ps', ['-axo', 'pid=,command='], { encoding: 'utf8', timeout: 5000, maxBuffer: 32 * 1024 * 1024 });
+    return out
+      .split('\n')
+      .map((l) => /^\s*(\d+)\s+(.*)$/.exec(l))
+      .filter((m): m is RegExpExecArray => !!m && (m[2].includes(`${flag} `) || m[2].endsWith(flag)))
+      .map((m) => Number(m[1]))
+      .filter((pid) => pid !== process.pid);
+  } catch {
+    return null; // couldn't look: not confirmed
+  }
+}
+
+/** Stop the agent browser's processes; true once none are left. */
+async function stopProfileBrowser(profile: string): Promise<boolean> {
+  const signal = (pids: number[], sig: NodeJS.Signals) => {
+    for (const pid of pids) {
+      try {
+        if (process.platform === 'win32') execFileSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10_000, stdio: 'ignore' });
+        else process.kill(pid, sig);
+      } catch {
+        /* already gone */
+      }
+    }
+  };
+  for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
+    const pids = profilePids(profile);
+    if (pids === null) return false;
+    if (!pids.length) return true;
+    signal(pids, sig);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  const left = profilePids(profile);
+  return left !== null && left.length === 0;
 }
 
 /** Close a finished run's browser tab (other runs keep theirs). */

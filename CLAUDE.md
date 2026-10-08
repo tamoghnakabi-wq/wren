@@ -28,7 +28,7 @@ apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.18: Electron 44
+apps/desktop      wren-desktop 0.1.19: Electron 44
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
@@ -261,6 +261,15 @@ How each part works:
 | Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
 | Re-audit #10 (of 0.1.16) | W-121…W-127 | `c1e8237`, 0.1.17 | See below; no migration |
 | Re-audit #11 (of 0.1.17) | W-128…W-132 | `a37d43b`, 0.1.18 | See below; no migration |
+| Re-audit #12 (of 0.1.18) | W-133…W-137 | 0.1.19 | See below; no migration |
+
+Round 12 in brief:
+- **W-133** (High, dev builds) a dev Wren (`electron .`, not packaged) also protects what it runs from outside its build: `apps/desktop/package.json` (the start file) and every ancestor `node_modules` (playwright-core loads there at the first browser use). Tested: an agent command can't write either, and can still edit `src/`. On macOS the app bundle comes from `process.execPath` only when it is a `.app` (plain Node gave `/usr`).
+- **W-134** (High, Windows) Wren's own file tools (read, write, list) refuse Wren's data folder (policy, device sign-in, updates, approval folders) and the app folders on every platform, whatever is allowed (case-insensitive on Windows); listings skip them. Tested on macOS through the software check: writing `policy.json` is refused ("part of Wren itself").
+- **W-135** the bridge tracks a request from admission; closing it (a `closing` flag, 503 afterwards) calls off requests still arriving too; `requestTimeout` 15 s / `headersTimeout` 10 s cover receiving a request only (decisions may wait as long as needed).
+- **W-136** `closeBrowser()` keeps the browser known until it's confirmed closed, shares one attempt between callers, and if Playwright can't close it within 15 s stops the processes started with `--user-data-dir=<dataDir>/agent-browser` (ps / CIM) and checks they're gone. `adoptBrowser()` registers the controller.
+- **W-137** Grok's setup (plugin folder, files, spawn) cleans up the bridge and plugin if anything fails; its final clean-up runs each step on its own. Claude Code's private folder path is computed inside its try (W-131 remainder).
+- Also: `decide()` re-checks Stop after marking an approved step running (W-122 remainder); a withdrawn approval's step is "cancelled" (shown as stopped), and `toolEnd` leaves it so; `ancestorsWithin` compares whole path components.
 
 Round 11 in brief:
 - **W-128** (High) what enforces approvals can't be changed by agents: every agent profile (commands, engines, Wren's own file helper) ends with `(deny file-write* …)` for this app's folders (`appDirs()`: the bundle from `process.execPath`, the built `dist-electron`) and for the `readOnly` paths, even inside an allowed folder; `writeConfined` refuses them too (Windows). Grok's per-run plugin (its PreToolUse hook) moved from the temp folder to `<dataDir>/engines/grok-<runId>`; Grok's profile alone may read it, plus `file-read-metadata` on its parent folders inside the data folder (Grok resolves the path: without that it silently loaded no hook and wrote without asking; caught in an end-to-end run).
@@ -364,7 +373,7 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 62 (+9 real-Chrome skipped), desktop 72, web 24
+npm test                               # core 62 (+9 real-Chrome skipped), desktop 75, web 24
 node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (83; needs `npm run dev`; pauses the local mail container briefly)
 node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (28)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
@@ -391,7 +400,7 @@ cd apps/desktop && node scripts/build.mjs
 WREN_DATA_DIR=<scratch dir> WREN_URL=http://localhost:5310 ../../node_modules/.bin/electron . --remote-debugging-port=9233
 ```
 - `WREN_AUTOPAIR=1` prints `WREN_PAIR_CODE=…` to approve from a signed-in session.
-- A dev Wren protects its own files from its agents (W-128): `apps/desktop/dist-electron` and `node_modules/electron/dist/Electron.app` are read-only to them, so an agent working on this repo through a dev Wren can't rebuild the desktop app; use the installed app for that. Drive the window over CDP; `scripts/ui-smoke.mjs` shows how.
+- A dev Wren protects its own files from its agents (W-128, W-133): `apps/desktop/dist-electron`, `apps/desktop/package.json` and every `node_modules` above it (the repo's included) are read-only to them, so an agent working on this repo through a dev Wren can't rebuild the desktop app or install packages; it can still edit source. Use the installed app for that work. Drive the window over CDP; `scripts/ui-smoke.mjs` shows how.
 - The app holds a single-instance lock. Kill the old dev instance before relaunching, or the new one exits because port 9233 is busy.
 - To test an update end to end: copy `dist-electron` into a scratch folder with a `package.json` whose version is older (e.g. 0.1.7) and `main: dist-electron/main.js`, symlink `node_modules`, and launch that folder. It downloads the real latest release. `--proxy-server=127.0.0.1:9` forces download errors (localhost bypasses the proxy, so the check still works). The local `/api/updates` may first answer 204 from Next's stale fetch cache; ask again.
 - `node scripts/package.mjs mac|win` builds packages. Builds are unsigned: macOS is ad-hoc signed, Windows has no code signing.

@@ -88,17 +88,25 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   });
   // In Wren's data folder, which no agent can write (W-128): in a temp folder another task's command could
   // change the hook (or remove it) before Grok loads it. Grok's profile may read this folder only.
-  const pluginDir = join(dataDir(), 'engines', `grok-${run.runId}`);
-  mkdirSync(join(pluginDir, '.claude-plugin'), { recursive: true, mode: 0o700 });
-  mkdirSync(join(pluginDir, 'hooks'), { recursive: true, mode: 0o700 });
-  writeFileSync(join(pluginDir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wren-approvals', version: '0.1.0', description: 'Routes Grok tool calls through Wren approvals.' }));
-  const hookCmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(hookScript)}`;
-  writeFileSync(join(pluginDir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: hookCmd, timeout: 3600 }] }] } }));
-
-  const args = ['--no-auto-update', 'agent'];
-  if (run.model && run.model !== 'default') args.push('-m', run.model);
-  args.push('--always-approve', '--plugin-dir', pluginDir, 'stdio');
-  const proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token }, [pluginDir]);
+  let pluginDir = '';
+  let proc: Awaited<ReturnType<typeof spawnEngine>>;
+  try {
+    pluginDir = join(dataDir(), 'engines', `grok-${run.runId}`);
+    mkdirSync(join(pluginDir, '.claude-plugin'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(pluginDir, 'hooks'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(pluginDir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wren-approvals', version: '0.1.0', description: 'Routes Grok tool calls through Wren approvals.' }));
+    const hookCmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(hookScript)}`;
+    writeFileSync(join(pluginDir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: hookCmd, timeout: 3600 }] }] } }));
+    const args = ['--no-auto-update', 'agent'];
+    if (run.model && run.model !== 'default') args.push('-m', run.model);
+    args.push('--always-approve', '--plugin-dir', pluginDir, 'stdio');
+    proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token }, [pluginDir]);
+  } catch (e) {
+    // Setup failed (a folder, a file, starting Grok): nothing is left behind (W-137).
+    attempt(() => bridge.close());
+    if (pluginDir) attempt(() => rmSync(pluginDir, { recursive: true, force: true }));
+    throw e;
+  }
   let stderr = '';
   proc.stderr.on('data', (c) => (stderr = (stderr + c).slice(-4000)));
   const rl = readline.createInterface({ input: proc.stdout });
@@ -261,13 +269,23 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     const hint = /login|auth|token|401/i.test(msg + stderr) ? ' Open a terminal and run `grok login` with your xAI account.' : '';
     return { kind: 'failed', error: `Grok Build: ${msg}${hint}`.slice(0, 1500), code: 'engine_error', steps };
   } finally {
-    bridge.close();
-    rmSync(pluginDir, { recursive: true, force: true });
+    // Each step on its own, so one failing can't skip the others (W-137).
+    attempt(() => bridge.close());
+    attempt(() => rmSync(pluginDir, { recursive: true, force: true }));
     run.signal.removeEventListener('abort', onAbort);
-    rl.close();
-    proc.stdin.end();
+    attempt(() => rl.close());
+    attempt(() => proc.stdin.end());
     // Grok exits once its input ends; what's left of it is stopped before the run reports how it ended.
     await Promise.race([exited, new Promise((r) => setTimeout(r, 1500))]);
-    await finishEngine(proc, writer);
+    await finishEngine(proc, writer).catch(() => {});
+  }
+}
+
+/** Run one clean-up step; a failure doesn't stop the next. */
+function attempt(f: () => void) {
+  try {
+    f();
+  } catch {
+    /* the others still run */
   }
 }

@@ -134,10 +134,11 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
 
   // Everything acquired from here on (the bridge, the private folder, the CLI and its Stop handler) is
   // released in the finally, each step on its own, so one failing can't skip the others (W-131).
-  const privateDir = join(dataDir(), 'approvals', run.runId);
+  let privateDir = '';
   let spawned: ChildProcess | undefined;
   let abortHandler: (() => void) | undefined;
   try {
+    privateDir = join(dataDir(), 'approvals', run.runId);
     // The bridge's address and token stay in a private folder of Wren's data folder, which commands can't
     // read: not on Claude Code's command line or in any environment, which other processes can read (W-121).
     // The approval server gets a sandbox profile that can read that folder (see SHELL_PREFIX).
@@ -319,7 +320,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       }
     };
     attempt(() => bridge.close());
-    attempt(() => rmSync(privateDir, { recursive: true, force: true }));
+    if (privateDir) attempt(() => rmSync(privateDir, { recursive: true, force: true }));
     if (abortHandler) run.signal.removeEventListener('abort', abortHandler);
     // Claude Code has exited (or never started): anything it left running ends with the turn.
     if (spawned) await finishEngine(spawned, writer).catch(() => {});
