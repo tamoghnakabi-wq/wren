@@ -57,9 +57,11 @@ if (process.argv.includes('--selftest')) {
   });
 }
 /**
- * A stand-in installer (a long-running system program) recorded the way launchInstaller records the
- * real one: recognised while it runs, not once it has ended. Uses its own marker in a temporary
- * folder, never the data folder's (a real update may be pending there) (W-107).
+ * A stand-in installer recorded the way launchInstaller records the real one: recognised while it
+ * runs, not once it has ended. On macOS it is started like the real one (bash running a script, the
+ * only form that counts, W-120) and is also found without its pid (W-109); on Windows it is a
+ * long-running system program. Uses its own marker in a temporary folder, never the data folder's
+ * (a real update may be pending there) (W-107).
  */
 async function installerSelfTest(): Promise<Record<string, unknown> & { ok: boolean }> {
   const { mkdtempSync, rmSync } = await import('node:fs');
@@ -67,19 +69,37 @@ async function installerSelfTest(): Promise<Record<string, unknown> & { ok: bool
   const dir = mkdtempSync(join(tmpdir(), 'wren-installer-test-'));
   const marker = join(dir, 'update-pending.json');
   const win = process.platform === 'win32';
-  const cmd = win ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'PING.EXE') : '/bin/sleep';
-  const child = spawn(cmd, win ? ['-n', '30', '127.0.0.1'] : ['30'], { stdio: 'ignore', windowsHide: true });
+  const script = join(dir, 'install.sh');
+  if (!win) writeFileSync(script, 'sleep 30\n', { mode: 0o700 });
+  const cmd = win ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'PING.EXE') : '/bin/bash';
+  const recorded = win ? cmd : script;
+  // macOS: its own process group, so stopping it also stops the script's `sleep`.
+  const child = spawn(cmd, win ? ['-n', '30', '127.0.0.1'] : [script], { stdio: 'ignore', windowsHide: true, detached: !win });
+  const stop = () => {
+    try {
+      if (win) child.kill();
+      else if (child.pid) process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  };
   try {
     await new Promise<void>((ok, fail) => (child.once('spawn', ok), child.once('error', fail)));
-    writeFileSync(marker, JSON.stringify({ version: '0.0.0', pid: child.pid, installer: cmd, at: Date.now() }));
     const probe = new Updater(() => {});
+    writeFileSync(marker, JSON.stringify({ version: '0.0.0', pid: child.pid, installer: recorded, at: Date.now() }));
     const running = probe.installerState(marker);
-    child.kill();
+    let withoutPid: string | undefined;
+    if (!win) {
+      writeFileSync(marker, JSON.stringify({ version: '0.0.0', installer: recorded, at: Date.now() }));
+      withoutPid = probe.installerState(marker);
+      writeFileSync(marker, JSON.stringify({ version: '0.0.0', pid: child.pid, installer: recorded, at: Date.now() }));
+    }
+    stop();
     await new Promise((r) => child.once('exit', r));
     const after = probe.installerState(marker);
-    return { ok: running === 'running' && after === 'gone', running, after };
+    return { ok: running === 'running' && (win || withoutPid === 'running') && after === 'gone', running, withoutPid, after };
   } finally {
-    child.kill();
+    stop();
     rmSync(dir, { recursive: true, force: true });
   }
 }
