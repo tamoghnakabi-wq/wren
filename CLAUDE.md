@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `6a8264d` (engines see attached images; before it `6f4f1ce`, Claude Code approvals on macOS, plan, sub-agents), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.16**. Wren credits are switched off for every account (`70afa23`, see Models). The nine Codex security audits (W-1…W-120) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `c1e8237` (re-audit #10 fixes W-121…W-127), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.17**. Wren credits are switched off for every account (`70afa23`, see Models). The ten Codex security audits (W-1…W-127) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -259,7 +259,7 @@ How each part works:
 | Re-audit #7 (of 0.1.11) | W-99…W-107 | `42f985f`, 0.1.12 | See below; no migration |
 | Re-audit #8 (of 0.1.12) | W-108…W-113 | `853a342`, 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
 | Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
-| Re-audit #10 (of 0.1.16) | W-121…W-127 | 0.1.17 | See below; no migration |
+| Re-audit #10 (of 0.1.16) | W-121…W-127 | `c1e8237`, 0.1.17 | See below; no migration |
 
 Round 10 in brief:
 - **W-121** Claude Code's approval bridge token is no longer on any command line or in any environment (agent commands can read both for every same-user process on macOS, tested): `--mcp-config` is a file in `<dataDir>/approvals/<runId>/` (0700, removed after the run) next to `approval.json` (url, token). `wren-shell.sh` runs the approval server, and only it (its config sets `WREN_APPROVAL_SB`), under `approvalServerProfile` = the command profile plus a final `(allow file-read* (subpath <that folder>))`, which wins over the data folder's deny; commands can't read the folder (tested: "Operation not permitted") and can't start a second sandbox. The bridge compares the token in constant time, takes at most 8 open requests and 512 KB each; `decide()` won't attach a request to a step for another kind of action. Grok's bridge token stays in Grok's environment (its commands are its children; see Known limitations).
