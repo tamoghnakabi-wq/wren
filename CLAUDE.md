@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `a37d43b` (re-audit #11 fixes W-128…W-132; `592a584` after it only fixes a flaky updater test), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.18**. Wren credits are switched off for every account (`70afa23`, see Models). The eleven Codex security audits (W-1…W-132) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `2a15d1d` (re-audit #12 fixes W-133…W-137), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.19**. Wren credits are switched off for every account (`70afa23`, see Models). The twelve Codex security audits (W-1…W-137) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -261,7 +261,7 @@ How each part works:
 | Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
 | Re-audit #10 (of 0.1.16) | W-121…W-127 | `c1e8237`, 0.1.17 | See below; no migration |
 | Re-audit #11 (of 0.1.17) | W-128…W-132 | `a37d43b`, 0.1.18 | See below; no migration |
-| Re-audit #12 (of 0.1.18) | W-133…W-137 | 0.1.19 | See below; no migration |
+| Re-audit #12 (of 0.1.18) | W-133…W-137 | `2a15d1d`, 0.1.19 | See below; no migration |
 
 Round 12 in brief:
 - **W-133** (High, dev builds) a dev Wren (`electron .`, not packaged) also protects what it runs from outside its build: `apps/desktop/package.json` (the start file) and every ancestor `node_modules` (playwright-core loads there at the first browser use). Tested: an agent command can't write either, and can still edit `src/`. On macOS the app bundle comes from `process.execPath` only when it is a `.app` (plain Node gave `/usr`).
