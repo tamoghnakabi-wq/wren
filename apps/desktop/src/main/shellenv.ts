@@ -107,11 +107,13 @@ for v in ${PREFIX_VARS.join(' ')}; do
   eval "isset=\\\${$v+1}; val=\\\${$v-}"
   [ -n "$isset" ] && set -- "$@" "$v=$val"
 done
-# Claude Code starts its MCP servers through this prefix too, with each server's variables from
-# --mcp-config. Wren's approval server needs its own; only its launch has the token (Claude Code's
-# environment, and so every command's, never does).
-if [ -n "\${WREN_APPROVAL_TOKEN-}" ]; then
-  for v in WREN_APPROVAL_URL WREN_APPROVAL_TOKEN ELECTRON_RUN_AS_NODE; do
+# Claude Code starts its MCP servers through this prefix too, with each server's variables from its
+# --mcp-config. Only Wren's approval server has WREN_APPROVAL_SB (from Wren's private config file): it
+# runs under that profile, which can also read its private folder, and keeps the two variables it needs.
+# Commands never have it, and one already inside a sandbox can't start another (W-121).
+if [ -n "\${WREN_APPROVAL_SB-}" ]; then
+  p="$WREN_APPROVAL_SB"
+  for v in WREN_APPROVAL_FILE ELECTRON_RUN_AS_NODE; do
     eval "isset=\\\${$v+1}; val=\\\${$v-}"
     [ -n "$isset" ] && set -- "$@" "$v=$val"
   done

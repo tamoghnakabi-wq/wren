@@ -3,10 +3,19 @@
 // per-run token) and returns Wren's allow/deny decision.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 
-const url = process.env.WREN_APPROVAL_URL!;
-const token = process.env.WREN_APPROVAL_TOKEN!;
+// The bridge's address and token come from Wren's private file (only this server's sandbox profile can
+// read it), never from the command line or the environment, which other processes can read (W-121).
+// The variables are the fallback for an app that didn't write the file.
+const { url, token } = (() => {
+  try {
+    return JSON.parse(readFileSync(process.env.WREN_APPROVAL_FILE ?? '', 'utf8')) as { url: string; token: string };
+  } catch {
+    return { url: process.env.WREN_APPROVAL_URL ?? '', token: process.env.WREN_APPROVAL_TOKEN ?? '' };
+  }
+})();
 
 const server = new McpServer({ name: 'wren', version: '0.1.0' });
 server.registerTool(

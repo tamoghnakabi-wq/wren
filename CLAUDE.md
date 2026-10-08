@@ -28,7 +28,7 @@ apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.16: Electron 44
+apps/desktop      wren-desktop 0.1.17: Electron 44
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
@@ -227,7 +227,7 @@ How each part works:
   - writes only in allowed folders, temp and package caches
   - file contents under `/Users`, `/Volumes` and home unreadable, except allowed folders, toolchains and a few dotfiles
   - credential stores (`.ssh`, `.aws`, Keychains, …) and Wren's data folder never readable
-- **Shell environment** (W-108). Commands are not login shells and never get Wren's own environment (it may come from a terminal with tokens, `BASH_ENV`, pager or loader settings): `agentEnv()` (shellenv.ts) passes an allowlist (HOME, USER, LOGNAME, SHELL, TERM, TMPDIR, TZ; on Windows also what Windows needs, e.g. SystemRoot, ComSpec, APPDATA, PSModulePath) plus PATH and toolchain variables (`toolEnv()`, from the login shell on macOS). Engine CLIs get that plus their own sign-in/provider and network variables (`engineEnv(engine)`); Claude Code's commands go through `wren-shell.sh`, which runs them with `env -i` and only the allowlist. Claude Code also starts its **MCP servers** through that prefix (verified), with the server's `--mcp-config` variables: the prefix keeps `WREN_APPROVAL_URL`/`WREN_APPROVAL_TOKEN`/`ELECTRON_RUN_AS_NODE` only when the approval token is set, i.e. only for Wren's approval server (Claude Code's own environment never has it). 0.1.13–0.1.15 stripped them, so on macOS every Claude Code action needing permission was refused with "Wren is not reachable" (fixed in 0.1.16).
+- **Shell environment** (W-108). Commands are not login shells and never get Wren's own environment (it may come from a terminal with tokens, `BASH_ENV`, pager or loader settings): `agentEnv()` (shellenv.ts) passes an allowlist (HOME, USER, LOGNAME, SHELL, TERM, TMPDIR, TZ; on Windows also what Windows needs, e.g. SystemRoot, ComSpec, APPDATA, PSModulePath) plus PATH and toolchain variables (`toolEnv()`, from the login shell on macOS). Engine CLIs get that plus their own sign-in/provider and network variables (`engineEnv(engine)`); Claude Code's commands go through `wren-shell.sh`, which runs them with `env -i` and only the allowlist. Claude Code also starts its **MCP servers** through that prefix (verified), with the server's `--mcp-config` variables. Only Wren's approval server has `WREN_APPROVAL_SB` (set in its private config file): the prefix then runs it under that profile and keeps `WREN_APPROVAL_FILE` and `ELECTRON_RUN_AS_NODE`; the token itself is only in that private file (W-121, 0.1.17). 0.1.13–0.1.15 stripped the server's variables, so on macOS every Claude Code action needing permission was refused with "Wren is not reachable" (fixed in 0.1.16).
 - **File tools** (`confined.ts`).
   - On macOS a tiny helper (`cat`, `sh`, `find`, `stat`) runs under `fileOpsProfile`. That profile can read only the allowed folders plus the helpers' own binaries, `/usr/lib` and the dyld cache.
   - On Windows (fallback):
@@ -259,6 +259,17 @@ How each part works:
 | Re-audit #7 (of 0.1.11) | W-99…W-107 | `42f985f`, 0.1.12 | See below; no migration |
 | Re-audit #8 (of 0.1.12) | W-108…W-113 | `853a342`, 0.1.13 | See below; migration 0011 (`wren_0013_mfa_send_state`) |
 | Re-audit #9 (of 0.1.14) | W-114…W-120 | `8fcfc9a` (+`ca370e6`), 0.1.15 | See below; no migration |
+| Re-audit #10 (of 0.1.16) | W-121…W-127 | 0.1.17 | See below; no migration |
+
+Round 10 in brief:
+- **W-121** Claude Code's approval bridge token is no longer on any command line or in any environment (agent commands can read both for every same-user process on macOS, tested): `--mcp-config` is a file in `<dataDir>/approvals/<runId>/` (0700, removed after the run) next to `approval.json` (url, token). `wren-shell.sh` runs the approval server, and only it (its config sets `WREN_APPROVAL_SB`), under `approvalServerProfile` = the command profile plus a final `(allow file-read* (subpath <that folder>))`, which wins over the data folder's deny; commands can't read the folder (tested: "Operation not permitted") and can't start a second sandbox. The bridge compares the token in constant time, takes at most 8 open requests and 512 KB each; `decide()` won't attach a request to a step for another kind of action. Grok's bridge token stays in Grok's environment (its commands are its children; see Known limitations).
+- **W-122** Stop or a lost lease (409) ends image loading (`deviceJson` gets the run's signal); no engine starts for a run already stopped; `decide()` denies everything once the run is stopped.
+- **W-123** Grok is re-prompted without images only on a JSON-RPC -32602 answer before the prompt did anything (no reply, plan, tool call or permission request).
+- **W-124** quitting checks what was confirmed stopped (runs, engines, commands; the browser no longer holds the others up); if not everything was, `<dataDir>/quit-unconfirmed.json` makes the next start say so. Quitting still never waits more than 15 s.
+- **W-125** a send that took too long ends every open request of the account, older ones too.
+- **W-126** `finishEngine()` after each engine turn (Claude Code too, for what it left running): an unconfirmed stop is said on the task and retried every 30 s (10 times); the engine stays tracked for quit/update.
+- **W-127** the plan changes only on what Claude Code reports done: TaskUpdate only with `success: true`, TaskList replaces the plan with Claude Code's own list, TaskGet refreshes an item.
+- Also: the remaining W-119 part (cancelled steps and the "Stopped" divider say "Stopping…" while cleanup is pending); images are checked by their bytes (PNG/JPEG/GIF/WebP signatures, the returned type) and at most 20 are downloaded per prompt; `--selftest` now starts the approval server and gets a decision through it (an empty helper passed the old existence check); a background sub-agent's permission prompt no longer cuts the agent's message in two.
 
 Round 9 in brief:
 - **W-114** an email send held up after reserving can't reach Supabase late (20 s start deadline in the fetch); one that took over 50 s ends its own and newer requests.
@@ -344,7 +355,7 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 62 (+9 real-Chrome skipped), desktop 51, web 22
+npm test                               # core 62 (+9 real-Chrome skipped), desktop 63, web 24
 node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (83; needs `npm run dev`; pauses the local mail container briefly)
 node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (28)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
@@ -440,6 +451,7 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
   - Removing a factor while the same account is being deleted can deadlock (factor row vs user row); Postgres aborts one of the two and it can be retried. A factor demoted by UPDATE (no current Supabase path does that) wouldn't fire the recovery-code trigger.
   - A send Supabase is still processing after Wren's 15 s time limit (e.g. stuck email delivery) could still replace a later code: that code then fails and the user asks again (no bypass). The same goes for a request already on its way when the function was paused (the start deadline is checked as it goes out, not when Supabase receives it). If Wren's function dies between Supabase sending and marking the request delivered, that code can't be used; the user asks again after the minute.
   - Supabase Auth itself holds a database transaction while it emails (seen locally); Wren no longer does.
+- **Process arguments and environments (macOS).** Agent commands can read the arguments and environment of every process of the same user (sysctl `KERN_PROCARGS2`, `pgrep -fl`; `ps` itself is blocked as a setuid program). Tested 2026-10-09: none of `(deny process-info* (target others))` or `(deny sysctl-read (sysctl-name "kern.procargs2"))` stops it. Wren keeps its own secrets out of both (W-121), but a secret the user put in a terminal's environment or a dev server's command line is visible to agent commands.
 - **Engine credentials.** An engine's own sign-in variables (e.g. `ANTHROPIC_API_KEY`, `XAI_API_KEY`, if the user set them in the environment Wren started from) stay visible to that engine's commands where Wren can't wrap them: Grok's commands, and Claude Code's on Windows. Nothing else from Wren's environment is.
 - **Upstream CLI quirks.** Claude Code itself refuses commands that start with a long `sleep`. The user's `~/.grok` has `permission_mode = always-approve`; that is why approvals are enforced with the per-run plugin hook.
 - **Out-of-date docs.** `docs/ARCHITECTURE.md` predates later rounds in places:

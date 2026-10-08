@@ -33,13 +33,16 @@ rl.once('line', (line) => {
   use('c2', 'TaskCreate', { subject: 'Report', description: 'Say the count' });
   result('c2', 'Task #2 created successfully: Report');
   use('c3', 'TaskUpdate', { taskId: '1', status: 'in_progress' });
-  result('c3', 'Updated task #1 status');
+  result('c3', 'Updated task #1 status', { success: true, taskId: '1', updatedFields: ['status'] });
   use('c4', 'Read', { file_path: 'notes.txt' });
   result('c4', 'one line');
   use('c5', 'TaskUpdate', { taskId: '7', status: 'completed' }); // made in an earlier turn
-  result('c5', 'Updated task #7 status');
+  result('c5', 'Updated task #7 status', { success: true, taskId: '7', updatedFields: ['status'] });
   use('c6', 'TaskUpdate', { taskId: '1', status: 'completed' });
-  result('c6', 'Updated task #1 status');
+  result('c6', 'Updated task #1 status', { success: true, taskId: '1', updatedFields: ['status'] });
+  // A task that doesn't exist: not an error, just success: false (2.1.294). Nothing changes.
+  use('c7', 'TaskUpdate', { taskId: '2', status: 'completed' });
+  result('c7', 'Task not found', { success: false, taskId: '2', updatedFields: [], error: 'Task not found' });
   say('It has one line.');
   out({ type: 'result', subtype: 'success', is_error: false, result: 'It has one line.', num_turns: 3 });
 });
@@ -63,7 +66,9 @@ const dir = mkdtempSync(join(tmpdir(), 'wren-claude-test-'));
 const cliPath = join(dir, 'fake-claude.cjs');
 writeFileSync(cliPath, CLI);
 
-const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[] }));
+const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[] }));
+vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
+process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-claude-data-'));
 vi.mock('../src/engines/common', () => {
   class TimelineWriter {
     text = '';
@@ -98,8 +103,10 @@ vi.mock('../src/engines/common', () => {
     claudeSupportsRestricted: () => true,
     decide: async () => ({ allow: true }),
     startApprovalBridge: async () => ({ url: 'http://127.0.0.1:9', token: 't', close() {} }),
-    spawnClaude: async () => spawn(process.execPath, [cliPath], { stdio: ['pipe', 'pipe', 'pipe'] }),
+    spawnClaude: async (_cli: string, args: string[]) => (h.spawned++, (h.args = args), spawn(process.execPath, [cliPath], { stdio: ['pipe', 'pipe', 'pipe'] })),
+    appPaths: () => [],
     stopEngine: async (p: { kill: () => void }) => p.kill(),
+    finishEngine: async (p: { kill: () => void }) => (p.kill(), true),
   };
 });
 const { runClaudeCode } = await import('../src/engines/claude-code');
@@ -124,6 +131,39 @@ const engineRun = (prompt: string, extra: Record<string, unknown> = {}) => ({
   signal: new AbortController().signal,
   saveResumeId: async (id: string) => void h.log.push(`session:${id}`),
   ...extra,
+});
+
+describe('Claude Code task list reconciliation', () => {
+  it("TaskList replaces the plan with Claude Code's own list (W-127)", async () => {
+    const { applyPlanResult } = await import('../src/engines/claude-code');
+    const todo = new Map([['7', { text: 'Stale from an earlier session', status: 'in_progress' }]]);
+    expect(applyPlanResult(todo, { name: 'TaskList', input: {} }, { tasks: [{ id: '1', subject: 'Alpha', status: 'in_progress' }] }, '#1 [in_progress] Alpha')).toBe(true);
+    expect([...todo]).toEqual([['1', { text: 'Alpha', status: 'in_progress' }]]);
+    expect(applyPlanResult(todo, { name: 'TaskGet', input: { taskId: '1' } }, { task: { id: '1', subject: 'Alpha', status: 'completed' } }, '')).toBe(true);
+    expect(todo.get('1')).toEqual({ text: 'Alpha', status: 'completed' });
+    expect(applyPlanResult(todo, { name: 'TaskUpdate', input: { taskId: '1', status: 'deleted' } }, { success: true }, '')).toBe(true);
+    expect(todo.size).toBe(0);
+  });
+});
+
+describe('Claude Code approval bridge credentials (W-121)', () => {
+  it('stay off the command line: the MCP config is a private file, and the token sits in a private folder', async () => {
+    const { existsSync } = await import('node:fs');
+    await runClaudeCode(engineRun('hello', { runId: 'r-w121' }), () => true, '/dev/null');
+    const i = h.args.indexOf('--mcp-config');
+    const file = h.args[i + 1];
+    expect(file).toBe(join(process.env.WREN_DATA_DIR!, 'approvals', 'r-w121', 'mcp.json'));
+    expect(h.args.join(' ')).not.toMatch(/Bearer|token|127\.0\.0\.1/);
+    expect(existsSync(file)).toBe(false); // removed when the run ends
+  });
+});
+
+describe('Claude Code stopped before it starts', () => {
+  it('never starts the CLI (W-122)', async () => {
+    h.spawned = 0;
+    expect(await runClaudeCode(engineRun('hello', { signal: AbortSignal.abort() }), () => true, '/dev/null')).toMatchObject({ kind: 'cancelled' });
+    expect(h.spawned).toBe(0);
+  });
 });
 
 describe('Claude Code attached images', () => {

@@ -153,7 +153,7 @@ export function Timeline({ events, agent, approvals, working, waitingFor, stoppe
               <div key={`stopped-${it.runId}`} className="flex items-center gap-3 text-[12.5px] text-faint" role="note">
                 <span className="h-px flex-1 bg-border" />
                 <span className="flex items-center gap-1.5">
-                  <CircleX className="h-3.5 w-3.5" aria-hidden /> Stopped
+                  <CircleX className="h-3.5 w-3.5" aria-hidden /> {ended.get(it.runId) === 'stopping' ? 'Stopping…' : 'Stopped'}
                 </span>
                 <span className="h-px flex-1 bg-border" />
               </div>
@@ -286,7 +286,8 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
   const ended = useContext(EndedRuns);
   const raw = ev.status ?? 'pending';
   const runEnded = ev.run_id ? ended.get(ev.run_id) : undefined;
-  const status = (raw === 'running' || raw === 'pending') && runEnded ? (runEnded === 'stopping' ? 'stopping' : 'unfinished') : raw;
+  // While the run's commands aren't confirmed stopped, nothing of it says "Stopped" yet (W-119).
+  const status = runEnded === 'stopping' && ['running', 'pending', 'cancelled'].includes(raw) ? 'stopping' : (raw === 'running' || raw === 'pending') && runEnded ? 'unfinished' : raw;
   const dur = d.startedAt && d.endedAt ? Math.max(0, Math.round((d.endedAt - d.startedAt) / 100) / 10) : null;
   const images = d.result?.images?.filter((i) => i.artifactId) ?? [];
   const artifacts = d.result?.artifacts ?? [];

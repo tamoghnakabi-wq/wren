@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
@@ -111,6 +111,22 @@ export async function stopEngine(p: ChildProcess, graceMs = 3000): Promise<boole
   return ok;
 }
 
+/**
+ * After an engine's turn: stop whatever is left of its process tree (commands it left running too). If
+ * that can't be confirmed, the task says so and Wren keeps trying in the background; the engine stays
+ * tracked, so quitting or updating Wren also waits for it (W-126).
+ */
+export async function finishEngine(p: ChildProcess, writer: { status: TimelineWriter['status'] }, stop: (p: ChildProcess) => Promise<boolean> = stopEngine): Promise<boolean> {
+  if (await stop(p)) return true;
+  await writer.status('Wren couldn’t confirm that this engine’s processes stopped. It keeps trying, and quitting or updating Wren waits for them.', 'warn').catch(() => {});
+  let tries = 0;
+  const retry = setInterval(() => {
+    void stop(p).then((ok) => (ok || ++tries >= 10) && clearInterval(retry));
+  }, 30_000);
+  retry.unref();
+  return false;
+}
+
 /** Stop every engine CLI process tree (for an update); true once all are confirmed gone. */
 export async function stopAllEngines(): Promise<boolean> {
   const done = await Promise.all([...engines].map((p) => stopEngine(p, 1000)));
@@ -118,7 +134,7 @@ export async function stopAllEngines(): Promise<boolean> {
 }
 
 /** Paths commands need to read to start this app's helpers (e.g. the approval MCP server). */
-function appPaths(helper: string): string[] {
+export function appPaths(helper: string): string[] {
   const appBundle = process.platform === 'darwin' ? resolve(process.execPath, '..', '..', '..') : dirname(process.execPath);
   return [appBundle, dirname(helper)];
 }
@@ -224,18 +240,22 @@ export class TimelineWriter {
   /** Entries being created, so the stream and a permission prompt for the same call share one. */
   private starting = new Map<string, Promise<string>>();
 
-  async toolStart(callId: string, name: string, args: Record<string, unknown>, title?: string): Promise<string> {
+  /**
+   * `keepMessage`: a step from a permission prompt for a call the stream hasn't shown (a background
+   * sub-agent's), which can come while the agent is still writing: its message stays whole.
+   */
+  async toolStart(callId: string, name: string, args: Record<string, unknown>, title?: string, keepMessage = false): Promise<string> {
     const known = this.tools.get(callId);
     if (known) return known.id;
     const pending = this.starting.get(callId);
     if (pending) return pending;
-    const p = this.createTool(callId, name, args, title).finally(() => this.starting.delete(callId));
+    const p = this.createTool(callId, name, args, title, keepMessage).finally(() => this.starting.delete(callId));
     this.starting.set(callId, p);
     return p;
   }
 
-  private async createTool(callId: string, name: string, args: Record<string, unknown>, title?: string): Promise<string> {
-    await this.endMessage();
+  private async createTool(callId: string, name: string, args: Record<string, unknown>, title: string | undefined, keepMessage: boolean): Promise<string> {
+    if (!keepMessage) await this.endMessage();
     // Already shown by its permission prompt: keep that entry and track it by the real id.
     const prompted = this.matchOpen(name, title ?? describeCall(name, args), true);
     if (prompted) {
@@ -287,6 +307,8 @@ export async function decide(
   call: { callId: string; name: string; args: Record<string, unknown>; title: string; paths?: string[] },
   inFolders: (p: string) => boolean,
 ): Promise<{ allow: boolean; message?: string }> {
+  // A stopped run allows nothing, even what wouldn't need approval (W-122).
+  if (run.signal.aborted) return { allow: false, message: 'Stopped by the user.' };
   for (const p of call.paths ?? []) if (!inFolders(p)) return { allow: false, message: `Blocked by Wren: ${p} is outside the folders allowed on this computer.` };
   if (call.name === 'computer.shell' && !run.allow.shell) return { allow: false, message: 'Blocked by Wren: terminal access is turned off on this computer (Wren → Settings → This computer).' };
   if (call.name.startsWith('browser.') && !run.allow.browser) return { allow: false, message: 'Blocked by Wren: browser use is turned off on this computer.' };
@@ -296,12 +318,18 @@ export async function decide(
   if (a.blocked) return { allow: false, message: a.blocked };
   if (!needsApproval(a.risk as Risk, run.autonomy)) return { allow: true };
   let t = writer.tools.get(call.callId);
+  // A step only takes the approval for the same kind of action: a request naming another call's id can't
+  // take over that step (W-121).
+  if (t && t.data.name !== call.name) {
+    t = undefined;
+    call = { ...call, callId: `perm-${randomBytes(6).toString('hex')}` };
+  }
   if (!t && /^(perm|hook)-/.test(call.callId)) {
     const shown = writer.matchOpen(call.name, call.title, false);
     if (shown) t = writer.tools.get(shown);
   }
   if (!t) {
-    await writer.toolStart(call.callId, call.name, call.args, call.title);
+    await writer.toolStart(call.callId, call.name, call.args, call.title, true);
     t = writer.tools.get(call.callId)!;
   }
   // Through the writer, so the step's risk and approval stay on it when the engine reports the result.
@@ -330,17 +358,39 @@ export async function decide(
 export type BridgeHandler = (req: { tool_name: string; input: Record<string, unknown>; tool_use_id?: string }) => Promise<{ allow: boolean; message?: string }>;
 
 /** Localhost endpoint that engine permission hooks call back into (per-run bearer token). */
+const MAX_OPEN_PROMPTS = 8;
+const MAX_PROMPT_BYTES = 512 * 1024;
+
 export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
+  const expected = Buffer.from(`Bearer ${token}`);
+  let open = 0;
   const server = createServer((req, res) => {
-    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) {
+    const auth = Buffer.from(req.headers.authorization ?? '');
+    if (req.method !== 'POST' || auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
       res.statusCode = 403;
       res.end();
       return;
     }
+    // One engine asks one thing at a time (a few at most): anything beyond that isn't the engine (W-121).
+    if (open >= MAX_OPEN_PROMPTS) {
+      res.statusCode = 429;
+      res.end(JSON.stringify({ behavior: 'deny', message: 'Too many permission requests at once.' }));
+      return;
+    }
+    open++;
+    res.on('close', () => open--);
     let body = '';
-    req.on('data', (c) => (body += c));
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > MAX_PROMPT_BYTES) {
+        res.statusCode = 413;
+        res.end(JSON.stringify({ behavior: 'deny', message: 'Permission request too large.' }));
+        req.destroy();
+      }
+    });
     req.on('end', async () => {
+      if (res.writableEnded) return;
       res.setHeader('content-type', 'application/json');
       try {
         const r = JSON.parse(body);

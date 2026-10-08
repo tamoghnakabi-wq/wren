@@ -1,11 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import { execFileSync, spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
-import { APP_ORIGIN, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
+import { APP_ORIGIN, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
 import { closeBrowser, stopAllJobs } from './host';
 import { DeviceRunner, setApproveScript } from './runner';
@@ -46,7 +46,8 @@ if (process.argv.includes('--selftest')) {
       appUrl: APP_URL,
       safeStorage: safeStorage.isEncryptionAvailable(),
       playwright,
-      approveHelper: existsSync(approve),
+      // The approval server Claude Code starts: it must run, read its private file and pass on a decision.
+      approveHelper: existsSync(approve) && (await approveHelperSelfTest(approve).catch(() => false)),
       grokHook: existsSync(approve.replace(/mcp-approve\.mjs$/, 'grok-hook.mjs')),
       preload: existsSync(join(DIST, 'preload.js')),
       ...(updateDownload && { updateDownload }),
@@ -56,6 +57,56 @@ if (process.argv.includes('--selftest')) {
     app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) ? 0 : 1);
   });
 }
+/** Start the approval server like Claude Code would and ask it once; true when Wren's answer comes back. */
+async function approveHelperSelfTest(script: string): Promise<boolean> {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { createServer } = await import('node:http');
+  const dir = mkdtempSync(join(tmpdir(), 'wren-approve-test-'));
+  const bridge = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => res.end(JSON.stringify(req.headers.authorization === 'Bearer selftest' ? { behavior: 'allow' } : { behavior: 'deny', message: 'wrong token' })));
+  });
+  await new Promise<void>((r) => bridge.listen(0, '127.0.0.1', () => r()));
+  const port = (bridge.address() as { port: number }).port;
+  writeFileSync(join(dir, 'approval.json'), JSON.stringify({ url: `http://127.0.0.1:${port}/approve`, token: 'selftest' }));
+  const child = spawn(process.execPath, [script], { env: { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_FILE: join(dir, 'approval.json') }, stdio: ['pipe', 'pipe', 'ignore'] });
+  const send = (m: object) => child.stdin.write(`${JSON.stringify(m)}\n`);
+  try {
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 20_000);
+      let buf = '';
+      child.on('exit', () => resolve(false));
+      child.stdout.on('data', (d) => {
+        buf += d;
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          let m: { id?: number; result?: { content?: { text?: string }[] } };
+          try {
+            m = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (m.id === 1) {
+            send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+            send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'approve', arguments: { tool_name: 'Bash', input: { command: 'ls' } } } });
+          } else if (m.id === 2) {
+            clearTimeout(timer);
+            resolve(/"behavior":"allow"/.test(m.result?.content?.[0]?.text ?? ''));
+          }
+        }
+      });
+      send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'wren-selftest', version: '1' } } });
+    });
+  } finally {
+    child.kill();
+    bridge.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /**
  * A stand-in installer recorded the way launchInstaller records the real one: recognised while it
  * runs, not once it has ended. On macOS it is started like the real one (bash running a script, the
@@ -333,16 +384,27 @@ function shutdown(e: Electron.Event) {
   if (cleanedUp) return;
   e.preventDefault();
   cleaning ??= (async () => {
+    // Runs first (they stop their own work), then the browser, engines and commands side by side, so
+    // a browser that won't close doesn't hold up the rest (W-124).
     const all = (async () => {
-      await runner.suspend(8_000).catch(() => false);
-      await closeBrowser();
-      await Promise.all([stopAllEngines(), stopAllJobs()]);
+      const runs = await runner.suspend(8_000).catch(() => false);
+      const [, engines, jobs] = await Promise.all([closeBrowser(), stopAllEngines().catch(() => false), stopAllJobs().catch(() => false)]);
+      return runs && engines && jobs;
     })();
-    await Promise.race([all, new Promise((r) => setTimeout(r, QUIT_WAIT_MS))]);
+    const confirmed = await Promise.race([all, new Promise<false>((r) => setTimeout(() => r(false), QUIT_WAIT_MS))]);
+    // Quitting never waits longer than that (W-78). What couldn't be confirmed stopped is reported at the
+    // next start, not taken as done.
+    if (!confirmed) {
+      try {
+        writeFileSync(join(dataDir(), 'quit-unconfirmed.json'), JSON.stringify({ at: Date.now() }));
+      } catch {
+        /* best effort */
+      }
+    }
     cleanedUp = true;
     app.quit();
     // A quit that began with SIGTERM (kill, a process manager) stalls here: Electron asks again
-    // (before-quit) but never closes. Everything is already stopped, so save the session and exit.
+    // (before-quit) but never closes. Cleanup has had its turn, so save the session and exit.
     setTimeout(() => {
       session.fromPartition('persist:wren').flushStorageData();
       app.exit(0);
@@ -512,6 +574,17 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
 
 // ------------------------------------------------------------------ lifecycle
 
+/** The last quit couldn't confirm every agent run, engine and command stopped (W-124): say so once. */
+function reportUnconfirmedQuit() {
+  const f = join(dataDir(), 'quit-unconfirmed.json');
+  if (!existsSync(f)) return;
+  rmSync(f, { force: true });
+  console.warn('[wren] the last quit could not confirm that every agent process stopped');
+  if (Notification.isSupported()) {
+    new Notification({ title: 'Wren', body: 'When Wren last quit, it couldn’t confirm that every agent command had stopped. If something is still running, you can end it in Activity Monitor (Task Manager on Windows).' }).show();
+  }
+}
+
 /** No installer from an earlier Wren is at work, or it finished within `ms`. */
 async function installerFinished(ms: number): Promise<boolean> {
   const end = Date.now() + ms;
@@ -552,6 +625,7 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   } catch {
     /* best effort */
   }
+  reportUnconfirmedQuit();
   setTimeout(() => void updater.check(), 15_000);
   setInterval(() => void updater.check(), 4 * 60 * 60_000);
 });

@@ -139,12 +139,11 @@ export async function sendEmailCode(u: AuthUser, purpose: CodePurpose): Promise<
   const trusted = await sql.begin(async (tx) => {
     await tx`select pg_advisory_xact_lock(hashtext(${`mfa-email:${u.id}`}))`;
     if (took > SEND_TRUSTED_MS) {
-      // This code may have replaced the code of a request reserved after this one: neither can be
-      // trusted to be the account's newest any more, so both end (the user asks again).
+      // A code went out, but when is unknown: it may have replaced a newer request's code, and it
+      // certainly replaced any older one's. No open request can be trusted to match the account's
+      // current code, so all of them end (W-114, W-125); the user asks again.
       await tx`update public.mfa_email_requests set delivered_at = now(), superseded_at = coalesce(superseded_at, now()) where id = ${r.reserved!}`;
-      await tx`update public.mfa_email_requests set superseded_at = now()
-        where user_id = ${u.id} and used_at is null and superseded_at is null
-          and sent_at > (select sent_at from public.mfa_email_requests where id = ${r.reserved!})`;
+      await tx`update public.mfa_email_requests set superseded_at = now() where user_id = ${u.id} and used_at is null and superseded_at is null`;
       return false;
     }
     await tx`update public.mfa_email_requests set delivered_at = now() where id = ${r.reserved!}`;

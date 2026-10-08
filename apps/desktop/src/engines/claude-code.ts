@@ -1,6 +1,10 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { LoopOutcome } from '@wren/core';
-import { claudeSupportsRestricted, decide, findCli, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { dataDir } from '../main/config';
+import { allowedRoots } from '../main/paths';
+import { approvalServerProfile, hasSeatbelt } from '../main/sandbox';
+import { appPaths, claudeSupportsRestricted, decide, findCli, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
 // computer, signed in by the user through Anthropic's login. Wren never sees
@@ -64,6 +68,49 @@ function titleFor(name: string, input: Record<string, unknown>): string {
   }
 }
 
+type PlanResult = {
+  success?: boolean;
+  task?: { id?: unknown; subject?: unknown; status?: unknown };
+  tasks?: { id?: unknown; subject?: unknown; status?: unknown }[];
+};
+
+/**
+ * Apply a finished task-list call to the plan; true when it changed. TaskCreate adds what it made; TaskUpdate
+ * applies only when Claude Code says it succeeded (a missing task answers success: false, not an error);
+ * TaskList replaces the plan with Claude Code's own list, TaskGet refreshes one item (shapes from 2.1.294).
+ */
+export function applyPlanResult(todo: Map<string, { text: string; status: string }>, call: { name: string; input: Record<string, unknown> }, out: PlanResult | undefined, text: string): boolean {
+  const str = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? String(v) : undefined);
+  const put = (t: { id?: unknown; subject?: unknown; status?: unknown }) => {
+    const id = str(t.id);
+    if (!id) return false;
+    const prev = todo.get(id);
+    todo.set(id, { text: str(t.subject) ?? prev?.text ?? `Task ${id}`, status: str(t.status) ?? prev?.status ?? 'pending' });
+    return true;
+  };
+  switch (call.name) {
+    case 'TaskCreate': {
+      const id = str(out?.task?.id) ?? /Task #(\w+) created/.exec(text)?.[1];
+      return id ? put({ id, subject: call.input.subject ?? call.input.description, status: 'pending' }) : false;
+    }
+    case 'TaskUpdate': {
+      const id = str(call.input.taskId);
+      if (out?.success !== true || !id) return false;
+      if (call.input.status === 'deleted') return todo.delete(id);
+      return put({ id, subject: call.input.subject, status: call.input.status });
+    }
+    case 'TaskList': {
+      if (!Array.isArray(out?.tasks)) return false;
+      todo.clear();
+      for (const t of out.tasks) put(t);
+      return true;
+    }
+    case 'TaskGet':
+      return out?.task ? put(out.task) : false;
+  }
+  return false;
+}
+
 function resultText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text: unknown }).text) : '')).join('\n');
@@ -84,15 +131,17 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     return decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders);
   });
 
-  const mcpConfig = {
-    mcpServers: {
-      wren: {
-        command: process.execPath,
-        args: [approveScript],
-        env: { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token },
-      },
-    },
-  };
+  // The bridge's address and token stay in a private folder of Wren's data folder, which commands can't
+  // read: not on Claude Code's command line or in any environment, which other processes can read (W-121).
+  // The approval server gets a sandbox profile that can read that folder (see SHELL_PREFIX).
+  const privateDir = join(dataDir(), 'approvals', run.runId);
+  mkdirSync(privateDir, { recursive: true, mode: 0o700 });
+  const approvalFile = join(privateDir, 'approval.json');
+  writeFileSync(approvalFile, JSON.stringify({ url: bridge.url, token: bridge.token }), { mode: 0o600 });
+  const serverEnv: Record<string, string> = { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_FILE: approvalFile };
+  if (hasSeatbelt()) serverEnv.WREN_APPROVAL_SB = approvalServerProfile(allowedRoots(run.folders), dataDir(), appPaths(approveScript), privateDir);
+  const mcpFile = join(privateDir, 'mcp.json');
+  writeFileSync(mcpFile, JSON.stringify({ mcpServers: { wren: { command: process.execPath, args: [approveScript], env: serverEnv } } }), { mode: 0o600 });
   const args = [
     '-p',
     '--input-format',
@@ -110,7 +159,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     CLAUDE_TOOLS,
     '--strict-mcp-config',
     '--mcp-config',
-    JSON.stringify(mcpConfig),
+    mcpFile,
     '--append-system-prompt',
     `You are working for the user through Wren as the agent "${run.agentName}". ${run.instructions}`.slice(0, 20000),
   ];
@@ -118,14 +167,21 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   for (const f of run.folders.slice(1)) args.push('--add-dir', f);
   if (run.resumeId) args.push('--resume', run.resumeId);
 
+  if (run.signal.aborted) {
+    bridge.close();
+    rmSync(privateDir, { recursive: true, force: true });
+    return { kind: 'cancelled', steps: 0 };
+  }
   const proc = await spawnClaude(cli, args, run, approveScript);
+  // Watch for Stop before Claude Code gets the prompt; a Stop that came meanwhile stops it at once (W-122).
+  const onAbort = () => void stopEngine(proc);
+  run.signal.addEventListener('abort', onAbort, { once: true });
+  if (run.signal.aborted) onAbort();
   // Attached images go in the same message, as Anthropic image blocks (stream-json input, checked with 2.1.294).
   const content = run.images?.length
     ? [{ type: 'text', text: run.prompt }, ...run.images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } }))]
     : run.prompt;
-  proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n');
-  const onAbort = () => void stopEngine(proc);
-  run.signal.addEventListener('abort', onAbort, { once: true });
+  if (!run.signal.aborted) proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n');
 
   let stderr = '';
   proc.stderr.on('data', (c) => (stderr = (stderr + c).slice(-4000)));
@@ -134,7 +190,8 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   const todo = new Map<string, { text: string; status: string }>(
     (run.plan ?? []).filter((p) => p.id).map((p) => [p.id!, { text: p.text, status: p.status === 'done' ? 'completed' : p.status }]),
   );
-  const creating = new Map<string, string>(); // TaskCreate call id -> subject, until it says which task it made
+  // Task-list calls waiting for their result: the plan changes only on what Claude Code reports done (W-127).
+  const planCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
   const showPlan = () =>
     run.store.append('plan', { items: [...todo].map(([id, t]) => ({ id, text: t.text, status: t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'in_progress' : 'pending' })) }, 'done');
   let result: { subtype?: string; result?: string; is_error?: boolean; num_turns?: number; usage?: Record<string, number> } | null = null;
@@ -175,14 +232,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
         }
         if (b.type === 'tool_use' && b.id && b.name && PLAN_TOOLS.has(b.name)) {
           await writer.endMessage(); // text before and after it stays two messages, as with any tool
-          const input = b.input ?? {};
-          if (b.name === 'TaskCreate') creating.set(b.id, String(input.subject ?? input.description ?? ''));
-          if (b.name === 'TaskUpdate' && typeof input.taskId === 'string' && todo.has(input.taskId)) {
-            const t = todo.get(input.taskId)!;
-            if (input.status === 'deleted') todo.delete(input.taskId);
-            else todo.set(input.taskId, { text: typeof input.subject === 'string' ? input.subject : t.text, status: typeof input.status === 'string' ? input.status : t.status });
-            await showPlan();
-          }
+          planCalls.set(b.id, { name: b.name, input: b.input ?? {} });
           continue;
         }
         if (b.type === 'tool_use' && b.id && b.name) {
@@ -201,14 +251,10 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       const content = ((ev.message as { content?: unknown[] })?.content ?? []) as { type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[];
       for (const b of content) {
         if (b.type !== 'tool_result' || !b.tool_use_id) continue;
-        const subject = creating.get(b.tool_use_id);
-        if (subject !== undefined) {
-          creating.delete(b.tool_use_id);
-          const made = (ev.tool_use_result as { task?: { id?: unknown } } | undefined)?.task?.id ?? /Task #(\w+) created/.exec(resultText(b.content))?.[1];
-          if (!b.is_error && made !== undefined) {
-            todo.set(String(made), { text: subject, status: 'pending' });
-            await showPlan();
-          }
+        const call = planCalls.get(b.tool_use_id);
+        if (call) {
+          planCalls.delete(b.tool_use_id);
+          if (!b.is_error && applyPlanResult(todo, call, ev.tool_use_result as PlanResult | undefined, resultText(b.content))) await showPlan();
           continue;
         }
         await writer.toolEnd(b.tool_use_id, resultText(b.content), !!b.is_error);
@@ -238,7 +284,10 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   const code = await new Promise<number>((resolve) => proc.on('close', (c) => resolve(c ?? 1)));
   await chain;
   bridge.close();
+  rmSync(privateDir, { recursive: true, force: true });
   run.signal.removeEventListener('abort', onAbort);
+  // Claude Code has exited; anything it left running (a background command) ends with the turn.
+  await finishEngine(proc, writer);
   const r = result as { subtype?: string; result?: string; is_error?: boolean; num_turns?: number; usage?: Record<string, number> } | null;
   if (r) {
     await run.store

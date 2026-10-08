@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { approvalServerProfile, seatbeltProfile } from '../src/main/sandbox';
 import { agentEnv, SHELL_PREFIX } from '../src/main/shellenv';
 
 // W-108: agent commands never get Wren's own environment, which may come from a terminal with
@@ -76,20 +77,36 @@ describe('agent command environment (W-108)', () => {
     expect(readFileSync(prefix, 'utf8')).not.toContain('dummy');
   });
 
-  it.skipIf(!existsSync('/usr/bin/sandbox-exec'))('lets Wren\'s approval server, and only it, keep its own variables', () => {
+  it.skipIf(!existsSync('/usr/bin/sandbox-exec'))('runs Wren\'s approval server, and only it, under its own profile with its own variables (W-121)', () => {
     // Claude Code starts MCP servers through the prefix too (verified with 2.1.294), with the variables
-    // from --mcp-config. Without them every action needing permission was refused ("Wren is not reachable").
+    // from --mcp-config. Only the approval server's config has WREN_APPROVAL_SB.
     const dir = mkdtempSync(join(tmpdir(), 'wren-prefix-'));
     const prefix = join(dir, 'wren-shell.sh');
     writeFileSync(prefix, SHELL_PREFIX, { mode: 0o700 });
-    const base = { ...launched, PATH: '/usr/bin:/bin', HOME: dir, SHELL: '/bin/bash', WREN_SHELL_SB: '(version 1)(allow default)' };
-    const vars = (env: NodeJS.ProcessEnv) => spawnSync(prefix, ['env'], { env, encoding: 'utf8' }).stdout;
-    const server = vars({ ...base, WREN_APPROVAL_URL: 'http://127.0.0.1:5555', WREN_APPROVAL_TOKEN: 'dummy-bridge', ELECTRON_RUN_AS_NODE: '1' });
-    expect(server).toContain('WREN_APPROVAL_URL=http://127.0.0.1:5555\n');
-    expect(server).toContain('WREN_APPROVAL_TOKEN=dummy-bridge\n');
+    const secret = join(dir, 'approval.json');
+    writeFileSync(secret, 'bridge-token');
+    const base = { ...launched, PATH: '/usr/bin:/bin', HOME: dir, SHELL: '/bin/bash', WREN_SHELL_SB: `(version 1)(allow default)(deny file-read-data (literal ${JSON.stringify(realpathSync(secret))}))` };
+    const run = (env: NodeJS.ProcessEnv) => spawnSync(prefix, [`env; cat ${secret}`], { env, encoding: 'utf8' }).stdout;
+    const server = run({ ...base, WREN_APPROVAL_SB: '(version 1)(allow default)', WREN_APPROVAL_FILE: secret, ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_TOKEN: 'dummy-old' });
+    expect(server).toContain(`WREN_APPROVAL_FILE=${secret}\n`);
     expect(server).toContain('ELECTRON_RUN_AS_NODE=1\n');
-    expect(server).not.toMatch(/dummy-gh|dummy-aws|BASH_ENV|NODE_OPTIONS/);
-    // A command (no approval token in Claude Code's own environment) gets none of them.
-    expect(vars({ ...base, ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: 'http://127.0.0.1:5555' })).not.toMatch(/ELECTRON_RUN_AS_NODE|WREN_APPROVAL/);
+    expect(server).toContain('bridge-token'); // its profile can read its file
+    expect(server).not.toMatch(/WREN_APPROVAL_SB|WREN_APPROVAL_TOKEN|dummy-gh|BASH_ENV|NODE_OPTIONS/);
+    // A command gets none of it, and the command profile can't read the file.
+    const command = run({ ...base, WREN_APPROVAL_FILE: secret, ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_TOKEN: 'dummy-old' });
+    expect(command).not.toMatch(/ELECTRON_RUN_AS_NODE|WREN_APPROVAL|bridge-token/);
+  });
+
+  it.skipIf(!existsSync('/usr/bin/sandbox-exec'))('keeps the approval folder in Wren\'s data folder readable by the approval server only (W-121)', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'wren-approvals-')));
+    const data = join(root, 'data');
+    const work = join(root, 'work');
+    const priv = join(data, 'approvals', 'run-1');
+    mkdirSync(priv, { recursive: true });
+    mkdirSync(work);
+    writeFileSync(join(priv, 'approval.json'), 'bridge-token');
+    const read = (profile: string) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/cat', join(priv, 'approval.json')], { encoding: 'utf8' }).stdout;
+    expect(read(seatbeltProfile([work], data))).toBe('');
+    expect(read(approvalServerProfile([work], data, [], priv))).toBe('bridge-token');
   });
 });

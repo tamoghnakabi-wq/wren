@@ -136,6 +136,15 @@ export function seatbeltProfile(roots: string[], dataDir: string, home = homedir
   return build({ roots, dataDir, home, tools: true, readOnly });
 }
 
+/**
+ * Wren's approval server, which Claude Code starts through the shell prefix: a command's profile plus its
+ * own private folder in Wren's data folder (bridge address and token), which commands can't read. The rule
+ * comes last, so it wins over the data folder's deny (W-121).
+ */
+export function approvalServerProfile(roots: string[], dataDir: string, readOnly: string[], privateDir: string, home = homedir()): string {
+  return `${build({ roots, dataDir, home, tools: true, readOnly })}\n(allow file-read* (subpath ${q(privateDir)}))`;
+}
+
 /** Wren's own file reads/writes for the agent: the allowed folders and nothing else. */
 export function fileOpsProfile(roots: string[], dataDir: string, home = homedir()): string {
   return build({ roots, dataDir, home, tools: false });

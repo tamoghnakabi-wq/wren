@@ -35,6 +35,11 @@ rl.on('line', (line) => {
     const parts = m.params.prompt.map((b) => (b.type === 'text' ? b.text : b.type + ':' + b.mimeType + ':' + b.data));
     if (parts.length > 1 || m.params.prompt[0].text.includes('[The user attached')) {
       if (m.params.prompt[0].text.includes('picky') && parts.length > 1) return out({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid params: image content is not supported' } });
+      if (m.params.prompt[0].text.includes('late') && parts.length > 1) {
+        // Work first, then an error that looks like an image refusal: asking again could repeat the work.
+        update(s, { sessionUpdate: 'tool_call', toolCallId: 'late-1', title: 'Write file', kind: 'edit', status: 'completed', rawInput: { path: 'a.txt' } });
+        return out({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid params: image too large' } });
+      }
       text(s, parts.join(' | '));
       return out({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } });
     }
@@ -52,7 +57,7 @@ const dir = mkdtempSync(join(tmpdir(), 'wren-grok-test-'));
 const agentPath = join(dir, 'fake-grok.cjs');
 writeFileSync(agentPath, AGENT);
 
-const h = vi.hoisted(() => ({ log: [] as string[] }));
+const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0 }));
 vi.mock('../src/engines/common', () => {
   class TimelineWriter {
     text = '';
@@ -82,8 +87,9 @@ vi.mock('../src/engines/common', () => {
     findCli: () => '/fake/grok',
     decide: async () => ({ allow: true }),
     startApprovalBridge: async () => ({ url: 'http://127.0.0.1:9', token: 't', close() {} }),
-    spawnEngine: async () => spawn(process.execPath, [agentPath], { stdio: ['pipe', 'pipe', 'pipe'] }),
+    spawnEngine: async () => (h.spawned++, spawn(process.execPath, [agentPath], { stdio: ['pipe', 'pipe', 'pipe'] })),
     stopEngine: async (p: { kill: () => void }) => p.kill(),
+    finishEngine: async (p: { kill: () => void }) => (p.kill(), true),
   };
 });
 const { runGrokBuild } = await import('../src/engines/grok-build');
@@ -160,6 +166,21 @@ describe('Grok Build follow-ups', () => {
     const outcome = await runGrokBuild(r, () => true, '/dev/null');
     expect(outcome).toMatchObject({ kind: 'completed' });
     expect((outcome as { result: string }).result).toMatch(/^picky: what is this\?\n\n\[The user attached an image, but this version of Grok Build couldn’t receive it\.\]$/);
+  });
+
+  it('does not ask again once the prompt has done something (W-123)', async () => {
+    const { run: r } = run(undefined, 'late: what is this?', [{ mime: 'image/png', data: 'iVBORw0' }]);
+    const outcome = await runGrokBuild(r, () => true, '/dev/null');
+    expect(outcome).toMatchObject({ kind: 'failed', code: 'engine_error' });
+    expect(h.log.filter((l) => l.startsWith('start:'))).toEqual(['start:late-1']); // the prompt ran once
+  });
+
+  it('never starts Grok for a run stopped before it began (W-122)', async () => {
+    const { run: r, abort } = run();
+    abort.abort();
+    h.spawned = 0;
+    expect(await runGrokBuild(r, () => true, '/dev/null')).toMatchObject({ kind: 'cancelled' });
+    expect(h.spawned).toBe(0);
   });
 
   it('starts a new session when the old one is gone, and remembers it', async () => {

@@ -253,7 +253,9 @@ export class DeviceRunner {
     const firstAsk = (asks[0]?.data ?? {}) as MessageData & { context?: string };
     const text = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
     // Attached images go with the prompt; the server only hands out this run's account's images.
-    const { images, skipped } = await engineImages(asks, (id) => deviceJson(`/api/device/runs/${c.run.id}/artifact`, { id }, { lease: store.lease }));
+    // Stop or a lost lease ends the loading too, and no engine starts for a run that has ended (W-122).
+    const { images, skipped } = await engineImages(asks, (id) => deviceJson(`/api/device/runs/${c.run.id}/artifact`, { id }, { lease: store.lease, signal }), signal);
+    if (signal.aborted) return { kind: 'cancelled', steps: 0 };
     const prompt = withSkipped(`${firstAsk.context ? `${firstAsk.context}\n\n` : ''}${text}`, skipped);
     const engine = c.run.model.source;
     // The engine's own session to continue (reasoning events also carry the follow-up cursor).

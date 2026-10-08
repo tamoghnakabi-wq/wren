@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import readline from 'node:readline';
 import type { LoopOutcome } from '@wren/core';
-import { decide, findCli, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { decide, findCli, finishEngine, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
 // Grok Build engine: drives xAI's official `grok` CLI through its documented
 // Agent Client Protocol mode (`grok agent stdio`), authenticated with the
@@ -55,6 +55,9 @@ function mapGrokTool(name: string, input: Record<string, unknown>) {
   return { name: `grok.${name}`, args: input, paths: [], title: name };
 }
 
+/** Updates that mean a prompt has started doing something. */
+const WORK = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan']);
+
 /** How long Grok gets to answer each setup step (start, sign-in, new session) and to replay a resumed session. */
 const SETUP_MS = 60_000;
 const LOAD_MS = 180_000;
@@ -63,6 +66,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   const cli = findCli('grok');
   if (!cli) return { kind: 'failed', error: 'Grok Build isn’t installed on this computer. Install it (docs.x.ai/build), run `grok login` with your xAI account, then try again.', code: 'engine_missing', steps: 0 };
 
+  if (run.signal.aborted) return { kind: 'cancelled', steps: 0 }; // stopped before it started (W-122)
   const writer = new TimelineWriter(run.store, 'grok-build', run.model === 'default' ? 'Grok Build' : run.model);
   run.store.usageSource = 'grok-build';
 
@@ -70,6 +74,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   // hook asks Wren; Grok's own prompts are turned off for this process so a
   // personal "always-approve" setting can't bypass Wren's policy.
   const bridge = await startApprovalBridge(async ({ tool_name, input, tool_use_id }) => {
+    promptWork++; // a tool is about to run
     const m = mapGrokTool(tool_name, input);
     if (m.name === 'computer.read_file' && !m.paths.length) return { allow: true };
     return decide(run, writer, { callId: tool_use_id ?? `hook-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: m.name, args: m.args, title: m.title, paths: m.paths }, inFolders);
@@ -96,6 +101,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   // every earlier reply at the start of each new one and left the old tool calls "running". Nothing is written
   // until the load has answered.
   let replayingUntil: number | null = null;
+  let promptWork = 0; // what the current prompt has done so far (replies, tool calls, plans, permission requests)
   // Every request ends (W-116): with Grok's answer, or when Grok exits or can't be written to, when the
   // user stops the run, or when a setup step gets no answer in time. Otherwise a run would wait forever,
   // holding its lease and one of the computer's three run slots.
@@ -138,11 +144,13 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
       const p = pending.get(Number(msg.id));
       if (!p) return;
       pending.delete(Number(msg.id));
-      if (msg.error) p.reject(new Error(msg.error.message ?? 'ACP error'));
+      if (msg.error) p.reject(Object.assign(new Error(msg.error.message ?? 'ACP error'), { code: msg.error.code }));
       else p.resolve(msg.result ?? {});
       return;
     }
     if (replayingUntil !== null && msg.method === 'session/update') return; // history, replayed by session/load
+    const kind = (msg.params?.update as { sessionUpdate?: string } | undefined)?.sessionUpdate;
+    if (msg.method === 'session/request_permission' || (msg.method === 'session/update' && kind && WORK.has(kind))) promptWork++;
     chain = chain
       .then(async () => {
         if (msg.method === 'session/update') {
@@ -188,6 +196,11 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     setTimeout(() => void stopEngine(proc).finally(() => failAll(new Error('Stopped by the user.'))), 3000);
   };
   run.signal.addEventListener('abort', onAbort, { once: true });
+  if (run.signal.aborted) {
+    // Stopped before Grok even started: nothing is sent to it (W-122).
+    failAll(new Error('Stopped by the user.'));
+    void stopEngine(proc);
+  }
 
   try {
     const init = await request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'wren', title: 'Wren', version: '0.1.0' } }, SETUP_MS);
@@ -214,10 +227,13 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     // false (checked); a version that refuses them gets the prompt again without them, and is told why.
     const images = (run.images ?? []).map((i) => ({ type: 'image', mimeType: i.mime, data: i.data }));
     let res: Record<string, unknown>;
+    promptWork = 0;
     try {
       res = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt }, ...images] });
     } catch (e) {
-      if (!images.length || gone || run.signal.aborted || !/image|invalid params/i.test((e as Error).message)) throw e;
+      // Only a prompt refused as invalid input before anything happened is asked again: once Grok has
+      // replied, planned or called a tool, repeating the prompt could repeat its effects (W-123).
+      if (!images.length || gone || run.signal.aborted || (e as { code?: number }).code !== -32602 || promptWork > 0) throw e;
       const note = `\n\n[The user attached ${images.length === 1 ? 'an image' : `${images.length} images`}, but this version of Grok Build couldn’t receive ${images.length === 1 ? 'it' : 'them'}.]`;
       res = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt + note }] });
     }
@@ -243,6 +259,6 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     proc.stdin.end();
     // Grok exits once its input ends; what's left of it is stopped before the run reports how it ended.
     await Promise.race([exited, new Promise((r) => setTimeout(r, 1500))]);
-    await stopEngine(proc);
+    await finishEngine(proc, writer);
   }
 }
