@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { Inter, Instrument_Serif, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { ThemeWatcher } from '@/components/theme-watcher';
+import { Analytics } from '@vercel/analytics/next';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
 const serif = Instrument_Serif({ subsets: ['latin'], weight: '400', variable: '--font-display-serif', display: 'swap' });
@@ -41,6 +42,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-dvh bg-bg text-text">
         <ThemeWatcher />
         {children}
+        <Analytics />
       </body>
     </html>
   );
