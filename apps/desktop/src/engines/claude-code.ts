@@ -20,8 +20,14 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
   WebSearch: (i) => ({ name: 'web.fetch', args: { url: `search: ${String(i.query ?? '')}` }, paths: [] }),
 };
 
-/** Built-in tools a Wren agent gets in Claude Code (restricted mode removes Bash and WebFetch unless named). */
-const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,Task';
+/**
+ * Built-in tools a Wren agent gets in Claude Code (restricted mode removes Bash and WebFetch unless named).
+ * Its to-do list was TodoWrite; newer versions (2.1.2xx) replaced it with TaskCreate/TaskUpdate/TaskList/TaskGet.
+ * Names a version doesn't have are ignored, so both are listed.
+ */
+const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet,Task';
+/** Claude Code's own to-do list: shown as the task's plan, not as steps. */
+const PLAN_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet']);
 
 function mapTool(name: string, input: Record<string, unknown>) {
   const m = TOOL_MAP[name];
@@ -119,7 +125,21 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
 
   let stderr = '';
   proc.stderr.on('data', (c) => (stderr = (stderr + c).slice(-4000)));
+  // The to-do list from TaskCreate/TaskUpdate, in creation order, becomes the plan panel.
+  // A follow-up continues the session's list: start from the plan the last turn left.
+  const todo = new Map<string, { text: string; status: string }>(
+    (run.plan ?? []).filter((p) => p.id).map((p) => [p.id!, { text: p.text, status: p.status === 'done' ? 'completed' : p.status }]),
+  );
+  const creating = new Map<string, string>(); // TaskCreate call id -> subject, until it says which task it made
+  const showPlan = () =>
+    run.store.append('plan', { items: [...todo].map(([id, t]) => ({ id, text: t.text, status: t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'in_progress' : 'pending' })) }, 'done');
   let result: { subtype?: string; result?: string; is_error?: boolean; num_turns?: number; usage?: Record<string, number> } | null = null;
+  // A background sub-agent makes the CLI answer twice in one run (a result, then another turn and
+  // result when the sub-agent reports back): count every turn's usage, keep the last answer.
+  const usage: Record<string, number> = {};
+  let turns = 0;
+  let savedSession = run.resumeId;
+  let turnText = false; // this turn's answer has been written (streamed)
   let buf = '';
   let chain = Promise.resolve();
   const handle = async (line: string) => {
@@ -131,14 +151,36 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     }
     const type = ev.type as string;
     if (type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
-      await run.saveResumeId(ev.session_id);
+      // Each turn starts with one; the session is the same.
+      if (ev.session_id !== savedSession) {
+        savedSession = ev.session_id;
+        await run.saveResumeId(ev.session_id);
+      }
     } else if (type === 'stream_event') {
       const e = ev.event as { type?: string; delta?: { type?: string; text?: string } };
-      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && !ev.parent_tool_use_id) await writer.textDelta(e.delta.text ?? '');
+      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && !ev.parent_tool_use_id && e.delta.text) {
+        turnText = true;
+        await writer.textDelta(e.delta.text);
+      }
     } else if (type === 'assistant' && !ev.parent_tool_use_id) {
       const content = ((ev.message as { content?: unknown[] })?.content ?? []) as { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[];
       for (const b of content) {
-        if (b.type === 'text' && b.text && !writer.currentText) await writer.textDelta(b.text);
+        if (b.type === 'text' && b.text && !writer.currentText) {
+          turnText = true;
+          await writer.textDelta(b.text);
+        }
+        if (b.type === 'tool_use' && b.id && b.name && PLAN_TOOLS.has(b.name)) {
+          await writer.endMessage(); // text before and after it stays two messages, as with any tool
+          const input = b.input ?? {};
+          if (b.name === 'TaskCreate') creating.set(b.id, String(input.subject ?? input.description ?? ''));
+          if (b.name === 'TaskUpdate' && typeof input.taskId === 'string' && todo.has(input.taskId)) {
+            const t = todo.get(input.taskId)!;
+            if (input.status === 'deleted') todo.delete(input.taskId);
+            else todo.set(input.taskId, { text: typeof input.subject === 'string' ? input.subject : t.text, status: typeof input.status === 'string' ? input.status : t.status });
+            await showPlan();
+          }
+          continue;
+        }
         if (b.type === 'tool_use' && b.id && b.name) {
           if (writer.tools.has(b.id)) continue;
           if (b.name === 'TodoWrite' && Array.isArray(b.input?.todos)) {
@@ -149,11 +191,33 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
           await writer.toolStart(b.id, m.name, b.input ?? {}, titleFor(b.name, b.input ?? {}));
         }
       }
-    } else if (type === 'user' && !ev.parent_tool_use_id) {
+    } else if (type === 'user') {
+      // Sub-agents' results too (parent_tool_use_id set): their calls that needed approval have a step
+      // (from the permission prompt) that ends here. The writer ignores ids it has no step for.
       const content = ((ev.message as { content?: unknown[] })?.content ?? []) as { type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[];
-      for (const b of content) if (b.type === 'tool_result' && b.tool_use_id) await writer.toolEnd(b.tool_use_id, resultText(b.content), !!b.is_error);
+      for (const b of content) {
+        if (b.type !== 'tool_result' || !b.tool_use_id) continue;
+        const subject = creating.get(b.tool_use_id);
+        if (subject !== undefined) {
+          creating.delete(b.tool_use_id);
+          const made = (ev.tool_use_result as { task?: { id?: unknown } } | undefined)?.task?.id ?? /Task #(\w+) created/.exec(resultText(b.content))?.[1];
+          if (!b.is_error && made !== undefined) {
+            todo.set(String(made), { text: subject, status: 'pending' });
+            await showPlan();
+          }
+          continue;
+        }
+        await writer.toolEnd(b.tool_use_id, resultText(b.content), !!b.is_error);
+      }
     } else if (type === 'result') {
       result = ev as typeof result;
+      for (const [k, v] of Object.entries(result?.usage ?? {})) if (typeof v === 'number') usage[k] = (usage[k] ?? 0) + v;
+      turns += result?.num_turns ?? 0;
+      // Each turn's answer is its own message (a sub-agent reporting back starts another turn); one
+      // that wasn't streamed comes from the result.
+      const answer = result && !result.is_error && result.subtype === 'success' && !turnText ? (result.result ?? '') : undefined;
+      await writer.endMessage(answer);
+      turnText = false;
       proc.stdin.end();
     }
   };
@@ -172,24 +236,23 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   bridge.close();
   run.signal.removeEventListener('abort', onAbort);
   const r = result as { subtype?: string; result?: string; is_error?: boolean; num_turns?: number; usage?: Record<string, number> } | null;
-  if (r?.usage) {
+  if (r) {
     await run.store
-      .recordUsage({ inputTokens: (r.usage.input_tokens ?? 0) + (r.usage.cache_read_input_tokens ?? 0) + (r.usage.cache_creation_input_tokens ?? 0), outputTokens: r.usage.output_tokens ?? 0, cachedTokens: r.usage.cache_read_input_tokens ?? 0 }, run.model === 'default' ? 'claude-code' : run.model)
+      .recordUsage({ inputTokens: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0), outputTokens: usage.output_tokens ?? 0, cachedTokens: usage.cache_read_input_tokens ?? 0 }, run.model === 'default' ? 'claude-code' : run.model)
       .catch(() => {});
   }
   if (run.signal.aborted) {
     await writer.endMessage();
-    return { kind: 'cancelled', steps: r?.num_turns ?? 0 };
+    return { kind: 'cancelled', steps: turns };
   }
   if (r && !r.is_error && r.subtype === 'success') {
-    const finalText = writer.currentText || r.result || '';
-    await writer.endMessage(finalText);
-    return { kind: 'completed', result: r.result || finalText, steps: r.num_turns ?? 1 };
+    await writer.endMessage();
+    return { kind: 'completed', result: r.result || 'Done.', steps: turns || 1 };
   }
   await writer.endMessage();
   const err = r?.result || stderr.trim().split('\n').slice(-3).join(' ') || `Claude Code exited with code ${code}.`;
   const hint = /log ?in|authenticat|credential|401|not logged/i.test(err) ? ' Open a terminal, run `claude`, and sign in with your Claude account.' : '';
-  return { kind: 'failed', error: `Claude Code: ${err}${hint}`.slice(0, 1500), code: 'engine_error', steps: r?.num_turns ?? 0 };
+  return { kind: 'failed', error: `Claude Code: ${err}${hint}`.slice(0, 1500), code: 'engine_error', steps: turns };
 }
 
 export const APPROVE_SCRIPT_NAME = 'mcp-approve.mjs';

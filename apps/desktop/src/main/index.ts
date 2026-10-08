@@ -341,6 +341,12 @@ function shutdown(e: Electron.Event) {
     await Promise.race([all, new Promise((r) => setTimeout(r, QUIT_WAIT_MS))]);
     cleanedUp = true;
     app.quit();
+    // A quit that began with SIGTERM (kill, a process manager) stalls here: Electron asks again
+    // (before-quit) but never closes. Everything is already stopped, so save the session and exit.
+    setTimeout(() => {
+      session.fromPartition('persist:wren').flushStorageData();
+      app.exit(0);
+    }, 5000).unref();
   })();
 }
 

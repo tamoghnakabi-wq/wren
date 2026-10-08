@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcome, type MessageData, type Risk, type StatusData, type ToolCallData } from '@wren/core';
+import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
@@ -31,6 +31,8 @@ export interface EngineRun {
   /** This computer's switches (Settings → This computer); engines must respect them too. */
   allow: { shell: boolean; browser: boolean; screen: boolean };
   resumeId?: string;
+  /** The task's latest plan, for an engine that continues its own to-do list across turns. */
+  plan?: PlanItem[];
   signal: AbortSignal;
   /** Remembered engine session id for follow-ups in the same Wren task. */
   saveResumeId: (id: string) => Promise<void>;
@@ -166,7 +168,7 @@ export class TimelineWriter {
   private text = '';
   private lastFlush = 0;
   private flushTimer: NodeJS.Timeout | null = null;
-  readonly tools = new Map<string, { id: string; data: ToolCallData }>();
+  readonly tools = new Map<string, { id: string; data: ToolCallData; status?: string }>();
 
   constructor(
     private readonly store: RemoteStore,
@@ -245,9 +247,20 @@ export class TimelineWriter {
     return ev.id;
   }
 
+  /**
+   * Change a step's status and data, keeping this copy in step (toolEnd writes it back). Takes the
+   * step itself: its key can change meanwhile (a permission prompt's entry gets the call's real id).
+   */
+  async setStep(t: { id: string; data: ToolCallData; status?: string }, status: string, patch: Partial<ToolCallData>) {
+    t.data = { ...t.data, ...patch };
+    t.status = status;
+    await this.store.update(t.id, { status, data: t.data });
+  }
+
   async toolEnd(callId: string, output: string, isError: boolean) {
     const t = this.tools.get(callId);
-    if (!t) return;
+    // A denied step has already ended: the engine's "denied" result mustn't turn it into a failure.
+    if (!t || t.status === 'denied') return;
     t.data = { ...t.data, endedAt: Date.now(), result: { output: output.slice(0, 30000), isError } };
     await this.store.update(t.id, { status: isError ? 'error' : 'done', data: t.data });
   }
@@ -288,9 +301,11 @@ export async function decide(
     await writer.toolStart(call.callId, call.name, call.args, call.title);
     t = writer.tools.get(call.callId)!;
   }
-  await run.store.update(t.id, { status: 'awaiting_approval', data: { ...t.data, risk: a.risk } });
-  const approvalId = await run.store.createApproval({ eventId: t.id, tool: call.name, title: call.title, risk: a.risk, reason: a.reason, args: call.args });
-  await run.store.update(t.id, { status: 'awaiting_approval', data: { ...t.data, risk: a.risk, approvalId } });
+  // Through the writer, so the step's risk and approval stay on it when the engine reports the result.
+  const step = t;
+  await writer.setStep(step, 'awaiting_approval', { risk: a.risk });
+  const approvalId = await run.store.createApproval({ eventId: step.id, tool: call.name, title: call.title, risk: a.risk, reason: a.reason, args: call.args });
+  await writer.setStep(step, 'awaiting_approval', { approvalId });
   // Engines treat a hook timeout as "allow", so always answer well before theirs.
   const giveUpAt = Date.now() + 50 * 60_000;
   for (;;) {
@@ -298,11 +313,11 @@ export async function decide(
     if (Date.now() > giveUpAt) return { allow: false, message: 'No approval arrived in time, so the action was not taken. Ask the user and try again later.' };
     const state = await run.store.approvalState(approvalId).catch(() => 'pending' as const);
     if (state === 'approved') {
-      await run.store.update(t.id, { status: 'running', data: { ...t.data, risk: a.risk, approvalId } });
+      await writer.setStep(step, 'running', {});
       return { allow: true };
     }
     if (state !== 'pending') {
-      await run.store.update(t.id, { status: 'denied', data: { ...t.data, risk: a.risk, approvalId, endedAt: Date.now(), result: { output: 'Denied by the user.', isError: true } } });
+      await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: 'Denied by the user.', isError: true } });
       return { allow: false, message: 'The user denied this action. Do not retry it; continue another way or explain what you need.' };
     }
     await new Promise((r) => setTimeout(r, 1500));

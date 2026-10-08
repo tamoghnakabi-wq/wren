@@ -75,4 +75,21 @@ describe('agent command environment (W-108)', () => {
     expect(existsSync(join(dir, 'ran'))).toBe(false);
     expect(readFileSync(prefix, 'utf8')).not.toContain('dummy');
   });
+
+  it.skipIf(!existsSync('/usr/bin/sandbox-exec'))('lets Wren\'s approval server, and only it, keep its own variables', () => {
+    // Claude Code starts MCP servers through the prefix too (verified with 2.1.294), with the variables
+    // from --mcp-config. Without them every action needing permission was refused ("Wren is not reachable").
+    const dir = mkdtempSync(join(tmpdir(), 'wren-prefix-'));
+    const prefix = join(dir, 'wren-shell.sh');
+    writeFileSync(prefix, SHELL_PREFIX, { mode: 0o700 });
+    const base = { ...launched, PATH: '/usr/bin:/bin', HOME: dir, SHELL: '/bin/bash', WREN_SHELL_SB: '(version 1)(allow default)' };
+    const vars = (env: NodeJS.ProcessEnv) => spawnSync(prefix, ['env'], { env, encoding: 'utf8' }).stdout;
+    const server = vars({ ...base, WREN_APPROVAL_URL: 'http://127.0.0.1:5555', WREN_APPROVAL_TOKEN: 'dummy-bridge', ELECTRON_RUN_AS_NODE: '1' });
+    expect(server).toContain('WREN_APPROVAL_URL=http://127.0.0.1:5555\n');
+    expect(server).toContain('WREN_APPROVAL_TOKEN=dummy-bridge\n');
+    expect(server).toContain('ELECTRON_RUN_AS_NODE=1\n');
+    expect(server).not.toMatch(/dummy-gh|dummy-aws|BASH_ENV|NODE_OPTIONS/);
+    // A command (no approval token in Claude Code's own environment) gets none of them.
+    expect(vars({ ...base, ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: 'http://127.0.0.1:5555' })).not.toMatch(/ELECTRON_RUN_AS_NODE|WREN_APPROVAL/);
+  });
 });

@@ -146,6 +146,8 @@ export interface StatusData {
 export interface PlanItem {
   text: string;
   status: 'pending' | 'in_progress' | 'done';
+  /** The engine's own id for the item (Claude Code's task list), so a later turn can update it. */
+  id?: string;
 }
 
 export interface SessionEvent<T = unknown> {

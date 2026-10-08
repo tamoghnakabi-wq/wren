@@ -107,5 +107,14 @@ for v in ${PREFIX_VARS.join(' ')}; do
   eval "isset=\\\${$v+1}; val=\\\${$v-}"
   [ -n "$isset" ] && set -- "$@" "$v=$val"
 done
+# Claude Code starts its MCP servers through this prefix too, with each server's variables from
+# --mcp-config. Wren's approval server needs its own; only its launch has the token (Claude Code's
+# environment, and so every command's, never does).
+if [ -n "\${WREN_APPROVAL_TOKEN-}" ]; then
+  for v in WREN_APPROVAL_URL WREN_APPROVAL_TOKEN ELECTRON_RUN_AS_NODE; do
+    eval "isset=\\\${$v+1}; val=\\\${$v-}"
+    [ -n "$isset" ] && set -- "$@" "$v=$val"
+  done
+fi
 exec /usr/bin/env -i "$@" SHELL="$sh" WREN_AGENT=1 /usr/bin/sandbox-exec -p "$p" "$sh" -c "$cmd"
 `;

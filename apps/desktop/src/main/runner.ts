@@ -13,6 +13,7 @@ import {
   type MessageData,
   type ModelClient,
   type ModelRef,
+  type PlanItem,
   type SessionEvent,
   type ToolSpec,
 } from '@wren/core';
@@ -277,6 +278,7 @@ export class DeviceRunner {
         },
       },
       resumeId: resume?.data.resumeId,
+      plan: ([...events].reverse().find((e) => e.type === 'plan')?.data as { items?: PlanItem[] } | undefined)?.items,
       signal,
       saveResumeId: async (id: string) => {
         if (id !== resume?.data.resumeId) await store.append('reasoning', { engine, resumeId: id }, 'done');
