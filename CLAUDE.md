@@ -364,6 +364,7 @@ Other shipped work:
 - **Collapsible panes.** Commit `c1b4422`. State lives in `lib/client/layout.ts` and is restored before paint by an inline `<head>` script in `app/layout.tsx`. Tailwind variants `rail:` and `details-off:`; shortcuts ⌘\ and ⇧⌘\.
 - **Agent characters.** Commit `930f2e2`: 8 SVG characters × moods in `components/agent-character.tsx`, with data in `lib/characters.ts`. Stored in the agent's `icon` field.
 - **Landing demo images** are in `apps/web/public/demo/rental-1..6.webp`.
+- **Vercel Web Analytics** (2026-10-09, PR #2 from the Vercel Agent): `components/analytics.tsx` (`SiteAnalytics`) wraps `@vercel/analytics/next` and drops every page's query string and hash in `beforeSend` (pairing links and the sign-in return carry one-time codes; by default the full URL is sent, checked in dev's debug log). Cookieless; no CSP in the app to update.
 
 ---
 
