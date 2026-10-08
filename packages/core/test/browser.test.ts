@@ -372,7 +372,7 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
-  it('W-110/W-112: a credential\'s name, id or multi-line label is enough, and Enter\'s aliases are confirmed', async () => {
+  it('W-110/W-112/W-118: a credential\'s name (camel-case too), id or multi-line label is enough, and Enter\'s aliases are confirmed', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });
     try {
@@ -384,14 +384,17 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
         <input id=otp name=otp aria-label="Verification"><input id=tok name=api_token placeholder="Paste here">
         <label for=sc>Security<br>code</label><input id=sc>
         <svg width=10 height=10><text id=svgl>Card number</text></svg><input id=sv aria-labelledby=svgl>
-        <input id=fine name=shipping_name aria-label="Name"><textarea id=ta aria-label="Notes"></textarea>`);
+        <input id=fine name=shipping_name aria-label="Name"><textarea id=ta aria-label="Notes"></textarea>
+        <input id=otpCode name=otpCode aria-label="Verification"><input id=pinc name=pinCode><input id=OTPInput>
+        <input id=ship name=shippingAddress value="1 Main St"><input id=spin name=spinnerLabel>`);
       await ctl.act({ action: 'snapshot', tab: 'T' });
       const typeInto = async (sel: string, text: string) => {
         const r = (await page.locator(sel).getAttribute('data-wren-ref'))!;
         const t = (await ctl.act({ action: 'describe', ref: r, tab: 'T' })).target!;
         return ctl.act({ action: 'type', ref: r, text, tab: 'T', expect: t });
       };
-      for (const sel of ['#otp', '#tok', '#sc', '#sv']) {
+      // Camel-case names count as words too (W-118); look-alikes inside other words don't.
+      for (const sel of ['#otp', '#tok', '#sc', '#sv', '#otpCode', '#pinc', '#OTPInput']) {
         const r = await typeInto(sel, '123456');
         expect(r.ok, sel).toBe(false);
         expect(r.error, sel).toMatch(/credentials/);
@@ -399,6 +402,11 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
       }
       expect((await typeInto('#fine', 'Ada')).ok).toBe(true);
       expect(await page.locator('#fine').inputValue()).toBe('Ada');
+      for (const sel of ['#ship', '#spin']) expect((await typeInto(sel, 'x')).ok, sel).toBe(true);
+      const shown = (await ctl.act({ action: 'snapshot', tab: 'T' })).snapshot!;
+      expect(shown).toContain('value="x"'); // shippingAddress: its value is shown
+      await page.locator('#otpCode').evaluate((e: HTMLInputElement) => (e.value = '424242'));
+      expect((await ctl.act({ action: 'snapshot', tab: 'T' })).snapshot).not.toContain('424242');
       for (const key of ['\n', '\r']) {
         await page.focus('#ta');
         const t = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;

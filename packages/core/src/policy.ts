@@ -377,7 +377,8 @@ function readOnlyForm(cmd: string, args: string[]): boolean {
       // +cmd runs less commands (including !shell); -o/-O write a log; -k loads key bindings.
       return !args.some((w) => w.startsWith('+') || /^-[a-zA-Z]*[oOk]/.test(w) || longOpt(w, '--log-file', '--LOG-FILE', '--lesskey-file', '--lesskey-src', '--lesskey-content'));
     case 'file':
-      return !args.some((w) => /^-[a-zA-Z]*[zZ]/.test(w) || longOpt(w, '--uncompress', '--uncompress-noreport')); // may run decompressors found on PATH
+      // -z/-Z may run decompressors found on PATH; -C (--compile) writes a compiled magic file (W-117).
+      return !args.some((w) => /^-[a-zA-Z]*[zZC]/.test(w) || longOpt(w, '--uncompress', '--uncompress-noreport', '--compile'));
     case 'ag':
       return !args.some((w) => longOpt(w, '--pager'));
     case 'uniq':

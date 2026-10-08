@@ -151,6 +151,18 @@ function writePending(p: Pending, marker = pendingPath()) {
 /** Where the installer from the last run of Wren stands: at work, gone, or alive but not identifiable. */
 export type InstallerState = 'running' | 'gone' | 'unknown';
 
+/**
+ * A process's command line is that installer at work: on Windows the installer program itself, on macOS
+ * bash running the install script (how `install()` starts it). A command that merely mentions the script
+ * (`tail -f …/install.sh`) isn't (W-120).
+ */
+export function isInstaller(command: string, installer: string, win: boolean): boolean {
+  const c = command.trim();
+  if (win) return c.toLowerCase() === installer.toLowerCase();
+  const start = `/bin/bash ${installer}`;
+  return c === start || c.startsWith(`${start} `);
+}
+
 export class Updater {
   state: UpdateState = { available: false };
   private busy = false;
@@ -217,7 +229,7 @@ export class Updater {
       } catch {
         return 'unknown';
       }
-      return all.some((c) => (win ? c.trim().toLowerCase() === installer.toLowerCase() : c.includes(installer))) ? 'running' : 'gone';
+      return all.some((c) => isInstaller(c, installer, win)) ? 'running' : 'gone';
     }
     if (!Number.isInteger(p.pid)) return 'gone';
     const alive = () => {
@@ -242,8 +254,7 @@ export class Updater {
       /* couldn't ask */
     }
     if (!seen) return alive() ? 'unknown' : 'gone';
-    const same = win ? seen.toLowerCase() === installer.toLowerCase() : seen.includes(installer);
-    return same ? 'running' : 'gone';
+    return isInstaller(seen, installer, win) ? 'running' : 'gone';
   }
 
   /** The installer may still be at work (running, or alive and not identifiable): leave its files alone. */

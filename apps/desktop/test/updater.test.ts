@@ -324,7 +324,7 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     mkdirSync(join(staging, 'staging'), { recursive: true });
     const script = join(staging, 'install.sh');
     writeFileSync(script, 'sleep 30\n');
-    const child = realSpawn('/bin/sh', [script], { stdio: 'ignore' });
+    const child = realSpawn('/bin/bash', [script], { stdio: 'ignore' }) // as install() starts it;
     await new Promise((r) => child.once('spawn', r));
     try {
       writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', pid: child.pid, installer: script, at: Date.now() }));
@@ -350,7 +350,7 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     mkdirSync(staging, { recursive: true });
     const script = join(staging, 'install.sh');
     writeFileSync(script, 'sleep 30\n');
-    const child = realSpawn('/bin/sh', [script], { stdio: 'ignore' });
+    const child = realSpawn('/bin/bash', [script], { stdio: 'ignore' }) // as install() starts it;
     await new Promise((r) => child.once('spawn', r));
     try {
       writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', pid: child.pid, installer: script, at: Date.now() }));
@@ -376,7 +376,15 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     writeFileSync(script, 'sleep 30\n');
     writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', installer: script, at: Date.now() }));
     expect(u.installerState()).toBe('gone'); // not started (yet)
-    const child = realSpawn('/bin/sh', [script], { stdio: 'ignore' });
+    // Something that only mentions the script isn't the installer (W-120).
+    const viewer = realSpawn('/bin/sh', ['-c', `sleep 30 # ${script}`], { stdio: 'ignore' });
+    const tail = realSpawn('/usr/bin/tail', ['-f', script], { stdio: 'ignore' });
+    await Promise.all([viewer, tail].map((c) => new Promise((r) => c.once('spawn', r))));
+    expect(u.installerState()).toBe('gone');
+    viewer.kill('SIGKILL');
+    tail.kill('SIGKILL');
+    // Started the way install() starts it.
+    const child = realSpawn('/bin/bash', [script, '123', 'more args'], { stdio: 'ignore' });
     await new Promise((r) => child.once('spawn', r));
     try {
       expect(u.installerState()).toBe('running');

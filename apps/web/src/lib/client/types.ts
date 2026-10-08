@@ -55,6 +55,8 @@ export interface Run {
   usage: { input_tokens?: number; output_tokens?: number; cached_tokens?: number; requests?: number };
   cancel_requested: boolean;
   pause_requested: boolean;
+  /** A cloud run ended, but its commands and browser tab aren't confirmed stopped yet (the cron retries). */
+  cleanup_pending?: boolean;
   started_at: string | null;
   ended_at: string | null;
   created_at: string;

@@ -331,7 +331,7 @@ export default function SessionPage() {
               {events.loading ? (
                 <TimelineSkeleton />
               ) : (
-                <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} waitingFor={waitingForComputer ? (device?.name ?? 'your computer') : undefined} stoppedRuns={runs.rows.filter((r) => r.status === 'cancelled').map((r) => r.id)} endedRuns={runs.rows.filter((r) => ['completed', 'failed', 'cancelled'].includes(r.status)).map((r) => r.id)} />
+                <Timeline events={events.rows} agent={agent} approvals={sessionApprovals} working={working} waitingFor={waitingForComputer ? (device?.name ?? 'your computer') : undefined} stoppedRuns={runs.rows.filter((r) => r.status === 'cancelled').map((r) => r.id)} endedRuns={runs.rows.filter((r) => ['completed', 'failed', 'cancelled'].includes(r.status)).map((r) => r.id)} cleaningRuns={runs.rows.filter((r) => r.cleanup_pending).map((r) => r.id)} />
               )}
               {run?.status === 'failed' && run.error && !events.rows.some((e) => e.type === 'status' && e.data.text === run.error) && <p className="mt-4 text-center text-sm text-danger">{run.error}</p>}
             </div>

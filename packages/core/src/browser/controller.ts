@@ -24,8 +24,13 @@ export interface BrowserAction {
 
 /** Field kinds an agent may never type into, enforced here as well as in the policy. */
 const SECRET_FIELD = /password|cc-|card|cvc|cvv|security code|one-time|otp|2fa|passcode|ssn|social security|iban|routing/i;
-/** A field's autocomplete, name or id that marks it as a credential (its value is never shown, and it is never typed into). */
+/**
+ * A field's autocomplete, name or id that marks it as a credential (its value is never shown, and it is never typed into).
+ * Tested on `SPLIT_WORDS` of them, so a camel-case name counts as words: `otpCode`, `userPIN` (W-118).
+ */
 const SECRET_NAME = /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i;
+/** Page-side code (an expression on `s`): camel-case identifiers as separate words, `otpCode` -> `otp Code`, `OTPInput` -> `OTP Input`. */
+const SPLIT_WORDS = `String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')`;
 
 export interface BrowserResponse {
   ok: boolean;
@@ -64,8 +69,8 @@ const SNAPSHOT_FN = `(() => {
   const sensitive = (el) => {
     const t = (el.getAttribute('type') || '').toLowerCase();
     if (t === 'password') return true;
-    const hints = [el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'), el.getAttribute('placeholder')].join(' ');
-    return SECRET.test(hints);
+    const s = [el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'), el.getAttribute('placeholder')].join(' ');
+    return SECRET.test(${SPLIT_WORDS});
   };
   const name = (el) => {
     const a = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') || '';
@@ -137,7 +142,8 @@ const SNAPSHOT_FN = `(() => {
 const DESCRIBE_FN = `(el) => {
   if (el === document.documentElement) return { label: '', role: 'page', url: location.href };
   const t = (el.getAttribute('type') || '').toLowerCase();
-  const hidden = t === 'password' || new RegExp(${JSON.stringify(SECRET_NAME.source)}, 'i').test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
+  const s = [el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' ');
+  const hidden = t === 'password' || new RegExp(${JSON.stringify(SECRET_NAME.source)}, 'i').test(${SPLIT_WORDS});
   const label = (el.getAttribute('aria-label') || el.innerText || (hidden ? '' : el.value) || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
   const form = el.closest('form');
   const submitText = form ? Array.from(form.querySelectorAll('button,[type=submit]')).map(b => (b.innerText || b.value || '').trim()).join(' / ').slice(0, 120) : '';
@@ -210,7 +216,8 @@ const ENGINE = `({
     if (el.tagName === 'INPUT' && el.type === 'password') return true;
     if (new RegExp(${JSON.stringify(SECRET_FIELD.source)}, 'i').test([el.getAttribute('type'), el.getAttribute('autocomplete'), this.names(el)].join(' '))) return true;
     // A name or id that marks a credential (W-110): the same rule that keeps such values out of descriptions.
-    return new RegExp(${JSON.stringify(SECRET_NAME.source)}, 'i').test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' '));
+    const s = [el.getAttribute('autocomplete'), el.getAttribute('name'), el.id].join(' ');
+    return new RegExp(${JSON.stringify(SECRET_NAME.source)}, 'i').test(${SPLIT_WORDS});
   },
   type(el, text) {
     if (!el) return { error: 'gone' };

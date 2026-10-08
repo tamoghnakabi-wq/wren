@@ -124,6 +124,13 @@ describe('shell risk', () => {
       expect(isReadOnlyCommand(c), c).toBe(true);
     }
   });
+  it("never counts file's compile mode as read-only (W-117)", () => {
+    // Verified on macOS (file-5.41): `file -C -m rules` writes rules.mgc next to it.
+    for (const c of ['file -C -m rules', '/usr/bin/file -C -m rules', 'file -bC -m rules', 'file --compile --magic-file rules', 'file --comp -m rules']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+    }
+    for (const c of ['file notes.txt', 'file -b --mime-type a.png', 'file -m rules notes.txt', 'file -L link']) expect(isReadOnlyCommand(c), c).toBe(true);
+  });
   it('treats pager variables as choosing a program (PAGER=./x man ls runs ./x)', () => {
     for (const c of ['PAGER=./x man ls', 'GIT_PAGER=./x git branch', 'MANPAGER=./x man ls']) expect(isReadOnlyCommand(c), c).toBe(false);
     expect(isReadOnlyCommand('TERM=dumb ls')).toBe(true);

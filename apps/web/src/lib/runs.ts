@@ -215,15 +215,23 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
  */
 export type FinishResult = 'ended' | 'resumed' | 'paused' | 'lease_lost' | 'missing';
 
-export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string): Promise<FinishResult> {
+export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string, opts: { idle?: boolean } = {}): Promise<FinishResult> {
   const sql = db();
   const [ref] = await sql`select session_id from public.runs where id = ${runId}`;
   if (!ref) return 'missing';
   const done = await taskTx(async (tx) => {
     await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
-    const [run] = await tx`select r.*, a.name as agent_name, s.title from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for no key update of r`;
+    const [run] = await tx`select r.*, (r.lease_until is not null and r.lease_until > now()) as leased, a.name as agent_name, s.title
+      from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for no key update of r`;
     if (!run) return 'missing' as const;
     if (leaseId && run.lease_id !== leaseId) return 'lease_lost' as const; // another worker owns the run now
+    if (opts.idle) {
+      // Finishing a run nothing was executing (Stop): as it is now, under the lock, not as it was
+      // when that was decided. A worker that claimed it meanwhile sees the request and ends it itself;
+      // one that finished it meanwhile has said how it ended (W-115).
+      if (!(ACTIVE as readonly string[]).includes(run.status)) return 'ended' as const;
+      if (run.leased) return 'lease_lost' as const;
+    }
     let o = outcome;
     // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
     const cancelledLate = run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(o.kind);
@@ -255,7 +263,8 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
         ended_at = ${terminal ? new Date() : null},
         cleanup_pending = cleanup_pending or ${terminal && run.runtime === 'cloud'}
       where id = ${runId}`;
-    if (cancelledLate) {
+    if (o.kind === 'cancelled') {
+      // Steps and approvals the run never finished end with it.
       await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
       await tx`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
     }
@@ -322,46 +331,66 @@ export async function decideApproval(userId: string, approvalId: string, approve
   return { runId: a.run_id, status: r.status };
 }
 
-/** Stop a run. True when it ended here and now; false when the worker running it still has to notice. */
+/**
+ * Stop a run. True when it ended here and now; false when the worker running it still has to notice.
+ * The request and the decision are made under the task's locks (session, then run) and checked again
+ * when finishing, so a worker claiming or finishing the run at the same moment is never overwritten
+ * (W-115).
+ */
 export async function cancelRun(userId: string, runId: string): Promise<boolean> {
-  const sql = db();
-  const [run] = await sql`update public.runs set cancel_requested = true where id = ${runId} and user_id = ${userId} and status in ('queued', 'running', 'waiting', 'paused') returning status, runtime, session_id, lease_until`;
+  const [ref] = await db()`select session_id from public.runs where id = ${runId} and user_id = ${userId}`;
+  if (!ref) return true;
+  const run = await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    const [r] = await tx`update public.runs set cancel_requested = true
+      where id = ${runId} and user_id = ${userId} and status in ('queued', 'running', 'waiting', 'paused')
+      returning runtime, agent_id, (lease_until is not null and lease_until > now()) as leased`;
+    if (r) await tx`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
+    return r;
+  });
   if (!run) return true;
   let ended = false;
-  await sql`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
-  // Nothing is executing a waiting/paused/queued run: finish it here.
-  if (run.status !== 'running' || !run.lease_until || new Date(run.lease_until) < new Date()) {
-    await sql`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
-    await finishRun(runId, { kind: 'cancelled', steps: 0 });
-    ended = true;
+  if (!run.leased) {
+    // Nothing is executing it: finish it here (unless a worker has claimed it since).
+    ended = (await finishRun(runId, { kind: 'cancelled', steps: 0 }, undefined, { idle: true })) === 'ended';
   } else if (run.runtime === 'cloud') {
     // A tick is mid-step: end the run's commands now so it notices Stop without waiting them out.
-    const [r] = await sql`select agent_id from public.runs where id = ${runId}`;
-    if (r) await SandboxHost.endRun(r.agent_id, runId);
+    await SandboxHost.endRun(run.agent_id, runId);
   }
   if (run.runtime === 'desktop') await kickRun(runId);
   return ended;
 }
 
-/** Pause a run. True when it paused here and now; false when it pauses after the current step. */
+/** Pause a run. True when it paused here and now; false when it pauses after the current step. Locked like cancelRun. */
 export async function pauseRun(userId: string, runId: string): Promise<boolean> {
-  const sql = db();
-  const [run] = await sql`update public.runs set pause_requested = true where id = ${runId} and user_id = ${userId} and status in ('queued', 'running') returning status, session_id, runtime, lease_until`;
-  if (!run) return true;
-  let paused = false;
-  if (run.status === 'queued' || !run.lease_until || new Date(run.lease_until) < new Date()) {
-    await sql`update public.runs set status = 'paused' where id = ${runId}`;
-    await sql`update public.sessions set status = 'paused' where id = ${run.session_id}`;
-    paused = true;
-  }
-  if (run.runtime === 'desktop') await kickRun(runId);
-  return paused;
+  const [ref] = await db()`select session_id from public.runs where id = ${runId} and user_id = ${userId}`;
+  if (!ref) return true;
+  const r = await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    const [run] = await tx`update public.runs set pause_requested = true
+      where id = ${runId} and user_id = ${userId} and status in ('queued', 'running')
+      returning runtime, (lease_until is not null and lease_until > now()) as leased`;
+    if (!run) return null;
+    // A worker holds it: it pauses after the current step. Otherwise nothing is executing it.
+    if (run.leased) return { runtime: run.runtime as string, paused: false };
+    await tx`update public.runs set status = 'paused' where id = ${runId}`;
+    await tx`update public.sessions set status = 'paused' where id = ${ref.session_id}`;
+    return { runtime: run.runtime as string, paused: true };
+  });
+  if (!r) return true;
+  if (r.runtime === 'desktop') await kickRun(runId);
+  return r.paused;
 }
 
 export async function resumeRun(userId: string, runId: string) {
-  const sql = db();
-  const [run] = await sql`update public.runs set pause_requested = false, status = 'queued', wake_at = null where id = ${runId} and user_id = ${userId} and status = 'paused' returning session_id`;
-  if (!run) return;
-  await sql`update public.sessions set status = 'queued' where id = ${run.session_id}`;
-  await kickRun(runId);
+  const [ref] = await db()`select session_id from public.runs where id = ${runId} and user_id = ${userId}`;
+  if (!ref) return;
+  const resumed = await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    const [run] = await tx`update public.runs set pause_requested = false, status = 'queued', wake_at = null
+      where id = ${runId} and user_id = ${userId} and status = 'paused' returning id`;
+    if (run) await tx`update public.sessions set status = 'queued' where id = ${ref.session_id}`;
+    return !!run;
+  });
+  if (resumed) await kickRun(runId);
 }

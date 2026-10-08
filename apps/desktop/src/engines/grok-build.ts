@@ -55,6 +55,10 @@ function mapGrokTool(name: string, input: Record<string, unknown>) {
   return { name: `grok.${name}`, args: input, paths: [], title: name };
 }
 
+/** How long Grok gets to answer each setup step (start, sign-in, new session) and to replay a resumed session. */
+const SETUP_MS = 60_000;
+const LOAD_MS = 180_000;
+
 export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boolean, hookScript: string): Promise<LoopOutcome> {
   const cli = findCli('grok');
   if (!cli) return { kind: 'failed', error: 'Grok Build isn’t installed on this computer. Install it (docs.x.ai/build), run `grok login` with your xAI account, then try again.', code: 'engine_missing', steps: 0 };
@@ -92,12 +96,32 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   // every earlier reply at the start of each new one and left the old tool calls "running". Nothing is written
   // until the load has answered.
   let replayingUntil: number | null = null;
-  const send = (m: RpcMsg) => proc.stdin.write(JSON.stringify(m) + '\n');
-  const request = (method: string, params: Record<string, unknown>) =>
+  // Every request ends (W-116): with Grok's answer, or when Grok exits or can't be written to, when the
+  // user stops the run, or when a setup step gets no answer in time. Otherwise a run would wait forever,
+  // holding its lease and one of the computer's three run slots.
+  let gone: Error | null = null;
+  const failAll = (e: Error) => {
+    gone ??= e;
+    for (const [id, p] of pending) {
+      pending.delete(id);
+      p.reject(gone);
+    }
+  };
+  proc.on('close', (code) => failAll(new Error(stderr.trim() || `grok exited (${code})`)));
+  proc.on('error', (e) => failAll(e));
+  proc.stdin.on('error', (e) => failAll(new Error(`Couldn't talk to grok: ${e.message}`)));
+  const exited = new Promise<void>((r) => proc.once('close', () => r()));
+  const send = (m: RpcMsg) => {
+    if (!gone) proc.stdin.write(JSON.stringify(m) + '\n');
+  };
+  const request = (method: string, params: Record<string, unknown>, timeoutMs?: number) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
+      if (gone) return reject(gone);
       const id = nextId++;
       if (method === 'session/load') replayingUntil = id;
-      pending.set(id, { resolve, reject });
+      const timer = timeoutMs ? setTimeout(() => failAll(new Error(`Grok Build didn’t answer (${method}).`)), timeoutMs) : undefined;
+      const settle = () => clearTimeout(timer);
+      pending.set(id, { resolve: (v) => (settle(), resolve(v)), reject: (e) => (settle(), reject(e)) });
       send({ jsonrpc: '2.0', id, method, params });
     });
 
@@ -159,26 +183,29 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   let sessionId = '';
   const onAbort = () => {
     if (sessionId) send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
-    setTimeout(() => void stopEngine(proc), 3000);
+    // Grok normally ends the turn itself; if it doesn't (or it's still starting), stop it, and whatever
+    // it was asked ends with it.
+    setTimeout(() => void stopEngine(proc).finally(() => failAll(new Error('Stopped by the user.'))), 3000);
   };
   run.signal.addEventListener('abort', onAbort, { once: true });
-  const exited = new Promise<number>((r) => proc.on('close', (c) => r(c ?? 1)));
 
   try {
-    const init = await Promise.race([request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'wren', title: 'Wren', version: '0.1.0' } }), exited.then(() => Promise.reject(new Error(stderr || 'grok exited')))]);
+    const init = await request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'wren', title: 'Wren', version: '0.1.0' } }, SETUP_MS);
     const methods = new Set(((init.authMethods ?? []) as { id: string }[]).map((m) => m.id));
     if (!methods.has('cached_token')) throw new Error('Grok Build is not signed in. Run `grok login` in a terminal.');
-    await request('authenticate', { methodId: 'cached_token', _meta: { headless: true } });
+    await request('authenticate', { methodId: 'cached_token', _meta: { headless: true } }, SETUP_MS);
     if (run.resumeId) {
       try {
-        await request('session/load', { sessionId: run.resumeId, cwd: run.cwd, mcpServers: [] });
+        // Replaying a long conversation takes longer than the other steps.
+        await request('session/load', { sessionId: run.resumeId, cwd: run.cwd, mcpServers: [] }, LOAD_MS);
         sessionId = run.resumeId;
-      } catch {
+      } catch (e) {
+        if (gone) throw e; // Grok itself stopped or hung, rather than not knowing that session
         sessionId = '';
       }
     }
     if (!sessionId) {
-      const s = await request('session/new', { cwd: run.cwd, mcpServers: [] });
+      const s = await request('session/new', { cwd: run.cwd, mcpServers: [] }, SETUP_MS);
       sessionId = String(s.sessionId);
       await run.saveResumeId(sessionId);
     }
@@ -204,6 +231,8 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     run.signal.removeEventListener('abort', onAbort);
     rl.close();
     proc.stdin.end();
-    setTimeout(() => void stopEngine(proc), 1500);
+    // Grok exits once its input ends; what's left of it is stopped before the run reports how it ended.
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 1500))]);
+    await stopEngine(proc);
   }
 }

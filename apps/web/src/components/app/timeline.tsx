@@ -63,9 +63,12 @@ const itemRuns = (it: Item): (string | null | undefined)[] =>
   it.kind === 'tools' ? it.tools.map((t) => t.run_id) : it.kind === 'assistant' ? [it.ev.run_id, ...it.tools.map((t) => t.run_id)] : it.kind === 'stopped' ? [] : [it.ev.run_id];
 
 /** After the last thing a stopped run did, a line says it was stopped. */
-/** Runs that have ended: a step of theirs still marked running never finished (a crash, or history an engine
- * replayed), so it shows as stopped rather than spinning forever. */
-const EndedRuns = createContext<Set<string>>(new Set());
+/**
+ * Runs that have ended, and whether their cleanup is still pending. A step of theirs still marked running
+ * never reported how it went (a crash, or history an engine replayed): it shows "Didn't finish" rather than
+ * spinning forever, and "Stopping…" while the run's commands aren't confirmed stopped (W-119).
+ */
+const EndedRuns = createContext<Map<string, 'ended' | 'stopping'>>(new Map());
 
 function markStopped(items: Item[], stopped: Set<string>): Item[] {
   if (!stopped.size) return items;
@@ -114,10 +117,14 @@ function group(events: EventRow[]): Item[] {
   return items;
 }
 
-export function Timeline({ events, agent, approvals, working, waitingFor, stoppedRuns, endedRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; /** The (offline) computer a queued task waits for. */ waitingFor?: string; stoppedRuns?: string[]; endedRuns?: string[] }) {
+export function Timeline({ events, agent, approvals, working, waitingFor, stoppedRuns, endedRuns, cleaningRuns }: { events: EventRow[]; agent?: { name: string; icon: string; color: string }; approvals: Approval[]; working: boolean; /** The (offline) computer a queued task waits for. */ waitingFor?: string; stoppedRuns?: string[]; endedRuns?: string[]; /** Ended runs whose commands aren't confirmed stopped yet. */ cleaningRuns?: string[] }) {
   const stoppedKey = (stoppedRuns ?? []).join(',');
   const endedKey = (endedRuns ?? []).join(',');
-  const ended = useMemo(() => new Set(endedKey ? endedKey.split(',') : []), [endedKey]);
+  const cleaningKey = (cleaningRuns ?? []).join(',');
+  const ended = useMemo(() => {
+    const cleaning = new Set(cleaningKey ? cleaningKey.split(',') : []);
+    return new Map((endedKey ? endedKey.split(',') : []).map((id) => [id, cleaning.has(id) ? ('stopping' as const) : ('ended' as const)]));
+  }, [endedKey, cleaningKey]);
   const items = useMemo(() => markStopped(group(events), new Set(stoppedKey ? stoppedKey.split(',') : [])), [events, stoppedKey]);
   const last = events[events.length - 1];
   const showThinking = working && !(last?.type === 'message' && last.status === 'streaming' && String(last.data.text ?? ''));
@@ -278,7 +285,8 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
   const Icon = d.name?.startsWith('mcp_') ? Plug : TOOL_ICONS[d.name] ?? Code2;
   const ended = useContext(EndedRuns);
   const raw = ev.status ?? 'pending';
-  const status = (raw === 'running' || raw === 'pending') && ev.run_id && ended.has(ev.run_id) ? 'cancelled' : raw;
+  const runEnded = ev.run_id ? ended.get(ev.run_id) : undefined;
+  const status = (raw === 'running' || raw === 'pending') && runEnded ? (runEnded === 'stopping' ? 'stopping' : 'unfinished') : raw;
   const dur = d.startedAt && d.endedAt ? Math.max(0, Math.round((d.endedAt - d.startedAt) / 100) / 10) : null;
   const images = d.result?.images?.filter((i) => i.artifactId) ?? [];
   const artifacts = d.result?.artifacts ?? [];
@@ -347,6 +355,8 @@ function StepStatus({ status }: { status: string }) {
   if (status === 'awaiting_approval') return <span className="flex">{sr('Waiting for approval')}<Hand className="h-3.5 w-3.5 text-warning" aria-hidden /></span>;
   if (status === 'denied') return <span className="text-[11.5px] font-medium text-warning">Denied</span>;
   if (status === 'cancelled') return <span className="text-[11.5px] text-faint">Stopped</span>;
+  if (status === 'unfinished') return <span className="text-[11.5px] text-faint">Didn’t finish</span>;
+  if (status === 'stopping') return <span className="text-[11.5px] text-faint">Stopping…</span>;
   return <span className="flex">{sr('Failed')}<X className="h-3.5 w-3.5 text-danger" aria-hidden /></span>;
 }
 

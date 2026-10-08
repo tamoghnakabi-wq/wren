@@ -486,10 +486,21 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
 
 // ------------------------------------------------------------------ lifecycle
 
-if (!process.argv.includes('--selftest')) app.whenReady().then(() => {
+/** No installer from an earlier Wren is at work, or it finished within `ms`. */
+async function installerFinished(ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (!updater.installerRunning()) return true;
+    if (Date.now() >= end) return false;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   // Opened again while an update is being installed: start nothing (no agents, no window) and let
-  // the installer finish; it opens the new version itself (W-96).
-  if (updater.installerRunning()) {
+  // the installer finish; it opens the new version itself (W-96). Opening that new version is the
+  // installer's last step, so one that is just finishing gets a few seconds to exit first.
+  if (!(await installerFinished(8000))) {
     if (Notification.isSupported()) new Notification({ title: 'Wren is updating', body: 'It opens again by itself in a moment.' }).show();
     setTimeout(() => app.exit(0), 1500);
     return;

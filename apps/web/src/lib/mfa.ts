@@ -50,12 +50,29 @@ export async function mfaStatusFor(u: AuthUser): Promise<MfaStatusFor> {
 
 /** Calls to Supabase Auth give up after this long (well under the one-minute gap between sends). */
 const AUTH_TIMEOUT_MS = 15000;
+/** A send's request to Supabase must go out this soon after the send started (W-114). */
+const SEND_START_MS = 20000;
+/**
+ * A send that took longer than this, from its start to Supabase's answer, may have reached Supabase after
+ * the next request was reserved (≥ RESEND_SECONDS later) and sent its code: which code is the account's
+ * newest is then unknown. Only a paused or stalled function gets here: the two limits above end a send
+ * after 35 s.
+ */
+const SEND_TRUSTED_MS = (RESEND_SECONDS - 10) * 1000;
 
-/** A fresh Supabase Auth client that keeps nothing: each code check signs in on its own. */
-function authClient() {
+/**
+ * A fresh Supabase Auth client that keeps nothing: each code check signs in on its own. With a
+ * `deadline`, a request that would go out after it isn't sent at all.
+ */
+function authClient(deadline?: number) {
   return createClient(env.supabaseUrl, env.supabaseKey, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(AUTH_TIMEOUT_MS) }) },
+    global: {
+      fetch: (input, init) => {
+        if (deadline !== undefined && Date.now() > deadline) return Promise.reject(new Error('The send started too late.'));
+        return fetch(input, { ...init, signal: AbortSignal.timeout(AUTH_TIMEOUT_MS) });
+      },
+    },
   });
 }
 
@@ -80,8 +97,12 @@ export async function sendEmailCode(u: AuthUser, purpose: CodePurpose): Promise<
   if (!allowed) throw new HttpError(409, purpose === 'step_up' && s.method === 'totp' ? 'Use your authenticator app to confirm.' : 'An email code isn’t needed for this.', 'not_needed');
   // A send reserves its request under the account's lock (not usable yet), calls Supabase without
   // holding a database connection (W-111), then marks the request delivered. Only delivered requests
-  // can be verified or handed out again (W-100). The one-minute gap between reservations, longer
-  // than the 15 s limit on Supabase calls, keeps request order and code order the same (W-101).
+  // can be verified or handed out again (W-100). Request order must be code order (W-101): the next
+  // reservation comes ≥ 60 s after this one, and this send is over well before that. Its request
+  // to Supabase goes out within 20 s of the start (checked as it goes out, so a function held up
+  // after reserving can't send late) and gives up 15 s later (W-114). Timed on this server's clock
+  // from before the reservation, so the database's later `sent_at` only adds margin.
+  const startedAt = Date.now();
   const sql = db();
   const r = await sql.begin(async (tx): Promise<{ challengeId?: string; reserved?: string; sending?: boolean; wait: number }> => {
     await tx`select pg_advisory_xact_lock(hashtext(${`mfa-email:${u.id}`}))`;
@@ -107,20 +128,33 @@ export async function sendEmailCode(u: AuthUser, purpose: CodePurpose): Promise<
     if (r.wait < 0) throw new HttpError(429, 'Too many codes were sent in the last hour. Try again later.', 'code_limit');
     throw new HttpError(429, `A code was just sent. You can ask for another in ${r.wait} seconds.`, 'code_cooldown');
   }
-  const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+  const { error } = await authClient(startedAt + SEND_START_MS).auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+  const took = Date.now() - startedAt;
   if (error) {
     // Nothing was sent: this request can't be finished (an earlier code, if any, still can). It
     // still counts against the limits.
     await sql`update public.mfa_email_requests set superseded_at = now() where id = ${r.reserved}`;
     throw new HttpError(502, 'The code couldn’t be sent. Try again in a minute.', 'email_failed');
   }
-  await sql.begin(async (tx) => {
+  const trusted = await sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${`mfa-email:${u.id}`}))`;
+    if (took > SEND_TRUSTED_MS) {
+      // This code may have replaced the code of a request reserved after this one: neither can be
+      // trusted to be the account's newest any more, so both end (the user asks again).
+      await tx`update public.mfa_email_requests set delivered_at = now(), superseded_at = coalesce(superseded_at, now()) where id = ${r.reserved!}`;
+      await tx`update public.mfa_email_requests set superseded_at = now()
+        where user_id = ${u.id} and used_at is null and superseded_at is null
+          and sent_at > (select sent_at from public.mfa_email_requests where id = ${r.reserved!})`;
+      return false;
+    }
     await tx`update public.mfa_email_requests set delivered_at = now() where id = ${r.reserved!}`;
     // Supabase keeps only the newest code for an account: older requests can't be finished any more.
     await tx`update public.mfa_email_requests set superseded_at = now()
       where user_id = ${u.id} and id <> ${r.reserved!} and used_at is null and superseded_at is null
         and sent_at < (select sent_at from public.mfa_email_requests where id = ${r.reserved!})`;
+    return true;
   });
+  if (!trusted) throw new HttpError(502, 'Sending the code took too long. Ask for a new one.', 'email_failed');
   return { challengeId: r.reserved, sent: true, wait: RESEND_SECONDS };
 }
 

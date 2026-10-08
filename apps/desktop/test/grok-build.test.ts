@@ -20,6 +20,8 @@ rl.on('line', (line) => {
   if (m.method === 'session/load') {
     const s = m.params.sessionId;
     if (s === 'gone') return out({ jsonrpc: '2.0', id: m.id, error: { code: -32002, message: 'Session not found' } });
+    if (s === 'crash') process.exit(3); // the CLI dies mid-request
+    if (s === 'hang') return; // never answers
     // the whole earlier conversation, as ACP requires, then the answer
     update(s, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } });
     text(s, 'Old reply.');
@@ -29,6 +31,7 @@ rl.on('line', (line) => {
   }
   if (m.method === 'session/prompt') {
     const s = m.params.sessionId;
+    if (m.params.prompt[0].text.includes('hang')) return; // never answers, ignores session/cancel too
     text(s, 'New reply.');
     update(s, { sessionUpdate: 'tool_call', toolCallId: 'new-1', title: 'Execute new', kind: 'execute', status: 'pending', rawInput: { command: 'echo new' } });
     update(s, { sessionUpdate: 'tool_call_update', toolCallId: 'new-1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'new' } }] });
@@ -79,10 +82,12 @@ vi.mock('../src/engines/common', () => {
 });
 const { runGrokBuild } = await import('../src/engines/grok-build');
 
-const run = (resumeId?: string) => {
+const run = (resumeId?: string, prompt = 'how are you') => {
   const saved: string[] = [];
+  const abort = new AbortController();
   return {
     saved,
+    abort,
     run: {
       runId: `r-${Math.random().toString(36).slice(2)}`,
       store: { usageSource: '', append: async () => ({ id: 'e' }), update: async () => {} } as never,
@@ -90,12 +95,12 @@ const run = (resumeId?: string) => {
       autonomy: 'balanced' as const,
       instructions: '',
       model: 'default',
-      prompt: 'how are you',
+      prompt,
       cwd: dir,
       folders: [dir],
       allow: { shell: true, browser: true, screen: true },
       resumeId,
-      signal: new AbortController().signal,
+      signal: abort.signal,
       saveResumeId: async (id: string) => void saved.push(id),
     },
   };
@@ -119,6 +124,24 @@ describe('Grok Build follow-ups', () => {
     await runGrokBuild(r, () => true, '/dev/null');
     expect(h.log).toContain('end:new-2:notes');
   });
+
+  it('ends the run when grok exits in the middle of a request (W-116)', async () => {
+    const { run: r } = run('crash');
+    const outcome = await runGrokBuild(r, () => true, '/dev/null');
+    expect(outcome).toMatchObject({ kind: 'failed', code: 'engine_error' });
+    expect(h.log).toEqual([]);
+  });
+
+  it('ends the run when the user stops it while grok gives no answer (W-116)', async () => {
+    for (const [resumeId, prompt] of [['hang', 'how are you'], [undefined, 'hang please']] as const) {
+      const { run: r, abort } = run(resumeId, prompt);
+      const started = Date.now();
+      setTimeout(() => abort.abort(), 300);
+      const outcome = await runGrokBuild(r, () => true, '/dev/null');
+      expect(outcome, String(resumeId)).toMatchObject({ kind: 'cancelled' });
+      expect(Date.now() - started).toBeLessThan(8000);
+    }
+  }, 20_000);
 
   it('starts a new session when the old one is gone, and remembers it', async () => {
     const { run: r, saved } = run('gone');
