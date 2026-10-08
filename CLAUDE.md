@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-08: `main` is in sync with `origin/main`; the last code commit is `ca370e6` (round 9 fixes `8fcfc9a` plus a self-test fix), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.15**. Wren credits are switched off for every account (`70afa23`, see Models). The nine Codex security audits (W-1…W-120) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-09: `main` is in sync with `origin/main`; the last code commit is `6a8264d` (engines see attached images; before it `6f4f1ce`, Claude Code approvals on macOS, plan, sub-agents), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.16**. Wren credits are switched off for every account (`70afa23`, see Models). The nine Codex security audits (W-1…W-120) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
