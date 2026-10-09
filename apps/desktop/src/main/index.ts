@@ -3,11 +3,12 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { deviceJson, publicJson } from './api';
+import { deviceJson, publicJson, revokeToken } from './api';
 import * as chatgpt from './chatgpt';
-import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
+import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
 import { closeBrowser, stopAllJobs } from './host';
+import { createPairing, type PairAnswer, type PairStart } from './pairing';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
 import { approveScriptPath } from '../engines/claude-code';
@@ -240,7 +241,6 @@ if (process.env.WREN_DATA_DIR) app.setPath('userData', process.env.WREN_DATA_DIR
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
-let pairing: { pairId: string; pollSecret: string; userCode: string; timer: NodeJS.Timeout } | null = null;
 
 const runner = new DeviceRunner(
   () => pushStatus(),
@@ -472,16 +472,21 @@ function installUpdate() {
 
 // ------------------------------------------------------------------ pairing
 
+/** Development only: link without asking (`WREN_AUTOPAIR=1`); a packaged Wren always asks. */
+const autopair = () => process.env.WREN_AUTOPAIR === '1' && !app.isPackaged;
+
 /**
  * Whoever approves a pairing code gets this computer, and anything running in the page can start one.
- * So the user says here which account it goes to (W-142); `WREN_AUTOPAIR` (development) skips this.
+ * So the user says here which account it goes to (W-142).
  */
 async function confirmLink(email: string | undefined): Promise<boolean> {
-  if (process.env.WREN_AUTOPAIR === '1') return true;
+  if (autopair()) return true;
+  // Shown as plain text: no control or formatting characters from the account's address.
+  const who = email?.replace(/[\p{C}\p{Z}]+/gu, ' ').trim().slice(0, 200) || 'this Wren account';
   const opts: Electron.MessageBoxOptions = {
     type: 'question',
     title: 'Wren',
-    message: `Link this computer to ${email ?? 'this Wren account'}?`,
+    message: `Link this computer to ${who}?`,
     detail: 'Agents of that account will be able to work on this computer, within the permissions you set here.',
     buttons: ['Cancel', 'Link'],
     defaultId: 0,
@@ -491,40 +496,24 @@ async function confirmLink(email: string | undefined): Promise<boolean> {
   return r.response === 1;
 }
 
-async function startPairing(): Promise<{ userCode: string; pairId: string }> {
-  if (pairing) clearInterval(pairing.timer);
-  const { status: code, data } = await publicJson<{ pairId: string; userCode: string; pollSecret: string; interval: number; error?: string }>('/api/device/pair/start', {
-    name: computerName().slice(0, 60),
-    platform: process.platform === 'darwin' || process.platform === 'win32' ? process.platform : 'linux',
-    arch: process.arch,
-    appVersion: app.getVersion(),
-  });
-  if (code !== 200) throw new Error(data.error ?? 'Could not start linking.');
-  const timer = setInterval(async () => {
-    if (!pairing) return;
-    const r = await publicJson<{ status: string; deviceId?: string; token?: string; channel?: string; account?: DeviceCredentials['account']; supabase?: DeviceCredentials['supabase'] }>('/api/device/pair/poll', { pairId: pairing.pairId, pollSecret: pairing.pollSecret }).catch(() => null);
-    if (!r || pairing?.timer !== timer) return; // another poll already handled it
-    if (r.data.status === 'approved' && r.data.token) {
-      clearInterval(timer);
-      pairing = null;
-      if (!(await confirmLink(r.data.account?.email))) return;
-      saveDevice({ deviceId: r.data.deviceId!, token: r.data.token, channel: r.data.channel!, account: r.data.account, supabase: r.data.supabase!, appUrl: APP_URL });
-      runner.start();
-      pushStatus();
-    } else if (r.status === 410) {
-      clearInterval(timer);
-      pairing = null;
-    }
-  }, (data.interval ?? 2) * 1000);
-  pairing = { pairId: data.pairId, pollSecret: data.pollSecret, userCode: data.userCode, timer };
-  setTimeout(() => {
-    if (pairing?.timer === timer) {
-      clearInterval(timer);
-      pairing = null;
-    }
-  }, 15 * 60_000);
-  return { userCode: data.userCode, pairId: data.pairId };
-}
+const pairing = createPairing({
+  start: () =>
+    publicJson<PairStart>('/api/device/pair/start', {
+      name: computerName().slice(0, 60),
+      platform: process.platform === 'darwin' || process.platform === 'win32' ? process.platform : 'linux',
+      arch: process.arch,
+      appVersion: app.getVersion(),
+    }),
+  poll: (pairId, pollSecret) => publicJson<PairAnswer>('/api/device/pair/poll', { pairId, pollSecret }),
+  confirm: confirmLink,
+  linked: () => !!loadDevice(),
+  save: (d) => {
+    saveDevice({ deviceId: d.deviceId!, token: d.token, channel: d.channel!, account: d.account, supabase: d.supabase!, appUrl: APP_URL });
+    runner.start();
+    pushStatus();
+  },
+  revoke: (token) => revokeToken(token),
+});
 
 // ------------------------------------------------------------------ IPC
 
@@ -563,15 +552,18 @@ function registerIpc() {
   handle('link', () => {
     // Moving a linked computer to another account starts with Unlink (which asks here).
     if (loadDevice()) throw new Error('This computer is already linked. Unlink it first.');
-    return startPairing();
+    if (pairing.confirming) throw new Error('Answer the question in Wren’s window first.');
+    return pairing.start();
   });
   handle('unlink', async () => {
     const ok = await dialog.showMessageBox({ type: 'question', message: 'Unlink this computer from your Wren account?', detail: 'Tasks will stop running here until you link it again.', buttons: ['Cancel', 'Unlink'], defaultId: 0, cancelId: 0 });
     if (ok.response !== 1) return;
     runner.abortAll();
     runner.stop();
+    const d = loadDevice();
     saveDevice(null);
     pushStatus();
+    if (d) await revokeToken(d.token, d.appUrl); // its token stops working too, not just forgotten here
   });
   handle('getPolicy', () => loadPolicy());
   handle('setPolicy', async (p) => {
@@ -706,9 +698,9 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   tray.on('click', () => showWindow());
   updateTray();
   if (loadDevice()) runner.start();
-  else if (process.env.WREN_AUTOPAIR === '1') {
+  else if (autopair()) {
     // Development/test aid: print a pairing code to approve from a signed-in session.
-    startPairing().then((p) => console.log(`WREN_PAIR_CODE=${p.userCode}`), (e) => console.error('pairing failed', e));
+    pairing.start().then((p) => console.log(`WREN_PAIR_CODE=${p.userCode}`), (e) => console.error('pairing failed', e));
   }
   const policy = loadPolicy();
   if (policy.launchAtLogin) app.setLoginItemSettings({ openAtLogin: true });

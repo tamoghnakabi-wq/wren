@@ -41,8 +41,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-dvh bg-bg text-text">
         <ThemeWatcher />
-        {children}
-        <SiteAnalytics />
+        <SiteAnalytics>{children}</SiteAnalytics>
       </body>
     </html>
   );

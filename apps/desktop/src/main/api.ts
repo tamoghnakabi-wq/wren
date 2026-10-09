@@ -38,6 +38,11 @@ export async function deviceJson<T>(path: string, body?: unknown, opts: { lease?
   return data as T;
 }
 
+/** Give a device token back to the server (Unlink, or a link declined here); best effort. */
+export async function revokeToken(token: string, appUrl = APP_URL): Promise<void> {
+  await fetch(`${appUrl}/api/device/unlink`, { method: 'POST', headers: { authorization: `Device ${token}` }, signal: AbortSignal.timeout(10_000) }).catch(() => {});
+}
+
 export async function publicJson<T>(path: string, body: unknown): Promise<{ status: number; data: T }> {
   const res = await fetch(`${APP_URL}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   return { status: res.status, data: (await res.json().catch(() => ({}))) as T };

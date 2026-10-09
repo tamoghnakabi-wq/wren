@@ -10,7 +10,9 @@ const nextConfig: NextConfig = {
         source: '/(.*)',
         headers: [
           { key: 'X-Content-Type-Options', value: 'nosniff' },
-          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          // Only the origin, even within the site: a private page's address (task and file ids, pairing
+          // codes) never becomes the next page's referrer, which analytics on public pages could see (W-141).
+          { key: 'Referrer-Policy', value: 'strict-origin' },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
         ],
       },

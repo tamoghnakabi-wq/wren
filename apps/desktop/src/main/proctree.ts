@@ -15,8 +15,11 @@ export interface Proc {
   kill?(): boolean;
 }
 
-/** When each tracked process started and ended: on Windows the window in which its children count as its own. */
-const life = new WeakMap<Proc, { start: number; end?: number }>();
+/**
+ * When each tracked process started and ended: on Windows the window in which its children count as its
+ * own. `born` is the process's own creation time as Windows reported it, when known (W-144).
+ */
+const life = new WeakMap<Proc, { start: number; end?: number; born?: number }>();
 
 /** Note a process's lifetime; call right after spawning it. */
 export function tracked<P extends ChildProcess>(p: P): P {
@@ -29,11 +32,17 @@ export function tracked<P extends ChildProcess>(p: P): P {
 /**
  * A process Wren didn't spawn itself but knows the id of, started no earlier than `start`: the agent
  * browser, which Playwright starts (leading its own process group on macOS) and which reports its own id.
+ * `born` (its creation time, looked up when the id was learnt) tells it from a process given its id later.
  */
-export function external(pid: number, start: number): Proc {
+export function external(pid: number, start: number, born?: number): Proc {
   const p: Proc = { pid };
-  life.set(p, { start });
+  life.set(p, { start, born });
   return p;
+}
+
+/** When `p` was created, if known (see `external`). */
+export function bornOf(p: Proc): number | undefined {
+  return life.get(p)?.born;
 }
 
 /** `p` is known to have ended: on Windows, a process its id is given to later isn't its child. */
@@ -69,7 +78,7 @@ export interface WinProc {
 }
 
 /** Every running process (Windows), or null if the list couldn't be read. */
-function windowsProcesses(): Promise<WinProc[] | null> {
+export function windowsProcesses(): Promise<WinProc[] | null> {
   const script =
     "Get-CimInstance Win32_Process | Where-Object CreationDate | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }";
   return new Promise((resolve) => {
@@ -88,12 +97,21 @@ function windowsProcesses(): Promise<WinProc[] | null> {
 /**
  * `root` (if it still runs) and every process it started, and they started, in `list`. A child
  * counts only if it was created while its parent was alive, so a process id the system has
- * since reused is not followed.
+ * since reused is not followed. With `born` (the root's own creation time) the root is that process
+ * exactly: another process holding its id now is someone else's, and only appeared after it ended.
  */
-export function windowsTree(list: WinProc[], root: number, from: number, to: number): WinProc[] {
+export function windowsTree(list: WinProc[], root: number, from: number, to: number, born?: number): WinProc[] {
   const slack = 5000;
-  const out = list.filter((x) => x.pid === root && x.created >= from - slack && x.created <= to + slack);
-  const queue = [{ pid: root, from: from - slack, to: to + slack }];
+  let lo = from - slack;
+  let hi = to + slack;
+  if (born !== undefined) {
+    const holder = list.find((x) => x.pid === root);
+    lo = born;
+    if (holder && Math.abs(holder.created - born) > 50) hi = Math.min(hi, holder.created);
+  }
+  const isRoot = (x: WinProc) => x.pid === root && (born !== undefined ? Math.abs(x.created - born) <= 50 : x.created >= lo && x.created <= hi);
+  const out = list.filter(isRoot);
+  const queue = [{ pid: root, from: lo, to: hi }];
   const seen = new Set([root]);
   while (queue.length) {
     const parent = queue.shift()!;
@@ -111,7 +129,7 @@ export function windowsTree(list: WinProc[], root: number, from: number, to: num
 async function windowsMembers(p: Proc): Promise<WinProc[] | null> {
   const l = life.get(p) ?? { start: 0 };
   const list = await windowsProcesses();
-  return list && windowsTree(list, p.pid!, l.start, l.end ?? Date.now());
+  return list && windowsTree(list, p.pid!, l.start, l.end ?? Date.now(), l.born);
 }
 
 function taskkill(pids: number[]): Promise<void> {

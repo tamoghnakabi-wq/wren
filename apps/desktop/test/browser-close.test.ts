@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,8 +7,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {}, desktopCapturer: {}, screen: {} }));
 process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-browser-close-'));
-const { adoptBrowser, browserProcess, closeBrowser } = await import('../src/main/host');
-const { external } = await import('../src/main/proctree');
+const { adoptBrowser, adoptContext, browserProcess, closeBrowser, ownProcess } = await import('../src/main/host');
+const { bornOf: bornOfProc, external } = await import('../src/main/proctree');
 
 const alive = (pid: number) => {
   try {
@@ -40,7 +41,9 @@ async function standInBrowser() {
   const leader = spawn(process.execPath, ['-e', `const c=require("child_process").spawn(process.execPath,["-e",${JSON.stringify(STUBBORN)}],{stdio:"ignore"}); console.log(c.pid); ${STUBBORN}`], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
   const helper = await new Promise<number>((r) => leader.stdout!.once('data', (d) => r(Number(String(d).trim()))));
   cleanup.push(leader.pid!, helper);
-  return { leader, helper, proc: external(leader.pid!, start) };
+  const proc = await ownProcess(leader.pid!, start); // Wren's own child, known by when it started
+  expect(proc).not.toBeNull();
+  return { leader, helper, proc: proc! };
 }
 
 describe.skipIf(process.platform === 'win32')('closing the agent browser', () => {
@@ -74,6 +77,29 @@ describe.skipIf(process.platform === 'win32')('closing the agent browser', () =>
     adoptBrowser({ controller: {} as never, close: async () => Promise.reject(new Error('gone')), proc: external(other, 0) });
     expect(await closeBrowser()).toBe(true); // its own browser is gone
     expect(alive(other)).toBe(true);
+  }, 20_000);
+
+  it('doesn\'t stop another of Wren\'s own processes that has the browser\'s old id now (W-144)', async () => {
+    const later = spawn(process.execPath, ['-e', STUBBORN], { detached: true, stdio: 'ignore' });
+    await new Promise((r) => later.once('spawn', r));
+    cleanup.push(later.pid!);
+    const mine = (await ownProcess(later.pid!, 0))!;
+    // The browser had this id before, so it was created at another time.
+    adoptBrowser({ controller: {} as never, close: async () => Promise.reject(new Error('gone')), proc: external(later.pid!, 0, (bornOfProc(mine) ?? 0) - 60_000) });
+    expect(await closeBrowser()).toBe(true);
+    expect(alive(later.pid!)).toBe(true);
+  }, 20_000);
+
+  it('keeps track of a browser that closed while its process was being identified (W-143)', async () => {
+    const { helper, proc } = await standInBrowser();
+    const context = Object.assign(new EventEmitter(), { close: async () => {} });
+    await adoptContext(context as never, {} as never, async () => {
+      context.emit('close'); // Playwright reports it closed before the id is known...
+      return proc; // ...but its processes are still running
+    });
+    expect(alive(helper)).toBe(true);
+    expect(await closeBrowser()).toBe(true);
+    expect(alive(helper)).toBe(false);
   }, 20_000);
 
   it('stays unconfirmed (and known) when the browser\'s process is unknown and it won\'t close in time', async () => {

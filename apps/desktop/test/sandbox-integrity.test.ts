@@ -82,6 +82,14 @@ describe("Wren's data folder", () => {
     expect(listed).not.toContain('.wren');
     expect(readFileSync(join(data, 'policy.json'), 'utf8')).toBe('{"shell":false}');
   });
+
+  it("doesn't let Wren's own folders use up a listing's limit", async () => {
+    const parent = join(appDirs()[0], '..'); // src, which holds this app's main folder (src/main here)
+    const data = mkdtempSync(join(tmpdir(), 'wren-d-'));
+    const all = await listConfined(parent, 2, [parent], data, 1000);
+    expect(all.length).toBeGreaterThan(1);
+    expect(await listConfined(parent, 2, [parent], data, all.length)).toEqual(all);
+  });
 });
 
 // W-133: a development Wren (`electron .` in the repo) runs code from outside its build too: its start file,

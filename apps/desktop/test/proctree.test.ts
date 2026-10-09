@@ -26,6 +26,17 @@ describe('windowsTree (W-76: Windows never re-parents, so children are found by 
     ];
     expect(windowsTree(reused, 10, T, T + 1000)).toEqual([]);
   });
+  // W-144: a process known by its exact creation time (the agent browser) while it may still run, so with
+  // no end time to go by: a process holding its id now, created at another time, is someone else.
+  it('knows a root by its creation time, even before it is known to have ended', () => {
+    expect(windowsTree(list, 10, T - 5000, T + 90_000, T).map((p) => p.pid).sort()).toEqual([10, 11, 12]);
+    const reused: WinProc[] = [
+      { pid: 11, ppid: 10, created: T + 100 }, // the real root's helper, still running
+      { pid: 10, ppid: 1, created: T + 60_000 }, // the id given to another program
+      { pid: 30, ppid: 10, created: T + 61_000 }, // which started its own child
+    ];
+    expect(windowsTree(reused, 10, T - 5000, T + 90_000, T).map((p) => p.pid)).toEqual([11]);
+  });
 });
 
 describe.skipIf(process.platform === 'win32')('process groups (macOS/Linux)', () => {

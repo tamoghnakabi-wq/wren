@@ -11,7 +11,7 @@ import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
 import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
-import { ended, external, killTree, tracked, treeAlive, type Proc } from './proctree';
+import { bornOf, ended, external, killTree, tracked, treeAlive, windowsProcesses, type Proc } from './proctree';
 import { jobs, kill, release, type Job } from './jobs';
 import { spawnContained } from './winjob';
 import { hasSeatbelt, seatbeltProfile } from './sandbox';
@@ -30,7 +30,7 @@ const MAX_OUT = 60_000;
 interface AgentBrowser {
   controller: BrowserController;
   close: () => Promise<void>;
-  /** Its own process, as the browser reported it at launch; null if unknown (then it can't be confirmed stopped). */
+  /** Its own process, as the browser reported it at launch; null if unknown (then only Playwright's own close confirms it). */
   proc: Proc | null;
 }
 
@@ -263,13 +263,7 @@ export class LocalHost implements ToolHost {
       try {
         const start = Date.now();
         const context = await chromium.launchPersistentContext(profile, { channel, headless: false, viewport: { width: 1280, height: 800 }, args: ['--no-first-run', '--no-default-browser-check'] });
-        const ctl = adoptBrowser<AgentBrowser>({ controller: new BrowserController(context), close: () => context.close(), proc: null });
-        context.on('close', () => {
-          if (browserCtl === ctl) browserCtl = null;
-          // Playwright saw it close; anything of it still running is stopped by the next closeBrowser.
-          if (ctl.proc) keepUntilGone(ctl.proc);
-        });
-        ctl.proc = await browserProcess(context, start);
+        const ctl = await adoptContext(context, new BrowserController(context), () => browserProcess(context, start));
         return ctl.controller;
       } catch (e) {
         lastErr = e;
@@ -334,6 +328,22 @@ export function adoptBrowser<T extends AgentBrowser>(ctl: T): T {
   return ctl;
 }
 
+/** Make a launched browser the agent browser, then learn its process (`identify`). */
+export async function adoptContext(context: Pick<BrowserContext, 'on' | 'close'>, controller: BrowserController, identify: () => Promise<Proc | null>): Promise<AgentBrowser> {
+  const ctl = adoptBrowser<AgentBrowser>({ controller, close: () => context.close(), proc: null });
+  let closed = false;
+  context.on('close', () => {
+    closed = true;
+    if (browserCtl === ctl) browserCtl = null;
+    // Playwright saw it close; anything of it still running is stopped by the next closeBrowser.
+    if (ctl.proc) keepUntilGone(ctl.proc);
+  });
+  ctl.proc = await identify();
+  // It closed while being identified: what of it may still run is tracked all the same (W-143).
+  if (closed && ctl.proc) keepUntilGone(ctl.proc);
+  return ctl;
+}
+
 let closingBrowser: Promise<boolean> | null = null;
 
 /**
@@ -390,33 +400,56 @@ function keepUntilGone(p: Proc) {
 }
 
 /**
- * The agent browser's own process, as the browser itself reports it (W-138). Playwright starts it
- * detached, so on macOS it leads its own process group (and session) with every helper it starts, and it
- * must be Wren's own child. Null if that can't be established.
+ * The agent browser's own process, as the browser itself reports it (W-138), within 20 s (a browser that
+ * doesn't answer leaves it unknown). Playwright starts it detached, so on macOS it leads its own process
+ * group (and session) with every helper it starts.
  */
 export async function browserProcess(context: BrowserContext, start: number): Promise<Proc | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), 20_000)));
+  try {
+    return await Promise.race([reportedProcess(context, start), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function reportedProcess(context: BrowserContext, start: number): Promise<Proc | null> {
   try {
     const browser = context.browser();
     if (!browser) return null;
     const cdp = await browser.newBrowserCDPSession();
-    const { processInfo } = await cdp.send('SystemInfo.getProcessInfo');
-    await cdp.detach().catch(() => {});
-    const pid = processInfo.find((p) => p.type === 'browser')?.id;
-    if (!pid) return null;
-    if (process.platform !== 'win32' && (await processParent(pid)) !== 'wren') return null;
-    return external(pid, start);
+    const { processInfo: list } = await cdp.send('SystemInfo.getProcessInfo');
+    void cdp.detach().catch(() => {});
+    const pid = list.find((p) => p.type === 'browser')?.id;
+    return pid ? await ownProcess(pid, start) : null;
   } catch {
     return null;
   }
 }
 
-/** Whose child process `pid` is (macOS/Linux): Wren's, another program's, gone, or unknown (ps failed). */
-function processParent(pid: number): Promise<'wren' | 'other' | 'gone' | 'unknown'> {
+/**
+ * Wren's own child process `pid`, known by when it was created (Windows: its creation time; macOS: ps's
+ * start time), so a process given its id later is never taken for it (W-144). Null if it isn't Wren's
+ * child, or that can't be told.
+ */
+export async function ownProcess(pid: number, start: number): Promise<Proc | null> {
+  if (process.platform === 'win32') {
+    const me = (await windowsProcesses())?.find((x) => x.pid === pid);
+    return me && me.ppid === process.pid ? external(pid, start, me.created) : null;
+  }
+  const now = await processState(pid);
+  return now.owner === 'wren' ? external(pid, start, now.born) : null;
+}
+
+/** Whose child process `pid` is (macOS/Linux) and when it started: Wren's, another program's, gone, or unknown. */
+function processState(pid: number): Promise<{ owner: 'wren' | 'other'; born: number } | { owner: 'gone' | 'unknown' }> {
   return new Promise((resolve) => {
-    execFile('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 5000 }, (err, out) => {
-      const ppid = String(out ?? '').trim();
-      if (/^\d+$/.test(ppid)) return resolve(Number(ppid) === process.pid ? 'wren' : 'other');
-      resolve(err && (err as { code?: unknown }).code === 1 ? 'gone' : 'unknown');
+    execFile('/bin/ps', ['-o', 'ppid=,lstart=', '-p', String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: 'C' } }, (err, out) => {
+      const m = /^\s*(\d+)\s+(\S.*?)\s*$/.exec(String(out ?? ''));
+      const born = m ? Date.parse(m[2]) : NaN;
+      if (m && Number.isFinite(born)) return resolve({ owner: Number(m[1]) === process.pid ? 'wren' : 'other', born });
+      resolve({ owner: !m && err && (err as { code?: unknown }).code === 1 ? 'gone' : 'unknown' });
     });
   });
 }
@@ -424,11 +457,12 @@ function processParent(pid: number): Promise<'wren' | 'other' | 'gone' | 'unknow
 /** Stop what is left of an agent browser; true once nothing of it is left. */
 async function stopBrowserProcs(p: Proc): Promise<boolean> {
   if (process.platform !== 'win32') {
-    const parent = await processParent(p.pid!);
-    // Its id now belongs to another program: Wren's browser and its whole group are gone (an id isn't
-    // given out while a group of that number has members), and that program isn't Wren's to stop.
-    if (parent === 'other') return true;
-    if (parent === 'unknown') return false;
+    const now = await processState(p.pid!);
+    if (now.owner === 'unknown') return false;
+    // Its id now belongs to another process (another program's, or one Wren started later): Wren's browser
+    // and its whole group are gone (an id isn't given out while a group of that number has members), and
+    // that process isn't the browser's to stop.
+    if (now.owner === 'other' || (now.owner === 'wren' && now.born !== bornOf(p))) return true;
   }
   return killTree(p, 2000, 5000).catch(() => false);
 }

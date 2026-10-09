@@ -401,8 +401,8 @@ const MAX_PROMPT_BYTES = 512 * 1024;
  * Wren has decided it, not just while its connection is open; if the asker goes away, the handler's
  * signal fires (the approval is withdrawn), and closing the bridge does the same for everything open.
  */
-/** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks. */
-const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 30_000 };
+/** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks (its default is 30 s). */
+const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 5_000 };
 
 export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
