@@ -18,12 +18,12 @@ export function SiteNav() {
           <Link href="/download" className="rounded-lg px-3 py-2 text-muted hover:text-text">
             Download
           </Link>
-          <Link href="/login" className="hidden rounded-lg px-3 py-2 text-muted hover:text-text sm:block">
+          <a href="/login" className="hidden rounded-lg px-3 py-2 text-muted hover:text-text sm:block">
             Sign in
-          </Link>
-          <Link href="/signup" className="ml-1 rounded-xl bg-primary px-4 py-2 font-medium text-primary-fg hover:opacity-90">
+          </a>
+          <a href="/signup" className="ml-1 rounded-xl bg-primary px-4 py-2 font-medium text-primary-fg hover:opacity-90">
             Get started
-          </Link>
+          </a>
         </nav>
       </div>
     </header>
@@ -48,9 +48,9 @@ export function SiteFooter() {
           <a href="https://github.com/tamoghnakabi-wq/wren" className="hover:text-text" target="_blank" rel="noreferrer">
             Source (MIT)
           </a>
-          <Link href="/login" className="hover:text-text">
+          <a href="/login" className="hover:text-text">
             Sign in
-          </Link>
+          </a>
         </div>
       </div>
     </footer>

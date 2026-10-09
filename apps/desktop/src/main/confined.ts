@@ -208,11 +208,13 @@ export async function listConfined(root: string, depth: number, roots: string[],
     return out
       .split('\n')
       .filter(Boolean)
-      .slice(0, limit)
       .map((line) => {
         const [t, size, ...rest] = line.split('|');
-        return `${kind(t)} ${size} ${rest.join('|')}`;
-      });
+        return { line: `${kind(t)} ${size} ${rest.join('|')}`, path: rest.join('|') };
+      })
+      .filter((e) => !isPrivate(e.path, dataDir)) // Wren's own folders aren't listed (its build in a project included)
+      .slice(0, limit)
+      .map((e) => e.line);
   }
   const out: string[] = [];
   const walk = (d: string, level: number) => {

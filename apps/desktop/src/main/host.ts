@@ -1,16 +1,17 @@
 import { desktopCapturer, screen } from 'electron';
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { fetchReadable } from '@wren/core/net';
 import { BrowserController, registerSelectors } from '@wren/core/browser/controller';
+import type { BrowserContext } from 'playwright-core';
 import { deviceFetch, deviceJson } from './api';
 import { dataDir, type Policy } from './config';
 import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
-import { tracked } from './proctree';
+import { ended, external, killTree, tracked, treeAlive, type Proc } from './proctree';
 import { jobs, kill, release, type Job } from './jobs';
 import { spawnContained } from './winjob';
 import { hasSeatbelt, seatbeltProfile } from './sandbox';
@@ -26,7 +27,16 @@ import { currentProgramTrust } from './trust';
 
 const MAX_OUT = 60_000;
 
-let browserCtl: { controller: BrowserController; close: () => Promise<void> } | null = null;
+interface AgentBrowser {
+  controller: BrowserController;
+  close: () => Promise<void>;
+  /** Its own process, as the browser reported it at launch; null if unknown (then it can't be confirmed stopped). */
+  proc: Proc | null;
+}
+
+let browserCtl: AgentBrowser | null = null;
+/** Agent browsers Playwright saw close but whose processes weren't seen gone yet; closeBrowser stops them too. */
+const strayBrowsers = new Set<Proc>();
 
 export class LocalHost implements ToolHost {
   readonly runtime = 'desktop' as const;
@@ -251,9 +261,15 @@ export class LocalHost implements ToolHost {
     let lastErr: unknown;
     for (const channel of channels) {
       try {
+        const start = Date.now();
         const context = await chromium.launchPersistentContext(profile, { channel, headless: false, viewport: { width: 1280, height: 800 }, args: ['--no-first-run', '--no-default-browser-check'] });
-        const ctl = adoptBrowser({ controller: new BrowserController(context), close: () => context.close() });
-        context.on('close', () => browserCtl === ctl && (browserCtl = null));
+        const ctl = adoptBrowser<AgentBrowser>({ controller: new BrowserController(context), close: () => context.close(), proc: null });
+        context.on('close', () => {
+          if (browserCtl === ctl) browserCtl = null;
+          // Playwright saw it close; anything of it still running is stopped by the next closeBrowser.
+          if (ctl.proc) keepUntilGone(ctl.proc);
+        });
+        ctl.proc = await browserProcess(context, start);
         return ctl.controller;
       } catch (e) {
         lastErr = e;
@@ -313,7 +329,7 @@ function tail(s: string, n = 28_000) {
 export { killRunJobs, stopAllJobs } from './jobs';
 
 /** The agent browser Wren now owns (what closeBrowser closes). */
-export function adoptBrowser<T extends NonNullable<typeof browserCtl>>(ctl: T): T {
+export function adoptBrowser<T extends AgentBrowser>(ctl: T): T {
   browserCtl = ctl;
   return ctl;
 }
@@ -323,74 +339,98 @@ let closingBrowser: Promise<boolean> | null = null;
 /**
  * Close the agent browser; true once it's confirmed closed (or wasn't open). It stays known until then, so
  * a later try (an update retried) checks again instead of finding nothing; callers at the same time share
- * one attempt (W-136). If Playwright can't close it, its processes (found by Wren's own profile folder) are
- * stopped and checked gone.
+ * one attempt (W-136). Closed or not by Playwright (within `waitMs`), the browser's own processes are
+ * then stopped and checked gone: its process group on macOS, its process tree on Windows (W-138, W-139).
+ * Nothing here blocks the main process (W-140), and it never rejects.
  */
-export function closeBrowser(): Promise<boolean> {
+export function closeBrowser(waitMs = 15_000): Promise<boolean> {
   if (closingBrowser) return closingBrowser;
-  const ctl = browserCtl;
-  if (!ctl) return Promise.resolve(true);
+  if (!browserCtl && !strayBrowsers.size) return Promise.resolve(true);
   closingBrowser = (async () => {
-    const closed = await Promise.race([
-      ctl.close().then(
-        () => true,
-        () => false,
-      ),
-      new Promise<boolean>((r) => setTimeout(() => r(false), 15_000).unref()),
-    ]);
-    const gone = closed || (await stopProfileBrowser(browserProfile()));
-    if (gone && browserCtl === ctl) browserCtl = null;
-    return gone;
-  })().finally(() => {
-    closingBrowser = null;
-  });
+    let ok = true;
+    const ctl = browserCtl;
+    if (ctl) {
+      const closed = await Promise.race([
+        ctl.close().then(
+          () => true,
+          () => false,
+        ),
+        new Promise<boolean>((r) => setTimeout(() => r(false), waitMs).unref()),
+      ]);
+      const gone = ctl.proc ? await stopBrowserProcs(ctl.proc) : closed;
+      if (gone) {
+        if (browserCtl === ctl) browserCtl = null;
+        if (ctl.proc) strayBrowsers.delete(ctl.proc);
+      }
+      ok = gone;
+    }
+    for (const p of [...strayBrowsers]) {
+      if (await stopBrowserProcs(p)) strayBrowsers.delete(p);
+      else ok = false;
+    }
+    return ok;
+  })()
+    .catch(() => false)
+    .finally(() => {
+      closingBrowser = null;
+    });
   return closingBrowser;
 }
 
 const browserProfile = () => join(dataDir(), 'agent-browser');
 
-/** The browser processes started with this profile folder (`--user-data-dir=<profile>`). */
-function profilePids(profile: string): number[] | null {
-  const flag = `--user-data-dir=${profile}`;
+/** Track a closed browser's processes until they're seen gone. */
+function keepUntilGone(p: Proc) {
+  ended(p);
+  strayBrowsers.add(p);
+  void treeAlive(p).then(
+    (alive) => alive || strayBrowsers.delete(p),
+    () => {},
+  );
+}
+
+/**
+ * The agent browser's own process, as the browser itself reports it (W-138). Playwright starts it
+ * detached, so on macOS it leads its own process group (and session) with every helper it starts, and it
+ * must be Wren's own child. Null if that can't be established.
+ */
+export async function browserProcess(context: BrowserContext, start: number): Promise<Proc | null> {
   try {
-    if (process.platform === 'win32') {
-      const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress'], { encoding: 'utf8', timeout: 15_000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
-      const rows = JSON.parse(out || '[]') as { ProcessId: number; CommandLine: string | null }[] | { ProcessId: number; CommandLine: string | null };
-      return (Array.isArray(rows) ? rows : [rows]).filter((r) => r.CommandLine?.includes(flag)).map((r) => r.ProcessId);
-    }
-    const out = execFileSync('/bin/ps', ['-axo', 'pid=,command='], { encoding: 'utf8', timeout: 5000, maxBuffer: 32 * 1024 * 1024 });
-    return out
-      .split('\n')
-      .map((l) => /^\s*(\d+)\s+(.*)$/.exec(l))
-      .filter((m): m is RegExpExecArray => !!m && (m[2].includes(`${flag} `) || m[2].endsWith(flag)))
-      .map((m) => Number(m[1]))
-      .filter((pid) => pid !== process.pid);
+    const browser = context.browser();
+    if (!browser) return null;
+    const cdp = await browser.newBrowserCDPSession();
+    const { processInfo } = await cdp.send('SystemInfo.getProcessInfo');
+    await cdp.detach().catch(() => {});
+    const pid = processInfo.find((p) => p.type === 'browser')?.id;
+    if (!pid) return null;
+    if (process.platform !== 'win32' && (await processParent(pid)) !== 'wren') return null;
+    return external(pid, start);
   } catch {
-    return null; // couldn't look: not confirmed
+    return null;
   }
 }
 
-/** Stop the agent browser's processes; true once none are left. */
-async function stopProfileBrowser(profile: string): Promise<boolean> {
-  const signal = (pids: number[], sig: NodeJS.Signals) => {
-    for (const pid of pids) {
-      try {
-        if (process.platform === 'win32') execFileSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10_000, stdio: 'ignore' });
-        else process.kill(pid, sig);
-      } catch {
-        /* already gone */
-      }
-    }
-  };
-  for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
-    const pids = profilePids(profile);
-    if (pids === null) return false;
-    if (!pids.length) return true;
-    signal(pids, sig);
-    await new Promise((r) => setTimeout(r, 2000));
+/** Whose child process `pid` is (macOS/Linux): Wren's, another program's, gone, or unknown (ps failed). */
+function processParent(pid: number): Promise<'wren' | 'other' | 'gone' | 'unknown'> {
+  return new Promise((resolve) => {
+    execFile('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 5000 }, (err, out) => {
+      const ppid = String(out ?? '').trim();
+      if (/^\d+$/.test(ppid)) return resolve(Number(ppid) === process.pid ? 'wren' : 'other');
+      resolve(err && (err as { code?: unknown }).code === 1 ? 'gone' : 'unknown');
+    });
+  });
+}
+
+/** Stop what is left of an agent browser; true once nothing of it is left. */
+async function stopBrowserProcs(p: Proc): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    const parent = await processParent(p.pid!);
+    // Its id now belongs to another program: Wren's browser and its whole group are gone (an id isn't
+    // given out while a group of that number has members), and that program isn't Wren's to stop.
+    if (parent === 'other') return true;
+    if (parent === 'unknown') return false;
   }
-  const left = profilePids(profile);
-  return left !== null && left.length === 0;
+  return killTree(p, 2000, 5000).catch(() => false);
 }
 
 /** Close a finished run's browser tab (other runs keep theirs). */
@@ -398,6 +438,6 @@ export async function closeRunTab(runId: string) {
   if (browserCtl) {
     // A page the task opened that won't close (a popup included) must not keep running: close the browser.
     const r = await browserCtl.controller.act({ action: 'close', tab: runId }).catch(() => ({ ok: false }));
-    if (!r.ok) await browserCtl.close().catch(() => {});
+    if (!r.ok) await closeBrowser();
   }
 }

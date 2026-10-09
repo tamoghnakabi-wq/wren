@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import { Apple, Download, ExternalLink, MonitorDown, ShieldAlert } from 'lucide-react';
 import { SiteFooter, SiteNav } from '@/components/site';
 import { latestRelease, type ReleaseAsset } from '@/lib/releases';
@@ -65,7 +64,7 @@ export default async function DownloadPage() {
           ))}
         </div>
         <p className="mt-10 text-sm text-muted">
-          Prefer not to install anything? <Link href="/signup" className="underline">Use Wren on the web</Link> — cloud agents keep working even when your computer is off. Source code:{' '}
+          Prefer not to install anything? <a href="/signup" className="underline">Use Wren on the web</a> — cloud agents keep working even when your computer is off. Source code:{' '}
           <a href="https://github.com/tamoghnakabi-wq/wren" className="inline-flex items-center gap-1 underline" target="_blank" rel="noreferrer">
             GitHub <ExternalLink className="h-3 w-3" />
           </a>

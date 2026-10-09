@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 
 // macOS Seatbelt profiles (sandbox-exec) for everything an agent runs on this
 // computer: shell commands, Wren's own file operations, and the Claude Code /
@@ -111,8 +112,8 @@ function ancestorsWithin(p: string, root: string): string[] {
  * change them, even when an allowed folder contains them (a build inside a project, W-128): the next
  * engine run would start a rewritten helper.
  */
-export function appDirs(): string[] {
-  const dirs = [resolve(__dirname)];
+export function appDirs(here = __dirname): string[] {
+  const dirs = [resolve(here)];
   if (process.platform === 'darwin') {
     const bundle = resolve(process.execPath, '..', '..', '..');
     if (bundle.endsWith('.app')) dirs.push(bundle); // not when run by plain Node (tests): that would be /usr or /opt
@@ -120,12 +121,21 @@ export function appDirs(): string[] {
   // A development Wren (`electron .` from the repo, not packaged) also runs code from outside its build:
   // modules from the package's node_modules (playwright-core loads at the first browser use) and the start
   // file package.json names. Those are its code too (W-133).
-  if (!__dirname.includes('app.asar') && basename(__dirname) === 'dist-electron') {
-    const pkg = dirname(__dirname);
+  if (!here.includes('app.asar') && basename(here) === 'dist-electron') {
+    const pkg = dirname(here);
     dirs.push(join(pkg, 'package.json'));
     for (let d = pkg; ; d = dirname(d)) {
       if (existsSync(join(d, 'node_modules'))) dirs.push(join(d, 'node_modules'));
       if (dirname(d) === d) break;
+    }
+    // …and the modules it loads at run time, where they really are (a linked package lives elsewhere).
+    const load = createRequire(join(pkg, 'package.json'));
+    for (const m of ['playwright-core', 'electron']) {
+      try {
+        dirs.push(dirname(load.resolve(`${m}/package.json`)));
+      } catch {
+        /* not installed */
+      }
     }
   }
   return [...new Set(dirs.map((d) => realpathOr(d)))];

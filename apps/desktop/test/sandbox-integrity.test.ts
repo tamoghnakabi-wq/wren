@@ -1,12 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 const { appDirs, engineProfile, fileOpsProfile, seatbeltProfile } = await import('../src/main/sandbox');
-const { writeConfined } = await import('../src/main/confined');
+const { listConfined, readConfined, writeConfined } = await import('../src/main/confined');
 
 // W-128: what decides approvals (Wren's helper, Grok's per-run hook plugin) can't be changed by any agent,
 // even when an allowed folder contains it. Run in the real macOS sandbox.
@@ -54,5 +54,54 @@ describe("Wren's own file tool (W-128)", () => {
   it('refuses to write into Wren itself, even inside an allowed folder', async () => {
     const own = appDirs()[0];
     await expect(writeConfined(join(own, 'mcp-approve.mjs'), Buffer.from('x'), [own], mkdtempSync(join(tmpdir(), 'wren-d-')))).rejects.toThrow(/part of Wren itself/);
+  });
+
+  it("leaves Wren's own folders out of a listing of a folder that contains them", async () => {
+    const own = appDirs()[0]; // src/main here
+    const parent = join(own, '..');
+    const listed = await listConfined(parent, 2, [parent], mkdtempSync(join(tmpdir(), 'wren-d-')));
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.some((l) => l.includes(own))).toBe(false);
+  });
+});
+
+// W-134: Wren's data folder (local policy, device sign-in, updates) is out of reach of its file tools on every
+// platform, even when an allowed folder contains it; listings leave it out.
+describe("Wren's data folder", () => {
+  it('is refused to the file tools inside an allowed folder, and left out of listings', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'wren-home-')));
+    const data = join(home, '.wren');
+    mkdirSync(data);
+    writeFileSync(join(data, 'policy.json'), '{"shell":false}');
+    writeFileSync(join(home, 'notes.txt'), 'mine');
+    await expect(writeConfined(join(data, 'policy.json'), Buffer.from('{"shell":true}'), [home], data)).rejects.toThrow(/part of Wren itself/);
+    await expect(readConfined(join(data, 'policy.json'), [home], data, 1e6)).rejects.toThrow(/part of Wren itself/);
+    await expect(listConfined(data, 1, [home], data)).rejects.toThrow(/part of Wren itself/);
+    const listed = (await listConfined(home, 2, [home], data)).join('\n');
+    expect(listed).toContain('notes.txt');
+    expect(listed).not.toContain('.wren');
+    expect(readFileSync(join(data, 'policy.json'), 'utf8')).toBe('{"shell":false}');
+  });
+});
+
+// W-133: a development Wren (`electron .` in the repo) runs code from outside its build too: its start file,
+// the node_modules it loads from, and a linked runtime module's real folder.
+describe('a development build', () => {
+  it("counts its package file, node_modules and runtime modules' real folders as Wren itself, not its source", () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), 'wren-dev-')));
+    const pkg = join(repo, 'apps', 'desktop');
+    const store = join(repo, '.store', 'playwright-core');
+    mkdirSync(join(pkg, 'dist-electron'), { recursive: true });
+    mkdirSync(join(pkg, 'src'), { recursive: true });
+    mkdirSync(store, { recursive: true });
+    mkdirSync(join(repo, 'node_modules'));
+    writeFileSync(join(pkg, 'package.json'), '{"main":"dist-electron/main.js"}');
+    writeFileSync(join(store, 'package.json'), '{"name":"playwright-core"}');
+    symlinkSync(store, join(repo, 'node_modules', 'playwright-core'));
+    const dirs = appDirs(join(pkg, 'dist-electron'));
+    for (const p of [join(pkg, 'dist-electron'), join(pkg, 'package.json'), join(repo, 'node_modules'), store]) expect(dirs).toContain(p);
+    expect(dirs.some((d) => join(pkg, 'src').startsWith(d + '/') || d === join(pkg, 'src'))).toBe(false);
+    // A packaged app's code is its bundle; nothing of this kind is added.
+    expect(appDirs(join(repo, 'Wren.app', 'Contents', 'Resources', 'app.asar', 'dist-electron'))).not.toContain(join(repo, 'node_modules'));
   });
 });

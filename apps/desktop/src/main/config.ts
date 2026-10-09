@@ -105,6 +105,31 @@ export function permissionsReduced(prev: Policy, next: Policy): boolean {
   return (['shell', 'browser', 'screen', 'remoteApprovals'] as const).some((k) => prev[k] && !next[k]) || prev.folders.some((f) => !next.folders.includes(f));
 }
 
+/** Permissions the page may turn off, but only the user, in a native prompt, may turn on (W-142). */
+export const GRANTS = [
+  ['shell', 'Run terminal commands in the folders you allowed'],
+  ['browser', 'Use a separate browser window on this computer'],
+  ['screen', 'Ask for screenshots of your screen'],
+  ['remoteApprovals', 'Act on approvals given on your phone or the web'],
+] as const satisfies readonly (readonly [keyof Policy, string])[];
+
+/**
+ * The policy with a change the page asked for. Asking isn't enough to turn a permission on, since anything
+ * running in the page could ask (W-142): `confirm` asks the user first, in a native prompt. Turning one
+ * off needs nothing. Folders are added only through the native picker; the model server must be local.
+ */
+export async function changedPolicy(patch: Partial<Policy>, confirm: (what: string[]) => Promise<boolean>): Promise<{ before: Policy; next: Policy }> {
+  const asked = GRANTS.filter(([k]) => patch[k] === true && !loadPolicy()[k]);
+  const allowed = asked.length > 0 && (await confirm(asked.map(([, what]) => what)));
+  const before = loadPolicy(); // as it is now, after the prompt
+  const next: Policy = { ...before, ...patch };
+  for (const [k] of GRANTS) next[k] = next[k] === true && (before[k] || (allowed && asked.some(([a]) => a === k)));
+  next.folders = (Array.isArray(next.folders) ? next.folders : before.folders).filter((f) => before.folders.includes(f));
+  if (typeof next.localModelUrl !== 'string' || !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(next.localModelUrl)) next.localModelUrl = before.localModelUrl;
+  next.launchAtLogin = next.launchAtLogin === true;
+  return { before, next };
+}
+
 export function savePolicy(p: Policy) {
   writeJson('policy.json', p);
 }

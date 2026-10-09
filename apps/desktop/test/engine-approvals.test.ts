@@ -101,6 +101,35 @@ describe('the approval bridge (W-129)', () => {
     expect(decided).toBe(0);
   });
 
+  it('cuts off a request that is slow to arrive, but lets a decision take as long as it needs (W-135)', async () => {
+    const { request } = await import('node:http');
+    let decided = 0;
+    const b = await startApprovalBridge(
+      async () => {
+        decided++;
+        await new Promise((r) => setTimeout(r, 1200)); // the user takes a while: longer than the arrival limit
+        return { allow: true };
+      },
+      { requestMs: 300, headersMs: 200, checkMs: 50 },
+    );
+    try {
+      const slow = await new Promise<string>((resolve) => {
+        const u = new URL(b.url);
+        const req = request({ host: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers: { authorization: `Bearer ${b.token}`, 'content-length': '40' } });
+        req.on('response', (res) => resolve(`status ${res.statusCode}`));
+        req.on('error', () => resolve('cut off'));
+        req.write('{"tool_name":'); // and never the rest
+      });
+      expect(slow === 'cut off' || slow === 'status 408').toBe(true);
+      expect(decided).toBe(0);
+      const r = await ask(b, { tool_name: 'Read', input: {} });
+      expect(await r.json()).toEqual({ behavior: 'allow', updatedInput: {} });
+      expect(decided).toBe(1);
+    } finally {
+      b.close();
+    }
+  }, 10_000);
+
   it('refuses a body over 512 KB, a wrong token, and calls everything off when closed', async () => {
     let signal: AbortSignal | undefined;
     const b = await startApprovalBridge(async (r) => {
@@ -177,6 +206,8 @@ describe('engine approvals on the timeline', () => {
     setTimeout(() => asker.abort(), 100);
     expect(await decide(run(store), writer, call, () => true, asker.signal)).toMatchObject({ allow: false });
     expect(store.withdrawn).toEqual(['ap1']);
+    expect([...store.rows.values()].find((r) => r.data?.name === 'computer.write_file')?.status).toBe('cancelled');
+    await writer.toolEnd('toolu_1', 'Permission denied.', true); // the engine's report doesn't change that
     expect([...store.rows.values()].find((r) => r.data?.name === 'computer.write_file')?.status).toBe('cancelled');
   });
 

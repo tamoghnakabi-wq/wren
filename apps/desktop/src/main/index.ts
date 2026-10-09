@@ -5,7 +5,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
-import { APP_ORIGIN, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
+import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type DeviceCredentials, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
 import { closeBrowser, stopAllJobs } from './host';
 import { DeviceRunner, setApproveScript } from './runner';
@@ -39,6 +39,8 @@ if (process.argv.includes('--selftest')) {
           (e: Error) => ({ ok: false, error: e.message }),
         )
       : undefined;
+    // `--browser`: the agent browser is found by its own report and stopped with all it started (CI, on each OS).
+    const browser = process.argv.includes('--browser') ? await browserSelfTest().catch((e: Error) => ({ ok: false, error: e.message })) : undefined;
     const result = {
       version: app.getVersion(),
       platform: process.platform,
@@ -52,9 +54,10 @@ if (process.argv.includes('--selftest')) {
       preload: existsSync(join(DIST, 'preload.js')),
       ...(updateDownload && { updateDownload }),
       ...(proctree && { proctree }),
+      ...(browser && { browser }),
     };
     process.stdout.write(JSON.stringify(result) + '\n');
-    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) ? 0 : 1);
+    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) && (!browser || browser.ok) ? 0 : 1);
   });
 }
 /** Start the approval server like Claude Code would and ask it once; true when Wren's answer comes back. */
@@ -159,6 +162,44 @@ async function installerSelfTest(): Promise<Record<string, unknown> & { ok: bool
 }
 
 /**
+ * Opens the agent browser (headless here) the way the host does, then has Playwright fail to close it:
+ * Wren must find the browser by its own report and stop it with everything it started (W-138, W-139).
+ */
+async function browserSelfTest(): Promise<Record<string, unknown> & { ok: boolean }> {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { adoptBrowser, browserProcess, closeBrowser } = await import('./host');
+  const { treeAlive } = await import('./proctree');
+  const profile = mkdtempSync(join(tmpdir(), 'wren-browser-test-'));
+  try {
+    for (const channel of process.platform === 'win32' ? ['msedge', 'chrome'] : ['chrome', 'msedge', 'chromium']) {
+      const start = Date.now();
+      const context = await chromium.launchPersistentContext(profile, { channel, headless: true }).catch(() => null);
+      if (!context) continue;
+      await context.newPage();
+      const proc = await browserProcess(context, start);
+      if (!proc) {
+        await context.close().catch(() => {});
+        return { ok: false, channel, found: false };
+      }
+      adoptBrowser({ controller: {} as never, close: () => new Promise<void>(() => {}), proc }); // as if Playwright hung
+      const stopped = await closeBrowser(1000);
+      const gone = !(await treeAlive(proc));
+      return { ok: stopped && gone, channel, found: true, stopped, gone };
+    }
+    return { ok: false, error: 'no Chrome or Edge to test with' };
+  } finally {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      rmSync(profile, { recursive: true, force: true });
+    } catch {
+      /* a temp folder */
+    }
+  }
+}
+
+/**
  * Starts a command that launches a hidden long-running child and exits at once. macOS/Linux: the
  * child is still counted as the command's (its process group) and is stopped. Windows: inside the
  * Job Object the child ends with the command; without it, it is found by parent id and stopped.
@@ -207,7 +248,8 @@ const runner = new DeviceRunner(
 );
 const updater = new Updater(() => pushStatus());
 
-if (!process.argv.includes('--selftest') && !app.requestSingleInstanceLock()) {
+const primary = process.argv.includes('--selftest') || app.requestSingleInstanceLock();
+if (!primary) {
   app.quit();
 } else {
   app.on('second-instance', () => showWindow());
@@ -393,7 +435,7 @@ function shutdown(e: Electron.Event) {
       const runs = await runner.suspend(8_000).catch(() => false);
       const [browser, engines, jobs] = await Promise.all([closeBrowser(), stopAllEngines().catch(() => false), stopAllJobs().catch(() => false)]);
       return runs && browser && engines && jobs;
-    })();
+    })().catch(() => false); // an error is "not confirmed", never a quit that doesn't happen
     const confirmed = await Promise.race([all, new Promise<false>((r) => setTimeout(() => r(false), QUIT_WAIT_MS))]);
     // Quitting never waits longer than that (W-78). What couldn't be confirmed stopped is reported at the
     // next start, not taken as done.
@@ -430,6 +472,25 @@ function installUpdate() {
 
 // ------------------------------------------------------------------ pairing
 
+/**
+ * Whoever approves a pairing code gets this computer, and anything running in the page can start one.
+ * So the user says here which account it goes to (W-142); `WREN_AUTOPAIR` (development) skips this.
+ */
+async function confirmLink(email: string | undefined): Promise<boolean> {
+  if (process.env.WREN_AUTOPAIR === '1') return true;
+  const opts: Electron.MessageBoxOptions = {
+    type: 'question',
+    title: 'Wren',
+    message: `Link this computer to ${email ?? 'this Wren account'}?`,
+    detail: 'Agents of that account will be able to work on this computer, within the permissions you set here.',
+    buttons: ['Cancel', 'Link'],
+    defaultId: 0,
+    cancelId: 0,
+  };
+  const r = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  return r.response === 1;
+}
+
 async function startPairing(): Promise<{ userCode: string; pairId: string }> {
   if (pairing) clearInterval(pairing.timer);
   const { status: code, data } = await publicJson<{ pairId: string; userCode: string; pollSecret: string; interval: number; error?: string }>('/api/device/pair/start', {
@@ -442,10 +503,11 @@ async function startPairing(): Promise<{ userCode: string; pairId: string }> {
   const timer = setInterval(async () => {
     if (!pairing) return;
     const r = await publicJson<{ status: string; deviceId?: string; token?: string; channel?: string; account?: DeviceCredentials['account']; supabase?: DeviceCredentials['supabase'] }>('/api/device/pair/poll', { pairId: pairing.pairId, pollSecret: pairing.pollSecret }).catch(() => null);
-    if (!r) return;
+    if (!r || pairing?.timer !== timer) return; // another poll already handled it
     if (r.data.status === 'approved' && r.data.token) {
       clearInterval(timer);
       pairing = null;
+      if (!(await confirmLink(r.data.account?.email))) return;
       saveDevice({ deviceId: r.data.deviceId!, token: r.data.token, channel: r.data.channel!, account: r.data.account, supabase: r.data.supabase!, appUrl: APP_URL });
       runner.start();
       pushStatus();
@@ -482,9 +544,27 @@ function handle(channel: string, fn: (...args: unknown[]) => unknown) {
   });
 }
 
+async function confirmGrants(what: string[]): Promise<boolean> {
+  const opts: Electron.MessageBoxOptions = {
+    type: 'question',
+    title: 'Wren',
+    message: 'Allow agents on this computer to:',
+    detail: what.map((w) => `• ${w}`).join('\n'),
+    buttons: ['Cancel', 'Allow'],
+    defaultId: 0,
+    cancelId: 0,
+  };
+  const r = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  return r.response === 1;
+}
+
 function registerIpc() {
   handle('status', () => status());
-  handle('link', () => startPairing());
+  handle('link', () => {
+    // Moving a linked computer to another account starts with Unlink (which asks here).
+    if (loadDevice()) throw new Error('This computer is already linked. Unlink it first.');
+    return startPairing();
+  });
   handle('unlink', async () => {
     const ok = await dialog.showMessageBox({ type: 'question', message: 'Unlink this computer from your Wren account?', detail: 'Tasks will stop running here until you link it again.', buttons: ['Cancel', 'Unlink'], defaultId: 0, cancelId: 0 });
     if (ok.response !== 1) return;
@@ -494,15 +574,11 @@ function registerIpc() {
     pushStatus();
   });
   handle('getPolicy', () => loadPolicy());
-  handle('setPolicy', (p) => {
-    const cur = loadPolicy();
-    const next: Policy = { ...cur, ...(p as Partial<Policy>) };
-    // Folders can only be added through the native picker, never from the page.
-    next.folders = (next.folders ?? []).filter((f) => cur.folders.includes(f));
-    if (typeof next.localModelUrl !== 'string' || !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(next.localModelUrl)) next.localModelUrl = cur.localModelUrl;
+  handle('setPolicy', async (p) => {
+    const { before, next } = await changedPolicy({ ...(p as Partial<Policy>) }, confirmGrants);
     savePolicy(next);
-    app.setLoginItemSettings({ openAtLogin: !!next.launchAtLogin });
-    if (permissionsReduced(cur, next)) runner.permissionsReduced();
+    app.setLoginItemSettings({ openAtLogin: next.launchAtLogin });
+    if (permissionsReduced(before, next)) runner.permissionsReduced();
     void runner.tick();
     return next;
   });
@@ -602,6 +678,7 @@ async function installerFinished(ms: number): Promise<boolean> {
 }
 
 if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
+  if (!primary) return; // quitting: another Wren is running (and owns the data folder)
   // Opened again while an update is being installed: start nothing (no agents, no window) and let
   // the installer finish; it opens the new version itself (W-96). Opening that new version is the
   // installer's last step, so one that is just finishing gets a few seconds to exit first.
@@ -609,6 +686,15 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
     if (Notification.isSupported()) new Notification({ title: 'Wren is updating', body: 'It opens again by itself in a moment.' }).show();
     setTimeout(() => app.exit(0), 1500);
     return;
+  }
+  // Engine runs keep files in the data folder (Grok's hook plugin, Claude Code's approval files) and remove
+  // them when they end; a crash can leave some behind (W-137). No run has started yet, so none are in use.
+  for (const d of ['engines', 'approvals']) {
+    try {
+      rmSync(join(dataDir(), d), { recursive: true, force: true });
+    } catch {
+      /* never in the way of starting */
+    }
   }
   session.fromPartition('persist:wren').setPermissionRequestHandler((wc, permission, cb) => {
     const ok = permission === 'notifications' || permission === 'clipboard-sanitized-write';

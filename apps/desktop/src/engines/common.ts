@@ -401,14 +401,17 @@ const MAX_PROMPT_BYTES = 512 * 1024;
  * Wren has decided it, not just while its connection is open; if the asker goes away, the handler's
  * signal fires (the approval is withdrawn), and closing the bridge does the same for everything open.
  */
-export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url: string; token: string; close: () => void }> {
+/** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks. */
+const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 30_000 };
+
+export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
   // Every admitted request, from admission (still sending its body) until its decision ends (W-135).
   const active = new Set<AbortController>();
   let admitted = 0;
   let closing = false;
-  const server = createServer((req, res) => {
+  const server = createServer({ connectionsCheckingInterval: arrival.checkMs }, (req, res) => {
     if (closing) {
       res.statusCode = 503;
       res.end(JSON.stringify({ behavior: 'deny', message: 'The task has ended.' }));
@@ -478,8 +481,8 @@ export async function startApprovalBridge(handler: BridgeHandler): Promise<{ url
   });
   // A request must arrive in full quickly (it's a few KB from a local helper); its decision may then take as
   // long as the user needs: these limits cover receiving the request only (W-135).
-  server.requestTimeout = 15_000;
-  server.headersTimeout = 10_000;
+  server.requestTimeout = arrival.requestMs;
+  server.headersTimeout = arrival.headersMs;
   server.timeout = 0;
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as AddressInfo).port;

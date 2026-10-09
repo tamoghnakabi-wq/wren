@@ -16,6 +16,7 @@ export default function LegalPage() {
           <li>API keys you add are encrypted at rest and only used to call that provider for your agents.</li>
           <li>ChatGPT, Claude Code and Grok Build sign-ins happen on your own computer through those providers’ official flows. Their credentials stay on your computer; Wren’s servers never receive them.</li>
           <li>Push notification subscriptions are stored so we can notify you; you can turn them off in Settings.</li>
+          <li>Visits to the public pages (home, download and this page) are counted with Vercel Web Analytics, which uses no cookies: the page without anything after its address, where the visitor came from, and their browser, device type and country. Sign-in, the app itself and the desktop app aren’t counted.</li>
           <li>Deleting your account removes your agents, tasks, files, connections and linked devices.</li>
         </ul>
         <h2>Your responsibilities</h2>

@@ -9,8 +9,14 @@ import { type ChildProcess, execFile, spawn } from 'node:child_process';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** A process stopped with everything it started: one Wren spawned, or the agent browser (`external`). */
+export interface Proc {
+  readonly pid?: number;
+  kill?(): boolean;
+}
+
 /** When each tracked process started and ended: on Windows the window in which its children count as its own. */
-const life = new WeakMap<ChildProcess, { start: number; end?: number }>();
+const life = new WeakMap<Proc, { start: number; end?: number }>();
 
 /** Note a process's lifetime; call right after spawning it. */
 export function tracked<P extends ChildProcess>(p: P): P {
@@ -18,6 +24,22 @@ export function tracked<P extends ChildProcess>(p: P): P {
   life.set(p, l);
   p.once('exit', () => (l.end = Date.now()));
   return p;
+}
+
+/**
+ * A process Wren didn't spawn itself but knows the id of, started no earlier than `start`: the agent
+ * browser, which Playwright starts (leading its own process group on macOS) and which reports its own id.
+ */
+export function external(pid: number, start: number): Proc {
+  const p: Proc = { pid };
+  life.set(p, { start });
+  return p;
+}
+
+/** `p` is known to have ended: on Windows, a process its id is given to later isn't its child. */
+export function ended(p: Proc) {
+  const l = life.get(p);
+  if (l && l.end === undefined) l.end = Date.now();
 }
 
 /** Whether any process of the group led by `pid` is still running. */
@@ -86,7 +108,7 @@ export function windowsTree(list: WinProc[], root: number, from: number, to: num
 }
 
 /** What is still running of `p` on Windows (itself included); null if that couldn't be read. */
-async function windowsMembers(p: ChildProcess): Promise<WinProc[] | null> {
+async function windowsMembers(p: Proc): Promise<WinProc[] | null> {
   const l = life.get(p) ?? { start: 0 };
   const list = await windowsProcesses();
   return list && windowsTree(list, p.pid!, l.start, l.end ?? Date.now());
@@ -101,7 +123,7 @@ function taskkill(pids: number[]): Promise<void> {
 }
 
 /** Whether `p` or anything it started may still be running (unknown counts as running). */
-export async function treeAlive(p: ChildProcess): Promise<boolean> {
+export async function treeAlive(p: Proc): Promise<boolean> {
   if (!p.pid) return false;
   if (process.platform !== 'win32') return groupAlive(p.pid);
   const members = await windowsMembers(p);
@@ -113,7 +135,7 @@ export async function treeAlive(p: ChildProcess): Promise<boolean> {
  * Windows taskkill, repeated until nothing is left. Resolves true once nothing is left, false if
  * that couldn't be confirmed within `waitMs`.
  */
-export async function killTree(p: ChildProcess, graceMs = 3000, waitMs = 5000): Promise<boolean> {
+export async function killTree(p: Proc, graceMs = 3000, waitMs = 5000): Promise<boolean> {
   const pid = p.pid;
   if (!pid) return true; // never started
   if (process.platform === 'win32') {
@@ -123,7 +145,7 @@ export async function killTree(p: ChildProcess, graceMs = 3000, waitMs = 5000): 
       if (members && members.length === 0) return true;
       if (Date.now() >= end) return false;
       if (members) await taskkill(members.map((m) => m.pid));
-      else p.kill();
+      else p.kill?.();
       await sleep(250);
     }
   }

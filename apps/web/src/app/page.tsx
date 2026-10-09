@@ -1,5 +1,4 @@
 import Image from 'next/image';
-import Link from 'next/link';
 import { cx } from '@/lib/cx';
 import { ArrowRight, Check, Cloud, KeyRound, Laptop, ListChecks, Lock, MonitorSmartphone, Repeat, ShieldCheck, Smartphone, Terminal, Globe, FileText } from 'lucide-react';
 import { GithubMark as Github } from '@/components/brand';
@@ -46,9 +45,9 @@ function Hero() {
             Wren gives you a team of persistent AI agents with their own computers. They research, code, browse and handle files — in the cloud or on your own Mac or PC — while you watch live, approve what matters from your phone, and get the results.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Link href="/signup" className="inline-flex h-12 items-center gap-2 rounded-xl bg-primary px-6 text-[15px] font-medium text-primary-fg shadow-sm hover:opacity-90">
+            <a href="/signup" className="inline-flex h-12 items-center gap-2 rounded-xl bg-primary px-6 text-[15px] font-medium text-primary-fg shadow-sm hover:opacity-90">
               Start free <ArrowRight className="h-4 w-4" />
-            </Link>
+            </a>
             <DownloadButtons compact />
           </div>
           <p className="mt-4 text-[13px] text-faint">Use your ChatGPT, Claude or Grok plan on your computer — or bring an API key.</p>
@@ -328,9 +327,9 @@ function FinalCta() {
       <h2 className="font-display text-[40px] leading-tight tracking-tight sm:text-[52px]">Give your first agent a job.</h2>
       <p className="mx-auto mt-4 max-w-xl text-[16px] text-muted">Free to start. Works in your browser and on your phone; add the desktop app when you want agents on your own computer.</p>
       <div className="mt-8 flex flex-wrap justify-center gap-3">
-        <Link href="/signup" className="inline-flex h-12 items-center gap-2 rounded-xl bg-primary px-6 text-[15px] font-medium text-primary-fg shadow-sm hover:opacity-90">
+        <a href="/signup" className="inline-flex h-12 items-center gap-2 rounded-xl bg-primary px-6 text-[15px] font-medium text-primary-fg shadow-sm hover:opacity-90">
           Create your account <ArrowRight className="h-4 w-4" />
-        </Link>
+        </a>
         <DownloadButtons compact />
       </div>
     </section>
