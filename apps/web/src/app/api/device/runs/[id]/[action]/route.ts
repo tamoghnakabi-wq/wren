@@ -62,6 +62,7 @@ export const POST = route<Ctx>(async (req, ctx) => {
         update public.runs set lease_id = ${leaseId}, lease_until = now() + make_interval(secs => ${LEASE_SECONDS}),
           status = case when status = 'queued' then 'running' else status end, started_at = coalesce(started_at, now())
         where id = ${runId} and status in ('queued', 'running') and (lease_until is null or lease_until < now() or lease_id = ${lease ?? leaseId})
+          and exists (select 1 from public.devices where id = ${device.id} and revoked_at is null) -- not once unlinked (W-147)
         returning *`;
       if (!claimed.length) return json({ claimed: false });
       await sql`update public.sessions set status = 'running' where id = ${run.session_id}`;

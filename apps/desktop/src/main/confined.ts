@@ -207,7 +207,7 @@ export async function listConfined(root: string, depth: number, roots: string[],
     const script =
       'root=$1; depth=$2; limit=$3; shift 3; for p in "$@"; do set -- "$@" -o -path "$p"; shift; done; ' +
       '/usr/bin/find -P "$root" -mindepth 1 -maxdepth "$depth" \\( -name node_modules -o -name .git "$@" \\) -prune -o -print0 | /usr/bin/xargs -0 /usr/bin/stat -f "%HT|%z|%N" | /usr/bin/head -n "$limit"';
-    const prune = privateRoots(dataDir).filter((r) => !/[*?[\\]/.test(r)); // literal paths only (-path takes a pattern)
+    const prune = privateRoots(dataDir).map((r) => r.replace(/[[\]*?\\]/g, '\\$&')); // -path takes a pattern: matched literally
     const out = (await helper(['/bin/sh', '-c', script, 'sh', root, String(depth), String(limit), ...prune], roots, dataDir, null, 4 * 1024 * 1024)).toString('utf8');
     const kind = (t: string) => (t === 'Directory' ? 'd' : t === 'Symbolic Link' ? 'l' : 'f');
     return out

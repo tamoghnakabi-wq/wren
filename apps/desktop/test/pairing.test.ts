@@ -71,6 +71,31 @@ describe('linking this computer', () => {
     expect(pairing.confirming).toBe(false);
   });
 
+  it('gives the token back when saving it here fails, or when linking was called off (Unlink)', async () => {
+    const failing = setup({
+      save: () => {
+        throw new Error('keychain unavailable');
+      },
+    });
+    await failing.pairing.start();
+    await tick();
+    failing.answers[0](approved('tok'));
+    for (let i = 0; i < 4; i++) await tick();
+    expect(failing.log.at(-1)).toBe('revoke tok');
+
+    let release!: (ok: boolean) => void;
+    const { log, answers, pairing } = setup({ confirm: () => new Promise((r) => (release = r)) });
+    await pairing.start();
+    await tick();
+    answers[0](approved('tok2'));
+    await tick();
+    pairing.cancel();
+    release(true);
+    for (let i = 0; i < 4; i++) await tick();
+    expect(log).toContain('revoke tok2');
+    expect(log).not.toContain('save tok2');
+  });
+
   it('stops polling an attempt once a newer one started', async () => {
     const { log, answers, pairing } = setup();
     await pairing.start();

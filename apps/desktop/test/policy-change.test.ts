@@ -23,6 +23,13 @@ describe("changing this computer's permissions from the page", () => {
     expect(next.screen).toBe(true);
   });
 
+  it('asks before Wren starts at login, too', async () => {
+    const asked: string[][] = [];
+    const { next } = await changedPolicy({ launchAtLogin: true }, async (what) => (asked.push(what), false));
+    expect(asked).toEqual([['Start when you log in to this computer']]);
+    expect(next.launchAtLogin).toBe(false);
+  });
+
   it('turns permissions off without asking', async () => {
     const { before, next } = await changedPolicy({ browser: false }, async () => {
       throw new Error('asked');

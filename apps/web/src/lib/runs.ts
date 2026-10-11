@@ -83,6 +83,11 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
 
   // Session (if new), run, first message and session state are created together.
   const created = await taskTx(async (tx) => {
+    if (deviceId) {
+      // Unlinking takes this row's lock first, so a run is never created for a computer being unlinked (W-147).
+      const [linked] = await tx`select id from public.devices where id = ${deviceId} and revoked_at is null for share`;
+      if (!linked) throw new HttpError(400, 'That computer was unlinked. Link it again in the desktop app, or choose another.', 'no_device');
+    }
     let sessionId = i.sessionId;
     if (sessionId) {
       const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${i.userId} for no key update`;
@@ -215,7 +220,11 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
  */
 export type FinishResult = 'ended' | 'resumed' | 'paused' | 'lease_lost' | 'missing';
 
-export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string, opts: { idle?: boolean } = {}): Promise<FinishResult> {
+/**
+ * `idle`: finish only a run nothing is executing (Stop). `orphaned`: finish a run whose computer was unlinked,
+ * whoever holds its lease (only that computer could, and it can't report any more, W-147).
+ */
+export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: string, opts: { idle?: boolean; orphaned?: boolean } = {}): Promise<FinishResult> {
   const sql = db();
   const [ref] = await sql`select session_id from public.runs where id = ${runId}`;
   if (!ref) return 'missing';
@@ -225,12 +234,18 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       from public.runs r join public.agents a on a.id = r.agent_id join public.sessions s on s.id = r.session_id where r.id = ${runId} for no key update of r`;
     if (!run) return 'missing' as const;
     if (leaseId && run.lease_id !== leaseId) return 'lease_lost' as const; // another worker owns the run now
-    if (opts.idle) {
+    if (opts.idle || opts.orphaned) {
       // Finishing a run nothing was executing (Stop): as it is now, under the lock, not as it was
       // when that was decided. A worker that claimed it meanwhile sees the request and ends it itself;
       // one that finished it meanwhile has said how it ended (W-115).
       if (!(ACTIVE as readonly string[]).includes(run.status)) return 'ended' as const;
-      if (run.leased) return 'lease_lost' as const;
+      if (opts.idle && run.leased) return 'lease_lost' as const;
+    }
+    if (opts.orphaned) {
+      const [unlinked] = await tx`select id from public.devices where id = ${run.device_id} and revoked_at is not null`;
+      if (run.runtime !== 'desktop' || !unlinked) return 'lease_lost' as const;
+      await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
+        values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${tx.json({ text: 'The computer this task was using was unlinked, so the task stopped.', level: 'warn' } satisfies StatusData as unknown as Json)})`;
     }
     let o = outcome;
     // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.

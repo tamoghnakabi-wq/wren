@@ -102,6 +102,23 @@ describe.skipIf(process.platform === 'win32')('closing the agent browser', () =>
     expect(alive(helper)).toBe(false);
   }, 20_000);
 
+  it('keeps track of a browser identified only after the wait, and after it closed (W-143)', async () => {
+    const { helper, proc } = await standInBrowser();
+    const context = Object.assign(new EventEmitter(), { close: async () => {} });
+    context.emit('close');
+    await adoptContext(
+      context as never,
+      {} as never,
+      () => new Promise((r) => setTimeout(() => r(proc), 300)), // slower than the 50 ms wait below
+      50,
+    );
+    context.emit('close'); // closed before its process was known
+    await new Promise((r) => setTimeout(r, 400));
+    expect(alive(helper)).toBe(true);
+    expect(await closeBrowser()).toBe(true);
+    expect(alive(helper)).toBe(false);
+  }, 20_000);
+
   it('stays unconfirmed (and known) when the browser\'s process is unknown and it won\'t close in time', async () => {
     let close: () => Promise<void> = () => new Promise(() => {}); // hangs
     adoptBrowser({ controller: {} as never, close: () => close(), proc: null });

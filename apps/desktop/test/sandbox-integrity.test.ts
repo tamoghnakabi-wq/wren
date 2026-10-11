@@ -83,6 +83,18 @@ describe("Wren's data folder", () => {
     expect(readFileSync(join(data, 'policy.json'), 'utf8')).toBe('{"shell":false}');
   });
 
+  it('leaves out a data folder whose name has pattern characters, and nothing it would match as a pattern', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'wren-home-')));
+    const data = join(home, 'd[1]*');
+    mkdirSync(data);
+    writeFileSync(join(data, 'policy.json'), '{}');
+    mkdirSync(join(home, 'd1x')); // what `d[1]*` matches as a pattern: the user's own folder
+    writeFileSync(join(home, 'd1x', 'notes.txt'), 'mine');
+    const listed = (await listConfined(home, 2, [home], data)).map((l) => l.split(' ').slice(2).join(' '));
+    expect(listed).toContain(join(home, 'd1x', 'notes.txt'));
+    expect(listed.some((p) => p.startsWith(data))).toBe(false);
+  });
+
   it("doesn't let Wren's own folders use up a listing's limit", async () => {
     const parent = join(appDirs()[0], '..'); // src, which holds this app's main folder (src/main here)
     const data = mkdtempSync(join(tmpdir(), 'wren-d-'));

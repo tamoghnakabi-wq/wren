@@ -3,12 +3,13 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { deviceJson, publicJson, revokeToken } from './api';
+import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
 import { closeBrowser, stopAllJobs } from './host';
 import { createPairing, type PairAnswer, type PairStart } from './pairing';
+import { giveBack, retryGiveBacks } from './revoke';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
 import { approveScriptPath } from '../engines/claude-code';
@@ -512,7 +513,7 @@ const pairing = createPairing({
     runner.start();
     pushStatus();
   },
-  revoke: (token) => revokeToken(token),
+  revoke: async (token) => void (await giveBack(token)), // retried later if the server can't be reached
 });
 
 // ------------------------------------------------------------------ IPC
@@ -560,10 +561,16 @@ function registerIpc() {
     if (ok.response !== 1) return;
     runner.abortAll();
     runner.stop();
+    pairing.cancel();
+    // Its token stops working on the server too (which ends its tasks there); recorded before it's
+    // forgotten here, so a failure is retried rather than lost (W-148).
     const d = loadDevice();
+    const confirmed = d ? giveBack(d.token, d.appUrl) : Promise.resolve(true);
     saveDevice(null);
     pushStatus();
-    if (d) await revokeToken(d.token, d.appUrl); // its token stops working too, not just forgotten here
+    if (!(await confirmed) && Notification.isSupported()) {
+      new Notification({ title: 'Unlinked on this computer', body: 'Wren couldn’t reach its server to cancel this computer’s sign-in yet. It will keep trying; you can also remove the computer in Settings on the web.' }).show();
+    }
   });
   handle('getPolicy', () => loadPolicy());
   handle('setPolicy', async (p) => {
@@ -679,6 +686,9 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
     setTimeout(() => app.exit(0), 1500);
     return;
   }
+  // Device tokens given back while the server couldn't be reached: retried now and every 10 minutes (W-148).
+  void retryGiveBacks().catch(() => {});
+  setInterval(() => void retryGiveBacks().catch(() => {}), 10 * 60_000).unref();
   // Engine runs keep files in the data folder (Grok's hook plugin, Claude Code's approval files) and remove
   // them when they end; a crash can leave some behind (W-137). No run has started yet, so none are in use.
   for (const d of ['engines', 'approvals']) {

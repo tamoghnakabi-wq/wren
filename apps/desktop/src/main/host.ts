@@ -328,8 +328,11 @@ export function adoptBrowser<T extends AgentBrowser>(ctl: T): T {
   return ctl;
 }
 
-/** Make a launched browser the agent browser, then learn its process (`identify`). */
-export async function adoptContext(context: Pick<BrowserContext, 'on' | 'close'>, controller: BrowserController, identify: () => Promise<Proc | null>): Promise<AgentBrowser> {
+/**
+ * Make a launched browser the agent browser, then learn its process (`identify`), waiting for that at most
+ * `waitMs`. Whenever it is learnt, even later, and even after the browser closed, it is tracked (W-143).
+ */
+export async function adoptContext(context: Pick<BrowserContext, 'on' | 'close'>, controller: BrowserController, identify: () => Promise<Proc | null>, waitMs = 20_000): Promise<AgentBrowser> {
   const ctl = adoptBrowser<AgentBrowser>({ controller, close: () => context.close(), proc: null });
   let closed = false;
   context.on('close', () => {
@@ -338,9 +341,15 @@ export async function adoptContext(context: Pick<BrowserContext, 'on' | 'close'>
     // Playwright saw it close; anything of it still running is stopped by the next closeBrowser.
     if (ctl.proc) keepUntilGone(ctl.proc);
   });
-  ctl.proc = await identify();
-  // It closed while being identified: what of it may still run is tracked all the same (W-143).
-  if (closed && ctl.proc) keepUntilGone(ctl.proc);
+  const found = identify().catch(() => null);
+  void found.then((proc) => {
+    if (!proc) return;
+    ctl.proc = proc;
+    if (closed) keepUntilGone(proc);
+  });
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([found, new Promise((r) => (timer = setTimeout(r, waitMs)))]);
+  clearTimeout(timer);
   return ctl;
 }
 
@@ -400,21 +409,10 @@ function keepUntilGone(p: Proc) {
 }
 
 /**
- * The agent browser's own process, as the browser itself reports it (W-138), within 20 s (a browser that
- * doesn't answer leaves it unknown). Playwright starts it detached, so on macOS it leads its own process
- * group (and session) with every helper it starts.
+ * The agent browser's own process, as the browser itself reports it (W-138). Playwright starts it
+ * detached, so on macOS it leads its own process group (and session) with every helper it starts.
  */
 export async function browserProcess(context: BrowserContext, start: number): Promise<Proc | null> {
-  let timer: NodeJS.Timeout | undefined;
-  const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), 20_000)));
-  try {
-    return await Promise.race([reportedProcess(context, start), late]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function reportedProcess(context: BrowserContext, start: number): Promise<Proc | null> {
   try {
     const browser = context.browser();
     if (!browser) return null;

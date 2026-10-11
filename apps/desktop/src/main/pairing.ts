@@ -70,10 +70,19 @@ export function createPairing(deps: PairingDeps) {
     }
     // A newer attempt, or a link made meanwhile, wins over this one.
     if (!ok || g !== gen || deps.linked()) return deps.revoke(d.token).catch(() => {});
-    deps.save(d);
+    try {
+      deps.save(d);
+    } catch {
+      await deps.revoke(d.token).catch(() => {}); // not kept here, so not left working on the server either
+    }
   }
 
   return {
+    /** Stop any attempt under way: what it delivers later is given back (Unlink). */
+    cancel() {
+      gen++;
+      current = null;
+    },
     /** The user is being asked which account to link to. */
     get confirming() {
       return confirming;
@@ -86,7 +95,7 @@ export function createPairing(deps: PairingDeps) {
       if (status !== 200) throw new Error(data.error ?? 'Could not start linking.');
       const me = { pairId: data.pairId, pollSecret: data.pollSecret, gen: g };
       current = me;
-      void poll(me, Math.max(1, data.interval ?? 2) * 1000);
+      void poll(me, Math.max(1, data.interval ?? 2) * 1000).catch(() => {});
       return { userCode: data.userCode, pairId: data.pairId };
     },
   };
