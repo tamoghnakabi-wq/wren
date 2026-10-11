@@ -26,6 +26,7 @@ export interface PairingDeps {
   confirm(email: string | undefined): Promise<boolean>;
   /** Already linked (then a delivery is given back). */
   linked(): boolean;
+  /** Store the link; throws only if it wasn't stored (the token is then given back). */
   save(answer: PairAnswer & { token: string }): void;
   /** Give a delivered token back to the server. */
   revoke(token: string): Promise<void>;

@@ -76,7 +76,7 @@ export const POST = route(async (req) => {
     }),
   );
 
-  report.orphaned = await endOrphanedRuns().catch((e: Error) => (report.errors.push(`orphaned: ${e.message}`), 0));
+  report.orphaned = await endOrphanedRuns().catch((e: Error & { ended?: number }) => (report.errors.push(`orphaned: ${e.message}`), e.ended ?? 0));
 
   await sql`delete from public.device_pairings where expires_at < now() - interval '1 day'`;
   await sql`select public.wren_mfa_cleanup()`;

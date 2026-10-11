@@ -509,9 +509,15 @@ const pairing = createPairing({
   confirm: confirmLink,
   linked: () => !!loadDevice(),
   save: (d) => {
+    // Throws only if it couldn't be stored (then the token is given back). Once stored, it is linked:
+    // starting work can't undo that (W-153).
     saveDevice({ deviceId: d.deviceId!, token: d.token, channel: d.channel!, account: d.account, supabase: d.supabase!, appUrl: APP_URL });
-    runner.start();
-    pushStatus();
+    try {
+      runner.start();
+      pushStatus();
+    } catch (e) {
+      console.error('[wren] starting after linking failed', e);
+    }
   },
   revoke: async (token) => void (await giveBack(token)), // retried later if the server can't be reached
 });
@@ -565,11 +571,16 @@ function registerIpc() {
     // Its token stops working on the server too (which ends its tasks there); recorded before it's
     // forgotten here, so a failure is retried rather than lost (W-148).
     const d = loadDevice();
-    const confirmed = d ? giveBack(d.token, d.appUrl) : Promise.resolve(true);
+    const back = d ? giveBack(d.token, d.appUrl) : Promise.resolve('confirmed' as const);
     saveDevice(null);
     pushStatus();
-    if (!(await confirmed) && Notification.isSupported()) {
-      new Notification({ title: 'Unlinked on this computer', body: 'Wren couldn’t reach its server to cancel this computer’s sign-in yet. It will keep trying; you can also remove the computer in Settings on the web.' }).show();
+    const result = await back;
+    if (result !== 'confirmed' && Notification.isSupported()) {
+      const body =
+        result === 'pending'
+          ? 'Wren couldn’t reach its server to cancel this computer’s sign-in yet. It will keep trying; you can also remove the computer in Settings on the web.'
+          : 'Wren couldn’t cancel this computer’s sign-in. Remove the computer in Settings on the web.';
+      new Notification({ title: 'Unlinked on this computer', body }).show();
     }
   });
   handle('getPolicy', () => loadPolicy());

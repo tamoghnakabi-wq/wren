@@ -8,7 +8,7 @@ import { body, json, route, uuid } from '@/lib/http';
 import { callMcp, mcpNamespace, mcpToolSpecs, type McpToolInfo } from '@/lib/mcp';
 import { connectionSecret } from '@/lib/models';
 import { assertPlatformAllowed, operatorGatewayToken } from '@/lib/platform-credits';
-import { decideApproval, finishRun } from '@/lib/runs';
+import { decideApproval, finishRun, taskTx } from '@/lib/runs';
 import { DbRunStore } from '@/lib/runner/store';
 
 // Everything a desktop device needs to execute a run it owns. The device runs
@@ -58,14 +58,22 @@ export const POST = route<Ctx>(async (req, ctx) => {
   switch (p.action) {
     case 'claim': {
       const leaseId = randomUUID();
-      const claimed = await sql`
-        update public.runs set lease_id = ${leaseId}, lease_until = now() + make_interval(secs => ${LEASE_SECONDS}),
-          status = case when status = 'queued' then 'running' else status end, started_at = coalesce(started_at, now())
-        where id = ${runId} and status in ('queued', 'running') and (lease_until is null or lease_until < now() or lease_id = ${lease ?? leaseId})
-          and exists (select 1 from public.devices where id = ${device.id} and revoked_at is null) -- not once unlinked (W-147)
-        returning *`;
+      // One transaction, the session locked first as finishRun does: an unlinked device can't claim (its
+      // row is share-locked, so an unlink waits or wins, W-147), and an unlink that ends the run can't be
+      // followed by this claim marking the session running again (W-152).
+      const claimed = await taskTx(async (tx) => {
+        await tx`select id from public.sessions where id = ${run.session_id} for no key update`;
+        const [linked] = await tx`select id from public.devices where id = ${device.id} and revoked_at is null for share`;
+        if (!linked) return [];
+        const rows = await tx`
+          update public.runs set lease_id = ${leaseId}, lease_until = now() + make_interval(secs => ${LEASE_SECONDS}),
+            status = case when status = 'queued' then 'running' else status end, started_at = coalesce(started_at, now())
+          where id = ${runId} and status in ('queued', 'running') and (lease_until is null or lease_until < now() or lease_id = ${lease ?? leaseId})
+          returning *`;
+        if (rows.length) await tx`update public.sessions set status = 'running' where id = ${run.session_id}`;
+        return rows;
+      });
       if (!claimed.length) return json({ claimed: false });
-      await sql`update public.sessions set status = 'running' where id = ${run.session_id}`;
       const [agent] = await sql`select id, name, instructions, model, tools, autonomy, memory_enabled from public.agents where id = ${run.agent_id}`;
       const tools = { ...DEFAULT_TOOLS, ...(agent.tools as Partial<AgentTools>) };
       const mcpTools = [];

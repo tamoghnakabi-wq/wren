@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { env } from './env';
 
 // AES-256-GCM for stored provider credentials. The owning user id is bound as
@@ -30,6 +30,8 @@ export function decryptSecret(blob: string, userId: string): string {
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export const randomToken = (bytes = 32) => randomBytes(bytes).toString('base64url');
+/** A token derived from server-side key material and `input` (which must include a secret only its holder knows). */
+export const keyedToken = (input: string) => createHmac('sha256', key()).update(input).digest('base64url');
 
 export function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);

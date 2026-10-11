@@ -38,6 +38,13 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   // session row, so two follow-ups sent at once can't each start a run, and a reply can't miss
   // a run that is switching to "waiting" (finishRun takes the run's lock and re-checks).
   if (i.sessionId) {
+    // A task whose computer was unlinked ends first, so this message starts a new run instead of joining
+    // one nothing can run (W-147).
+    const [orphan] = await sql`
+      select r.id from public.runs r join public.devices d on d.id = r.device_id
+      where r.session_id = ${i.sessionId} and r.user_id = ${i.userId} and r.runtime = 'desktop'
+        and r.status in ('queued', 'running', 'waiting', 'paused') and d.revoked_at is not null`;
+    if (orphan) await finishRun(orphan.id, { kind: 'cancelled', steps: 0 }, undefined, { orphaned: true });
     const cont = await continueActiveRun(i.sessionId, i.userId, userMessage);
     if (cont) {
       if (cont.kick) await kickRun(cont.runId);
@@ -178,7 +185,7 @@ function bypassHeader(): Record<string, string> {
  * each other. A deadlock or serialization abort, which the database resolves by cancelling one
  * side, is retried.
  */
-async function taskTx<T>(fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
+export async function taskTx<T>(fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
       return (await db().begin(fn)) as T;

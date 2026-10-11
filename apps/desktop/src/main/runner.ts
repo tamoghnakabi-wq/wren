@@ -23,7 +23,7 @@ import { deviceJson } from './api';
 import { engineImages, withSkipped } from '../engines/images';
 import { detect, type Capabilities } from './capabilities';
 import * as chatgpt from './chatgpt';
-import { loadDevice, loadPolicy, type Policy } from './config';
+import { loadDevice, loadPolicy, saveDevice, type Policy } from './config';
 import { pendingAsks } from './asks';
 import { closeRunTab, killRunJobs, LocalHost } from './host';
 import { allowedRoots, isConfined } from './paths';
@@ -113,6 +113,17 @@ export class DeviceRunner {
   }
 
   /**
+   * The server says this computer was removed (from the web): its tasks stop here too, not just its
+   * polling, and the dead sign-in is dropped so it can be linked again (W-149).
+   */
+  private removed() {
+    this.stop();
+    this.abortAll();
+    saveDevice(null);
+    if (Notification.isSupported()) new Notification({ title: 'Wren', body: 'This computer was removed from your Wren account, so its tasks stopped. Link it again to use it.' }).show();
+  }
+
+  /**
    * Stop taking work and stop every run, resolving once all of them have finished (their
    * outcomes reported) or false if that takes longer than `timeoutMs`. resume() undoes it.
    */
@@ -138,6 +149,7 @@ export class DeviceRunner {
       return;
     }
     this.ticking = true;
+    const signIn = loadDevice()?.token;
     try {
       const policy = loadPolicy();
       const caps = await detect(policy);
@@ -162,9 +174,8 @@ export class DeviceRunner {
     } catch (e) {
       this.state.lastError = (e as Error).message;
       log(`heartbeat failed: ${(e as Error).message}`);
-      if ((e as { code?: string }).code === 'device_revoked') {
-        this.stop();
-      }
+      // Only for the sign-in this request used: a link made meanwhile is left alone.
+      if ((e as { code?: string }).code === 'device_revoked' && signIn && loadDevice()?.token === signIn) this.removed();
     } finally {
       this.ticking = false;
       this.onChange();
@@ -195,7 +206,7 @@ export class DeviceRunner {
         store
           .control()
           .then((ctl) => ctl.cancel && abort.abort())
-          .catch((e: { status?: number }) => e?.status === 409 && abort.abort());
+          .catch((e: { status?: number; code?: string }) => (e?.status === 409 || e?.code === 'device_revoked') && abort.abort());
       }, 45_000);
       store.localOnlyApprovals = () => !loadPolicy().remoteApprovals;
       store.onApproval = (id, req) => this.approvalPrompt(id, req, c, abort.signal);
