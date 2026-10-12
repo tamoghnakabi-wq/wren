@@ -44,8 +44,8 @@ export async function runTick(runId: string): Promise<string> {
 
   const [agent] = await sql`select * from public.agents where id = ${run.agent_id}`;
   const [profile] = await sql`select email from public.profiles where id = ${run.user_id}`;
-  if (!agent) {
-    await finishRun(runId, { kind: 'failed', error: 'The agent was deleted.', steps: run.step }, lease);
+  if (!agent || agent.archived_at) {
+    await finishRun(runId, { kind: 'failed', error: 'The agent was removed.', steps: run.step }, lease);
     return 'failed';
   }
   // The agent's computers are being stopped (another run just ended): wait for that to finish

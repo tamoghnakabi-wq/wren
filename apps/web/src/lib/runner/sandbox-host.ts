@@ -1,3 +1,4 @@
+import { cleanUp } from '../cleanup';
 import { Sandbox } from '@vercel/sandbox';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
@@ -132,16 +133,12 @@ export class SandboxHost implements ToolHost {
     });
   }
 
-  /** Delete an agent's computers and their snapshots (agent or account deletion). */
+  /**
+   * Delete an agent's computers and their snapshots (agent or account deletion). One that can't be
+   * deleted now is kept and retried by the cron (W-157); one that never existed is fine.
+   */
   static async deleteComputers(agentId: string) {
-    for (const name of [SandboxHost.sandboxName(agentId), SandboxHost.browserName(agentId)]) {
-      try {
-        const sb = await Sandbox.get({ name, resume: false });
-        await sb.delete();
-      } catch {
-        /* never created */
-      }
-    }
+    for (const name of [SandboxHost.sandboxName(agentId), SandboxHost.browserName(agentId)]) await cleanUp('sandbox', name);
   }
 
   /**

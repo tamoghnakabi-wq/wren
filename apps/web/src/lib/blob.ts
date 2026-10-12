@@ -1,4 +1,5 @@
-import { del, get, put } from '@vercel/blob';
+import { cleanUp } from './cleanup';
+import { get, put } from '@vercel/blob';
 import { randomUUID } from 'node:crypto';
 import { HttpError } from './auth';
 import { db } from './db';
@@ -55,8 +56,9 @@ export async function readArtifactBytes(blobPath: string): Promise<Buffer | null
   return Buffer.from(await new Response(r.stream).arrayBuffer());
 }
 
+/** Delete a stored file; if that fails now, the cron retries it (W-157). */
 export async function deleteArtifactBlob(blobPath: string) {
-  await del(blobPath).catch(() => {});
+  await cleanUp('blob', blobPath);
 }
 
 export function guessMime(name: string): string {

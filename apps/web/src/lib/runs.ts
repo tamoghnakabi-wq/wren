@@ -84,6 +84,10 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
 
   // Session (if new), run, first message and session state are created together.
   const created = await taskTx(async (tx) => {
+    // Removing the agent takes this row's lock first, so a task is never created for an agent being
+    // removed, and one created first is seen (and cancelled) by the removal (W-158).
+    const [live] = await tx`select id from public.agents where id = ${agent.id} and archived_at is null for share`;
+    if (!live) throw new HttpError(404, 'Agent not found.', 'not_found');
     if (deviceId) {
       // Unlinking takes this row's lock first, so a run is never created for a computer being unlinked (W-147).
       const [linked] = await tx`select id from public.devices where id = ${deviceId} and revoked_at is null for share`;
@@ -140,11 +144,17 @@ async function continueActiveRun(sessionId: string, userId: string, message: Rec
   return taskTx(async (tx) => {
     const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${userId} for no key update`;
     if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
-    const [active] = await tx`select r.id, r.status, (r.runtime = 'desktop' and d.revoked_at is not null) as orphaned
+    const [active] = await tx`select r.id, r.status, r.runtime, r.device_id, (r.runtime = 'desktop' and d.revoked_at is not null) as orphaned
       from public.runs r left join public.devices d on d.id = r.device_id
       where r.session_id = ${sessionId} and r.status in ('queued', 'running', 'waiting', 'paused') order by r.created_at desc limit 1 for no key update of r`;
     if (!active) return null;
     if (active.orphaned) return { orphan: active.id as string };
+    if (active.device_id) {
+      // Held until this message is in, so an unlink waits for it (and then ends the run with it) rather
+      // than landing between the check above and the insert (W-147).
+      const [stillLinked] = await tx`select id from public.devices where id = ${active.device_id} and revoked_at is null for share`;
+      if (!stillLinked && active.runtime === 'desktop') return { orphan: active.id as string };
+    }
     await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
       values (${userId}, ${sessionId}, ${active.id}, 'message', 'done', ${tx.json(message as unknown as Json)})`;
     await tx`update public.sessions set last_event_at = now() where id = ${sessionId}`;

@@ -32,6 +32,8 @@ export const DELETE = route<Ctx>(async (req, ctx) => {
   const user = await requireUser(req);
   const id = uuid.parse((await ctx.params).id);
   const sql = db();
+  // Takes the agent's row lock: a task being created for it either commits first (and is cancelled
+  // below) or sees it removed (W-158).
   const [a] = await sql`update public.agents set archived_at = now() where id = ${id} and user_id = ${user.id} returning id`;
   if (!a) notFound('Agent not found.');
   await sql`update public.runs set cancel_requested = true where agent_id = ${id} and status in ('queued', 'running', 'waiting', 'paused')`;

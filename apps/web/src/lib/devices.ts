@@ -5,13 +5,20 @@ import { finishRun, taskTx } from './runs';
  * Unlink a device (removed in Settings, or the desktop giving its token back): the token stops working at
  * once, and the device's unfinished tasks end as cancelled, since nothing is left to end them (W-147).
  */
-export async function revokeDevice(deviceId: string): Promise<void> {
+export async function revokeDevice(deviceId: string, opts: { onlyIfUnclaimed?: boolean } = {}): Promise<boolean> {
   // Together, so a retry never finds it half done (the token would no longer let the device retry).
-  await taskTx(async (tx) => {
-    await tx`update public.devices set revoked_at = coalesce(revoked_at, now()) where id = ${deviceId}`;
+  // `onlyIfUnclaimed` re-checks, in the same statement, that it still never checked in (W-154).
+  const revoked = await taskTx(async (tx) => {
+    const rows = opts.onlyIfUnclaimed
+      ? await tx`update public.devices set revoked_at = now()
+          where id = ${deviceId} and revoked_at is null and last_seen_at = created_at and created_at < now() - interval '30 minutes' returning id`
+      : await tx`update public.devices set revoked_at = coalesce(revoked_at, now()) where id = ${deviceId} returning id`;
+    if (!rows.length) return false;
     await tx`delete from public.device_secrets where device_id = ${deviceId}`;
+    return true;
   });
-  await endOrphanedRuns(deviceId);
+  if (revoked) await endOrphanedRuns(deviceId);
+  return revoked;
 }
 
 /**
@@ -25,8 +32,12 @@ export async function revokeUnclaimedDevices(): Promise<number> {
     select id from public.devices
     where revoked_at is null and last_seen_at = created_at and created_at < now() - interval '30 minutes'
     order by created_at limit 20`;
-  for (const d of rows) await revokeDevice(d.id);
-  return rows.length;
+  let revoked = 0;
+  for (const d of rows) {
+    // It may have checked in since it was picked: then it stays linked.
+    if (await revokeDevice(d.id, { onlyIfUnclaimed: true }).catch(() => false)) revoked++;
+  }
+  return revoked;
 }
 
 /**

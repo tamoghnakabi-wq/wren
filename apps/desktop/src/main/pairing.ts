@@ -57,12 +57,13 @@ export function createPairing(deps: PairingDeps) {
       await sleep(every);
       if (current !== me) return;
       const r = await deps.poll(me.pairId, me.pollSecret).catch(() => null);
-      if (r?.data.status === 'approved' && r.data.token) {
+      const answer = r?.data && typeof r.data === 'object' ? r.data : null; // a body of `null` is no answer
+      if (answer?.status === 'approved' && answer.token) {
         if (current === me) current = null;
-        return finish(me.gen, { ...r.data, token: r.data.token });
+        return finish(me.gen, { ...answer, token: answer.token });
       }
       if (r?.status === 410) break;
-      if (r?.data.status !== 'pending') until = Math.min(last, Math.max(until, now() + REDELIVER_MS));
+      if (answer?.status !== 'pending') until = Math.min(last, Math.max(until, now() + REDELIVER_MS));
     }
     if (current === me) current = null;
   }

@@ -4,6 +4,7 @@ import { db } from '@/lib/db';
 import { env } from '@/lib/env';
 import { json, route } from '@/lib/http';
 import { notifyUser } from '@/lib/notify';
+import { runCleanups } from '@/lib/cleanup';
 import { endOrphanedRuns, revokeUnclaimedDevices } from '@/lib/devices';
 import { cleanUpCloudRun, kickRun, kickTick, startTask } from '@/lib/runs';
 import { nextRunAfter } from '@/lib/schedules';
@@ -15,6 +16,7 @@ import { nextRunAfter } from '@/lib/schedules';
 //  4. finish cleaning up ended cloud runs whose commands weren't confirmed stopped
 //  5. end the tasks of computers that were unlinked (W-147), and unlink computers that never checked in
 //     with the sign-in they were handed (W-151)
+//  6. retry deletions of cloud computers and stored files that didn't go through (W-157)
 export const maxDuration = 60;
 
 function authorized(req: Request) {
@@ -25,7 +27,7 @@ function authorized(req: Request) {
 export const POST = route(async (req) => {
   if (!authorized(req)) throw new HttpError(401, 'Forbidden', 'forbidden');
   const sql = db();
-  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, errors: [] as string[] };
+  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, errors: [] as string[] };
 
   const stale = await sql`
     select id from public.runs
@@ -77,6 +79,7 @@ export const POST = route(async (req) => {
     }),
   );
 
+  report.deleted = await runCleanups().catch((e: Error) => (report.errors.push(`deleted: ${e.message}`), 0));
   report.unclaimed = await revokeUnclaimedDevices().catch((e: Error) => (report.errors.push(`unclaimed: ${e.message}`), 0));
   report.orphaned = await endOrphanedRuns().catch((e: Error & { ended?: number }) => (report.errors.push(`orphaned: ${e.message}`), e.ended ?? 0));
 

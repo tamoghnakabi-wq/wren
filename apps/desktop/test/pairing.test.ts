@@ -96,17 +96,17 @@ describe('linking this computer', () => {
     expect(log).not.toContain('save tok2');
   });
 
-  it('keeps asking after an answer lost near the end, while the server can still hand it out again (W-151)', async () => {
+  it('keeps asking after an answer lost at the very end, while the server can still hand it out again (W-151)', async () => {
     let clock = 0;
     const replies: ({ status: number; data: PairAnswer } | null)[] = [
-      { status: 200, data: { status: 'pending' } }, // minute 7
-      null, // minute 14: approved and handed out, but the answer was lost (a timeout)
-      null, // minute 21: still nothing back
-      approved('tok'), // minute 28: the same link again
+      ...Array.from({ length: 14 }, () => ({ status: 200, data: { status: 'pending' } })), // minutes 1–14
+      null, // minute 15: approved and handed out on this request, but the answer was lost (a timeout)
+      { status: 200, data: null as unknown as PairAnswer }, // minute 16: a body of `null`: no answer either
+      approved('tok'), // minute 17: the same link again (the server re-delivers for 10 minutes)
     ];
     const { log, pairing } = setup({
       sleep: async () => {
-        clock += 7 * 60_000;
+        clock += 60_000;
         await tick();
       },
       now: () => clock,

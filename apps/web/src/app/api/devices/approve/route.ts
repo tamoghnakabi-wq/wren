@@ -16,7 +16,8 @@ export const POST = route(async (req) => {
   if (p.approved_at) return json({ error: 'That code was already used.' }, 409);
   if (!b.approve) {
     // Only while it's still unapproved: an approval that got there first isn't undone by a stale "no".
-    await sql`update public.device_pairings set expires_at = now() where id = ${p.id} and approved_at is null`;
+    const declined = await sql`update public.device_pairings set expires_at = now() where id = ${p.id} and approved_at is null returning id`;
+    if (!declined.length) return json({ error: 'That code was already used.' }, 409);
     return json({ ok: true, approved: false });
   }
   const claimed = await sql`update public.device_pairings set user_id = ${user.id}, approved_at = now() where id = ${p.id} and approved_at is null and expires_at > now() returning id`;
