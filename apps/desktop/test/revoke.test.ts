@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -60,13 +60,24 @@ describe('giving a device token back', () => {
     expect(await retryGiveBacks()).toBe(0);
   });
 
-  it("says when it couldn't even be recorded, and never overwrites a record it can't read", async () => {
+  it("says when it couldn't even be recorded, and never overwrites a record it can't read now", async () => {
     vi.stubGlobal('fetch', answer(503, {}));
-    encryption = false;
+    writeFileSync(file, JSON.stringify([{ token: 'tok-old', appUrl: 'https://wren.example' }]));
+    encryption = false; // the keychain is unavailable for now
     expect(await giveBack('tok-4')).toBe('failed');
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual([{ token: 'tok-old', appUrl: 'https://wren.example' }]);
     encryption = true;
-    writeFileSync(file, 'not readable as a list'); // e.g. written by another keychain
-    expect(await giveBack('tok-5')).toBe('failed');
-    expect(readFileSync(file, 'utf8')).toBe('not readable as a list');
+    expect(await retryGiveBacks()).toBe(1); // readable again: still there
+  });
+
+  it("moves aside a record secure storage can't read (a reset keychain), instead of blocking every later give-back", async () => {
+    vi.stubGlobal('fetch', answer(503, {}));
+    writeFileSync(file, 'not readable as a list');
+    expect(await giveBack('tok-5')).toBe('pending');
+    const aside = readdirSync(process.env.WREN_DATA_DIR!).filter((f) => f.startsWith('revoke-pending.unreadable-'));
+    expect(aside).toHaveLength(1);
+    expect(readFileSync(join(process.env.WREN_DATA_DIR!, aside[0]), 'utf8')).toBe('not readable as a list');
+    vi.stubGlobal('fetch', answer(200, { ok: true }));
+    expect(await retryGiveBacks()).toBe(0);
   });
 });

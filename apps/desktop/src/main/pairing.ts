@@ -31,19 +31,29 @@ export interface PairingDeps {
   /** Give a delivered token back to the server. */
   revoke(token: string): Promise<void>;
   sleep?(ms: number): Promise<void>;
+  now?(): number;
 }
+
+/** How long the server hands a lost answer out again (`REDELIVER_MS` in the pair/poll route). */
+export const REDELIVER_MS = 10 * 60_000;
 
 export function createPairing(deps: PairingDeps) {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = deps.now ?? Date.now;
   /** The attempt under way; a newer one supersedes it (by generation). */
   let current: { pairId: string; pollSecret: string; gen: number } | null = null;
   let gen = 0;
   let confirming = false;
 
-  /** One poll at a time: the server hands the token out once, so no other answer may overtake it. */
+  /**
+   * One poll at a time, so no answer overtakes another. Asks for 15 minutes (the code's lifetime); after a
+   * poll that got no answer it keeps asking up to `REDELIVER_MS` longer, since the server may have handed
+   * the link out on that request and hands a lost answer out again for that long (W-151).
+   */
   async function poll(me: NonNullable<typeof current>, every: number) {
-    const until = Date.now() + 15 * 60_000;
-    while (current === me && Date.now() < until) {
+    let until = now() + 15 * 60_000;
+    const last = until + REDELIVER_MS;
+    while (current === me && now() < until) {
       await sleep(every);
       if (current !== me) return;
       const r = await deps.poll(me.pairId, me.pollSecret).catch(() => null);
@@ -52,6 +62,7 @@ export function createPairing(deps: PairingDeps) {
         return finish(me.gen, { ...r.data, token: r.data.token });
       }
       if (r?.status === 410) break;
+      if (r?.data.status !== 'pending') until = Math.min(last, Math.max(until, now() + REDELIVER_MS));
     }
     if (current === me) current = null;
   }

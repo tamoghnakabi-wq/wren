@@ -38,14 +38,7 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   // session row, so two follow-ups sent at once can't each start a run, and a reply can't miss
   // a run that is switching to "waiting" (finishRun takes the run's lock and re-checks).
   if (i.sessionId) {
-    // A task whose computer was unlinked ends first, so this message starts a new run instead of joining
-    // one nothing can run (W-147).
-    const [orphan] = await sql`
-      select r.id from public.runs r join public.devices d on d.id = r.device_id
-      where r.session_id = ${i.sessionId} and r.user_id = ${i.userId} and r.runtime = 'desktop'
-        and r.status in ('queued', 'running', 'waiting', 'paused') and d.revoked_at is not null`;
-    if (orphan) await finishRun(orphan.id, { kind: 'cancelled', steps: 0 }, undefined, { orphaned: true });
-    const cont = await continueActiveRun(i.sessionId, i.userId, userMessage);
+    const cont = await continueOrRestart(i.sessionId, i.userId, userMessage);
     if (cont) {
       if (cont.kick) await kickRun(cont.runId);
       return { sessionId: i.sessionId, runId: cont.runId, continued: true };
@@ -68,6 +61,7 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
     const rows = wanted
       ? await sql`select id, name, platform, policy from public.devices where id = ${wanted} and user_id = ${i.userId} and revoked_at is null`
       : await sql`select id, name, platform, policy from public.devices where user_id = ${i.userId} and revoked_at is null order by last_seen_at desc nulls last limit 1`;
+    if (!rows.length && wanted) throw new HttpError(400, 'The computer this agent uses isn’t linked any more. Choose another computer in the agent’s settings, or link it again from the desktop app.', 'no_device');
     if (!rows.length) throw new HttpError(400, 'This agent runs on your computer, but no desktop app is linked. Install Wren for Mac or Windows and link it.', 'no_device');
     device = rows[0] as typeof device;
     deviceId = device!.id;
@@ -118,7 +112,7 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
     return { sessionId: sessionId!, runId: run.id as string };
   });
   if (!created.runId) {
-    const cont = await continueActiveRun(created.sessionId, i.userId, userMessage);
+    const cont = await continueOrRestart(created.sessionId, i.userId, userMessage);
     if (!cont) throw new HttpError(409, 'The task changed while sending; try again.', 'conflict');
     if (cont.kick) await kickRun(cont.runId);
     return { sessionId: created.sessionId, runId: cont.runId, continued: true };
@@ -127,13 +121,30 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   return { sessionId: created.sessionId, runId: created.runId, continued: false };
 }
 
+/**
+ * Continue the session's active run; but a desktop run whose computer was unlinked is ended first, so
+ * this message starts a new run instead of joining one nothing can run (W-147). Decided under the session's
+ * lock, together with adding the message.
+ */
+async function continueOrRestart(sessionId: string, userId: string, message: Record<string, unknown>): Promise<{ runId: string; kick: boolean } | null> {
+  for (let i = 0; i < 3; i++) {
+    const cont = await continueActiveRun(sessionId, userId, message);
+    if (!cont || !('orphan' in cont)) return cont;
+    await finishRun(cont.orphan, { kind: 'cancelled', steps: 0 }, undefined, { orphaned: true });
+  }
+  throw new HttpError(409, 'The task changed while sending; try again.', 'conflict');
+}
+
 /** Add a user message to the session's active run, resuming it if it was paused or waiting for this answer. */
-async function continueActiveRun(sessionId: string, userId: string, message: Record<string, unknown>): Promise<{ runId: string; kick: boolean } | null> {
+async function continueActiveRun(sessionId: string, userId: string, message: Record<string, unknown>): Promise<{ runId: string; kick: boolean } | { orphan: string } | null> {
   return taskTx(async (tx) => {
     const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${userId} for no key update`;
     if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
-    const [active] = await tx`select id, status from public.runs where session_id = ${sessionId} and status in ('queued', 'running', 'waiting', 'paused') order by created_at desc limit 1 for no key update`;
+    const [active] = await tx`select r.id, r.status, (r.runtime = 'desktop' and d.revoked_at is not null) as orphaned
+      from public.runs r left join public.devices d on d.id = r.device_id
+      where r.session_id = ${sessionId} and r.status in ('queued', 'running', 'waiting', 'paused') order by r.created_at desc limit 1 for no key update of r`;
     if (!active) return null;
+    if (active.orphaned) return { orphan: active.id as string };
     await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
       values (${userId}, ${sessionId}, ${active.id}, 'message', 'done', ${tx.json(message as unknown as Json)})`;
     await tx`update public.sessions set last_event_at = now() where id = ${sessionId}`;

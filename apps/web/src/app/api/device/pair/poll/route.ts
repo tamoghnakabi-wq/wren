@@ -13,7 +13,7 @@ const REDELIVER_MS = 10 * 60_000;
 // minutes; nobody else can. Delivery runs under the pairing's row lock, so two polls make one device.
 export const POST = route(async (req) => {
   const b = await body(req, z.object({ pairId: z.string().uuid(), pollSecret: z.string().min(20).max(100) }));
-  const token = keyedToken(`device-token:${b.pairId}:${b.pollSecret}`);
+  const token = keyedToken(`device-token:${b.pairId.toLowerCase()}:${b.pollSecret}`); // the id as the database spells it
   const out = await db().begin(async (tx) => {
     const [p] = await tx`select * from public.device_pairings where id = ${b.pairId} and poll_secret_hash = ${sha256(b.pollSecret)} for update`;
     if (!p) return null;

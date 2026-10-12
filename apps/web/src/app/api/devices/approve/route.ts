@@ -15,7 +15,8 @@ export const POST = route(async (req) => {
   if (!p || new Date(p.expires_at) < new Date()) return json({ error: 'That code is invalid or expired. Start linking again from the desktop app.' }, 404);
   if (p.approved_at) return json({ error: 'That code was already used.' }, 409);
   if (!b.approve) {
-    await sql`update public.device_pairings set expires_at = now() where id = ${p.id}`;
+    // Only while it's still unapproved: an approval that got there first isn't undone by a stale "no".
+    await sql`update public.device_pairings set expires_at = now() where id = ${p.id} and approved_at is null`;
     return json({ ok: true, approved: false });
   }
   const claimed = await sql`update public.device_pairings set user_id = ${user.id}, approved_at = now() where id = ${p.id} and approved_at is null and expires_at > now() returning id`;

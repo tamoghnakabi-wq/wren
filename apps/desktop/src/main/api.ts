@@ -19,7 +19,7 @@ export async function deviceFetch(path: string, init: RequestInit & { lease?: st
   headers.set('authorization', `Device ${d.token}`);
   if (init.lease) headers.set('x-wren-lease', init.lease);
   if (init.body && !(init.body instanceof FormData) && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  return fetch(`${d.appUrl ?? APP_URL}${path}`, { ...init, headers });
+  return fetch(`${d.appUrl ?? APP_URL}${path}`, { redirect: 'error', ...init, headers }); // Wren's API never redirects
 }
 
 export async function deviceJson<T>(path: string, body?: unknown, opts: { lease?: string; method?: string; signal?: AbortSignal } = {}): Promise<T> {

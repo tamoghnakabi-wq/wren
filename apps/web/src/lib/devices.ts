@@ -15,6 +15,21 @@ export async function revokeDevice(deviceId: string): Promise<void> {
 }
 
 /**
+ * Unlink computers that were handed a sign-in but never checked in with it within 30 minutes: their
+ * answer was lost on the way, or they gave it back but couldn't reach Wren to say so (W-151, W-148).
+ * A linked computer checks in right after saving it (its first heartbeat moves last_seen_at past the
+ * creation time both were set to).
+ */
+export async function revokeUnclaimedDevices(): Promise<number> {
+  const rows = await db()`
+    select id from public.devices
+    where revoked_at is null and last_seen_at = created_at and created_at < now() - interval '30 minutes'
+    order by created_at limit 20`;
+  for (const d of rows) await revokeDevice(d.id);
+  return rows.length;
+}
+
+/**
  * End (cancelled) the unfinished tasks of unlinked computers: they can't report any more. Runs after each
  * unlink, and every minute from the cron for anything that slipped past (an unlink that failed half-way,
  * a claim already under way). Returns how many it ended.

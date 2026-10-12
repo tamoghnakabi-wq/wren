@@ -1,4 +1,5 @@
-import { existsSync, statSync } from 'node:fs';
+import { safeStorage } from 'electron';
+import { existsSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { APP_URL, dataDir, readSecret, writeSecret } from './config';
 
@@ -12,12 +13,26 @@ interface Pending {
 }
 const FILE = 'revoke-pending.bin';
 
-/** The tokens still waiting; null if the record exists but can't be read (it is then never overwritten). */
+const valid = (x: unknown): x is Pending => !!x && typeof (x as Pending).token === 'string' && typeof (x as Pending).appUrl === 'string';
+
+/**
+ * The tokens still waiting. Null when they can't be read right now (secure storage unavailable, or the
+ * file can't be checked): the record is then left as it is. A record secure storage can't decrypt (the
+ * keychain was reset) or that isn't a list is moved aside, not deleted, so it doesn't block every later
+ * give-back.
+ */
 function load(): Pending[] | null {
-  const list = readSecret<unknown>(FILE);
-  if (Array.isArray(list)) return list as Pending[];
-  const p = join(dataDir(), FILE);
-  return existsSync(p) && statSync(p).size > 0 ? null : [];
+  try {
+    const p = join(dataDir(), FILE);
+    if (!existsSync(p) || statSync(p).size === 0) return [];
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const list = readSecret<unknown>(FILE);
+    if (Array.isArray(list) && list.every(valid)) return list;
+    renameSync(p, join(dataDir(), `revoke-pending.unreadable-${Date.now()}.bin`));
+    return [];
+  } catch {
+    return null;
+  }
 }
 
 function save(list: Pending[]): boolean {

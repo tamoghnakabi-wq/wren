@@ -120,7 +120,7 @@ export class DeviceRunner {
     this.stop();
     this.abortAll();
     saveDevice(null);
-    if (Notification.isSupported()) new Notification({ title: 'Wren', body: 'This computer was removed from your Wren account, so its tasks stopped. Link it again to use it.' }).show();
+    if (Notification.isSupported()) new Notification({ title: 'Wren', body: 'This computer was removed from your Wren account, so Wren is stopping its tasks here. Link it again to use it.' }).show();
   }
 
   /**
@@ -149,11 +149,12 @@ export class DeviceRunner {
       return;
     }
     this.ticking = true;
-    const signIn = loadDevice()?.token;
+    let signIn: string | undefined;
     try {
       const policy = loadPolicy();
       const caps = await detect(policy);
       this.state.capabilities = caps;
+      signIn = loadDevice()?.token; // the sign-in the request below uses (read with nothing in between)
       const hb = await deviceJson<Heartbeat>('/api/device/heartbeat', {
         appVersion: app.getVersion(),
         capabilities: caps,
@@ -174,8 +175,10 @@ export class DeviceRunner {
     } catch (e) {
       this.state.lastError = (e as Error).message;
       log(`heartbeat failed: ${(e as Error).message}`);
-      // Only for the sign-in this request used: a link made meanwhile is left alone.
-      if ((e as { code?: string }).code === 'device_revoked' && signIn && loadDevice()?.token === signIn) this.removed();
+      // Only Wren's own answer (401 device_revoked), for the sign-in this request used: a link made
+      // meanwhile is left alone.
+      const err = e as { status?: number; code?: string };
+      if (err.status === 401 && err.code === 'device_revoked' && signIn && loadDevice()?.token === signIn) this.removed();
     } finally {
       this.ticking = false;
       this.onChange();
@@ -206,7 +209,7 @@ export class DeviceRunner {
         store
           .control()
           .then((ctl) => ctl.cancel && abort.abort())
-          .catch((e: { status?: number; code?: string }) => (e?.status === 409 || e?.code === 'device_revoked') && abort.abort());
+          .catch((e: { status?: number; code?: string }) => (e?.status === 409 || (e?.status === 401 && e.code === 'device_revoked')) && abort.abort());
       }, 45_000);
       store.localOnlyApprovals = () => !loadPolicy().remoteApprovals;
       store.onApproval = (id, req) => this.approvalPrompt(id, req, c, abort.signal);

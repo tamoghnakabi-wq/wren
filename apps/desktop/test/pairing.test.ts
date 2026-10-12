@@ -96,6 +96,27 @@ describe('linking this computer', () => {
     expect(log).not.toContain('save tok2');
   });
 
+  it('keeps asking after an answer lost near the end, while the server can still hand it out again (W-151)', async () => {
+    let clock = 0;
+    const replies: ({ status: number; data: PairAnswer } | null)[] = [
+      { status: 200, data: { status: 'pending' } }, // minute 7
+      null, // minute 14: approved and handed out, but the answer was lost (a timeout)
+      null, // minute 21: still nothing back
+      approved('tok'), // minute 28: the same link again
+    ];
+    const { log, pairing } = setup({
+      sleep: async () => {
+        clock += 7 * 60_000;
+        await tick();
+      },
+      now: () => clock,
+      poll: async () => replies.shift() ?? null,
+    });
+    await pairing.start();
+    for (let i = 0; i < 20; i++) await tick();
+    expect(log).toEqual(['confirm me@example.com', 'save tok']);
+  });
+
   it('stops polling an attempt once a newer one started', async () => {
     const { log, answers, pairing } = setup();
     await pairing.start();
