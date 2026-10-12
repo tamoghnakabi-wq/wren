@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-11: `main` is in sync with `origin/main`; the last code commit is `9000dcb` (re-audit #16 fixes W-149…W-153), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.23**. Wren credits are switched off for every account (`70afa23`, see Models). The sixteen Codex security audits (W-1…W-153) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-13: `main` is in sync with `origin/main`; the last code commit is `d5b4b32` (re-audit #17: no new findings; the retained parts of W-151 and W-148 closed), live in production (no new migration; the latest is `wren_0013_mfa_send_state`). The desktop app is at **0.1.24**. Wren credits are switched off for every account (`70afa23`, see Models). The seventeen Codex security audits (W-1…W-153) are all fixed; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -28,7 +28,7 @@ apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.23: Electron 44
+apps/desktop      wren-desktop 0.1.24: Electron 44
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
@@ -268,6 +268,7 @@ How each part works:
 | Re-audit #14 (of 0.1.20) | W-143…W-146 | `1a49ef5`, 0.1.21 | See below; no migration (new route `POST /api/device/unlink`) |
 | Re-audit #15 (of 0.1.21) | W-147…W-148 | `46e3e4f`, 0.1.22 | See below; no migration (cron also ends unlinked computers' tasks) |
 | Re-audit #16 (of 0.1.22) | W-149…W-153 | `9000dcb`, 0.1.23 | See below; no migration |
+| Re-audit #17 (of 0.1.23) | none new (W-151, W-148 remainders) | `d5b4b32`, 0.1.24 | See below; no migration (cron also unlinks computers that never checked in) |
 
 Round 17 in brief (desktop 0.1.24; Codex report /private/tmp/wren-re-audit-0.1.23-2026-10-13.md; no new findings, two retained):
 - **W-151 remainder** the desktop stopped polling at 15 minutes even when the server could still re-deliver a lost answer: it keeps asking up to 10 minutes longer after a poll without an answer. Plus the server backstop below.
