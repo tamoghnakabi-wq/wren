@@ -1,3 +1,4 @@
+import { cancelRun } from '@/lib/runs';
 import { requireUser } from '@/lib/auth';
 import { db, type Json } from '@/lib/db';
 import { body, json, notFound, route, uuid } from '@/lib/http';
@@ -36,9 +37,11 @@ export const DELETE = route<Ctx>(async (req, ctx) => {
   // below) or sees it removed (W-158).
   const [a] = await sql`update public.agents set archived_at = now() where id = ${id} and user_id = ${user.id} returning id`;
   if (!a) notFound('Agent not found.');
-  await sql`update public.runs set cancel_requested = true where agent_id = ${id} and status in ('queued', 'running', 'waiting', 'paused')`;
-  await sql`update public.schedules set enabled = false where agent_id = ${id}`;
+  await sql`update public.schedules set enabled = false where agent_id = ${a.id}`;
+  // Its tasks stop like Stop stops them: one nothing is running ends now, one being worked on is told to.
+  const active = await sql`select id from public.runs where agent_id = ${a.id} and status in ('queued', 'running', 'waiting', 'paused')`;
+  for (const r of active) await cancelRun(user.id, r.id).catch(() => {});
   // Remove the agent's cloud computer and browser (and their snapshots).
-  await SandboxHost.deleteComputers(id);
+  await SandboxHost.deleteComputers(a.id);
   return json({ ok: true });
 });

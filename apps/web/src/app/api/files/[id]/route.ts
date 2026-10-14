@@ -32,8 +32,10 @@ export const GET = route<Ctx>(async (req, ctx) => {
 export const DELETE = route<Ctx>(async (req, ctx) => {
   const user = await requireUser(req);
   const id = uuid.parse((await ctx.params).id);
-  const [a] = await db()`delete from public.artifacts where id = ${id} and user_id = ${user.id} returning blob_path`;
+  const [a] = await db()`select blob_path from public.artifacts where id = ${id} and user_id = ${user.id}`;
   if (!a) notFound('File not found.');
+  // Deleted (or kept for the cron to retry) before its record goes, so a failure never loses track of it (W-157).
   await deleteArtifactBlob(a.blob_path);
+  await db()`delete from public.artifacts where id = ${id} and user_id = ${user.id}`;
   return json({ ok: true });
 });

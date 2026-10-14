@@ -65,6 +65,8 @@ export const POST = route<Ctx>(async (req, ctx) => {
         await tx`select id from public.sessions where id = ${run.session_id} for no key update`;
         const [linked] = await tx`select id from public.devices where id = ${device.id} and revoked_at is null for share`;
         if (!linked) return [];
+        const [agentLive] = await tx`select id from public.agents where id = ${run.agent_id} and archived_at is null for share`;
+        if (!agentLive) return []; // removed: its runs are being stopped, not started (W-158)
         const rows = await tx`
           update public.runs set lease_id = ${leaseId}, lease_until = now() + make_interval(secs => ${LEASE_SECONDS}),
             status = case when status = 'queued' then 'running' else status end, started_at = coalesce(started_at, now())

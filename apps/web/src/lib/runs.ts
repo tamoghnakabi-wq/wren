@@ -112,9 +112,11 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
       returning id`;
     await tx`insert into public.events (user_id, session_id, run_id, type, status, data) values (${i.userId}, ${sessionId!}, ${run.id}, 'message', 'done', ${tx.json(msg as unknown as Json)})`;
     await tx`update public.sessions set status = 'queued', runtime = ${runtime}, device_id = ${deviceId}, last_event_at = now() where id = ${sessionId!}`;
-    await tx`update public.agents set last_active_at = now() where id = ${agent.id}`;
     return { sessionId: sessionId!, runId: run.id as string };
   });
+  // After commit: the transaction only share-locks the agent (two tasks for it at once mustn't
+  // deadlock upgrading that lock, W-160).
+  if (created.runId) await sql`update public.agents set last_active_at = now() where id = ${agent.id}`.catch(() => {});
   if (!created.runId) {
     const cont = await continueOrRestart(created.sessionId, i.userId, userMessage);
     if (!cont) throw new HttpError(409, 'The task changed while sending; try again.', 'conflict');
@@ -144,6 +146,8 @@ async function continueActiveRun(sessionId: string, userId: string, message: Rec
   return taskTx(async (tx) => {
     const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${userId} for no key update`;
     if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
+    const [removed] = await tx`select 1 from public.sessions s join public.agents a on a.id = s.agent_id where s.id = ${sessionId} and a.archived_at is not null`;
+    if (removed) throw new HttpError(404, 'Agent not found.', 'not_found'); // removed: its tasks take no more messages (W-158)
     const [active] = await tx`select r.id, r.status, r.runtime, r.device_id, (r.runtime = 'desktop' and d.revoked_at is not null) as orphaned
       from public.runs r left join public.devices d on d.id = r.device_id
       where r.session_id = ${sessionId} and r.status in ('queued', 'running', 'waiting', 'paused') order by r.created_at desc limit 1 for no key update of r`;

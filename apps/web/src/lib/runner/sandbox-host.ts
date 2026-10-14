@@ -1,4 +1,5 @@
 import { cleanUp } from '../cleanup';
+import { db } from '../db';
 import { Sandbox } from '@vercel/sandbox';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
@@ -120,7 +121,23 @@ export class SandboxHost implements ToolHost {
     return `wren-browser-${agentId}`;
   }
 
-  private static vm(name: string, agentId: string, role: string) {
+  /**
+   * Get (or make) one of the agent's computers. Not for a removed agent: checked before, and again after
+   * (a removal that landed meanwhile gets what was just made deleted too), so a tick that started before
+   * the agent was removed can't leave a computer behind (W-158, W-157).
+   */
+  private static async vm(name: string, agentId: string, role: string) {
+    const live = async () => (await db()`select 1 from public.agents where id = ${agentId} and archived_at is null`).length > 0;
+    if (!(await live())) throw new Error('The agent was removed.');
+    const sb = await SandboxHost.getOrCreateVm(name, agentId, role);
+    if (!(await live())) {
+      await cleanUp('sandbox', name);
+      throw new Error('The agent was removed.');
+    }
+    return sb;
+  }
+
+  private static getOrCreateVm(name: string, agentId: string, role: string) {
     return Sandbox.getOrCreate({
       name,
       image: 'vercel/sandbox/universal',

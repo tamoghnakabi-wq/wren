@@ -36,7 +36,10 @@ export async function saveArtifact(a: ArtifactInput): Promise<{ id: string; name
     insert into public.artifacts (id, user_id, agent_id, session_id, run_id, name, mime, size, kind, blob_path, source)
     select ${id}, ${a.userId}, ${a.agentId ?? null}, ${a.sessionId ?? null}, ${a.runId ?? null}, ${name}, ${a.mime}, ${size}, ${a.kind ?? 'file'}, ${path}, ${a.source ?? 'cloud'}
     where ${a.leaseId && a.runId ? sql`exists (select 1 from public.runs where id = ${a.runId}::uuid and lease_id = ${a.leaseId}::uuid for share)` : sql`true`}
-    returning id`;
+    returning id`.catch(async (e: unknown) => {
+    await deleteArtifactBlob(path); // the record failed (e.g. the account is being deleted): nothing stays behind
+    throw e;
+  });
   if (!rows.length) {
     await deleteArtifactBlob(path);
     throw new HttpError(409, 'This worker no longer holds this run.', 'lease_lost');

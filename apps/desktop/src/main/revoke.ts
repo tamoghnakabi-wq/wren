@@ -109,7 +109,13 @@ export async function retryGiveBacks(): Promise<number> {
       if (await revokeToken(p.token, p.appUrl)) drop(name, p.token);
     }
     const now = read(name);
-    if (now && !now.length && name !== MAIN) rmSync(join(dataDir(), name), { force: true });
+    if (now && !now.length && name !== MAIN) {
+      try {
+        rmSync(join(dataDir(), name), { force: true });
+      } catch {
+        /* an emptied record that can't be removed now is just read as empty next time */
+      }
+    }
     left += now?.length ?? 1;
   }
   return left;

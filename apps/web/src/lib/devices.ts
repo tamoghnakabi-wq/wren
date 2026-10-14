@@ -35,7 +35,8 @@ export async function revokeUnclaimedDevices(): Promise<number> {
   let revoked = 0;
   for (const d of rows) {
     // It may have checked in since it was picked: then it stays linked.
-    if (await revokeDevice(d.id, { onlyIfUnclaimed: true }).catch(() => false)) revoked++;
+    const done = await revokeDevice(d.id, { onlyIfUnclaimed: true }).catch((e: Error) => (console.error(`[wren] unclaimed device ${d.id}: ${e.message}`), false));
+    if (done) revoked++;
   }
   return revoked;
 }
