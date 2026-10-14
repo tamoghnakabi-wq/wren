@@ -200,7 +200,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
         if (command[j] === '`') {
           let end = j + 1;
           while (end < n && command[end] !== '`') end += command[end] === '\\' ? 2 : 1;
-          const inner = sub(command.slice(j + 1, end));
+          const inner = sub(unBackquote(command.slice(j + 1, end), true));
           word += '$(…)';
           norm += `\`${inner.normalized}\``;
           dyn = true;
@@ -253,7 +253,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
     if (c === '`') {
       let j = i + 1;
       while (j < n && command[j] !== '`') j += command[j] === '\\' ? 2 : 1;
-      const inner = sub(command.slice(i + 1, j));
+      const inner = sub(unBackquote(command.slice(i + 1, j), false));
       word += '$(…)';
       dyn = true;
       inWord = true;
@@ -326,6 +326,14 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
   }
   endCommand();
   return { commands: [...commands, ...nested], normalized: norm, unsupported };
+}
+
+/**
+ * The command inside `...` as the shell runs it: a backslash before $, ` or \ (and " inside double
+ * quotes) is removed first, so \`touch x\` nested inside is a command too, not text (W-174).
+ */
+function unBackquote(text: string, inDoubleQuotes: boolean): string {
+  return text.replace(inDoubleQuotes ? /\\([$`\\"])/g : /\\([$`\\])/g, '$1');
 }
 
 /** Decodes the escapes of a $'...' string (\\xHH, \\NNN, \\uHHHH, \\n, ...). */
@@ -485,31 +493,40 @@ export function isReadOnlyCommand(command: string, trust?: ProgramTrust): boolea
   return !unsupported && commands.length > 0 && commands.every((c) => commandIsReadOnly(c, trust) && !c.dynamic.some(Boolean));
 }
 
-/** Command-line words, split at blanks and operators whatever the quoting; null marks an operator. */
-function roughWords(text: string): (string | null)[] {
+/**
+ * Command-line words, split at blanks and operators whatever the quoting; null marks an operator. Read
+ * the way a POSIX shell would (quotes, \ and $'...' removed: "r"m, \rm and $'\x72m' are all rm) or the
+ * way PowerShell would, where \ separates folders, ` is the escape and { } enclose script blocks.
+ */
+function roughWords(text: string, shell: 'posix' | 'powershell'): (string | null)[] {
+  const operator = shell === 'posix' ? /[ \t\n;&|()<>`]/ : /[ \t\n;&|()<>{}]/;
   const out: (string | null)[] = [];
   let w = '';
   for (const c of text) {
-    if (/[ \t\n;&|()<>`]/.test(c)) {
+    if (operator.test(c)) {
       if (w) out.push(w);
       w = '';
       if (!/[ \t]/.test(c)) out.push(null);
     } else w += c;
   }
   if (w) out.push(w);
-  // $'...' decoded, then quotes and backslashes dropped: "r"m, \rm and $'\x72m' are all rm.
-  return out.map((x) => x && x.replace(/\$'((?:\\.|[^'])*)'?/g, (_, e: string) => decodeAnsiC(e)).replace(/['"\\]/g, ''));
+  return out.map((x) =>
+    x && (shell === 'posix' ? x.replace(/\$'((?:\\.|[^'])*)'?/g, (_, e: string) => decodeAnsiC(e)).replace(/['"\\]/g, '') : x.replace(/['"`]/g, '').replace(/\\/g, '/')),
+  );
 }
 
 /**
- * The whole system, a top-level folder or a home folder (or everything in one): "/", "/usr/*",
- * "~", "$HOME/.", "~/a/../..", "/Users/me/". Relative paths depend on the working folder: no.
+ * The whole system, a top-level folder or a home folder (or everything in one): "/", "/usr/*", "~",
+ * "$HOME/.", "~/a/../..", "/Users/me/", and on Windows "C:\\", "C:\\Users\\me", "$env:USERPROFILE",
+ * "$env:SystemRoot". Case doesn't matter (Windows ignores it). Relative paths depend on the working folder: no.
  */
 function wholeTree(path: string): boolean {
+  const segs = path.toLowerCase().replace(/\\/g, '/').split('/');
   if (!path) return false;
-  const segs = path.split('/');
-  const home = /^(~[^/]*|\$HOME|\$\{HOME\})$/.test(segs[0]);
-  if (!home && segs[0] !== '') return false;
+  const home = /^(~[^/]*|\$home|\$\{home\}|\$env:userprofile|\$\{env:userprofile\})$/.test(segs[0]);
+  // Some other folder an environment variable names (the Windows folder, Program Files…): treated as a top-level one.
+  const named = !home && /^\$\{?env:/.test(segs[0]);
+  if (!home && !named && segs[0] !== '' && !/^[a-z]:$/.test(segs[0])) return false;
   const parts: string[] = [];
   for (const seg of segs.slice(1)) {
     if (seg === '' || seg === '.') continue;
@@ -518,30 +535,41 @@ function wholeTree(path: string): boolean {
     else parts.pop();
   }
   while (parts.length && /^\.?\*$/.test(parts[parts.length - 1])) parts.pop();
-  if (home) return parts.length === 0;
-  return parts.length <= 1 || (parts.length === 2 && (parts[0] === 'Users' || parts[0] === 'home' || parts.join('/') === 'var/root'));
+  if (home || named) return parts.length === 0;
+  return parts.length <= 1 || (parts.length === 2 && (parts[0] === 'users' || parts[0] === 'home' || parts.join('/') === 'var/root'));
 }
 
+/** rm, and PowerShell's Remove-Item under its names (PowerShell ignores case, so RM is rm too). */
+const REMOVERS = new Set(['rm', 'remove-item', 'ri', 'del', 'erase', 'rd', 'rmdir']);
+
 /**
- * rm told to recurse into the whole system or a home folder, however the options are spelled:
- * `rm -r -f ~`, `rm ~ -rf` (GNU reads options anywhere), `rm --recursive -- /` (W-168). Read from
- * the words of the text, not the parse, so it holds wherever the lexer and the shell disagree.
+ * A recursive delete of the whole system, a top-level folder or a home folder, however its options are
+ * spelled: `rm -r -f ~`, `rm ~ -rf` (GNU reads options anywhere), `rm --recursive -- /` (W-168),
+ * `RM -r ~ -Force` and `Remove-Item -Recurse -Path:C:\\` in PowerShell (W-175). Read from the words of the
+ * text, not the parse, so it holds wherever the lexer and the shell disagree.
  */
 function wipesEverything(text: string): boolean {
-  const words = roughWords(text);
-  for (let i = 0; i < words.length; i++) {
-    if (words[i]?.replace(/^.*\//, '') !== 'rm') continue;
-    let recursive = false;
-    let operands = false;
-    const targets: string[] = [];
-    for (let k = i + 1; k < words.length && words[k] !== null; k++) {
-      const w = words[k]!;
-      if (operands || w === '-' || !w.startsWith('-')) targets.push(w);
-      else if (w === '--') operands = true;
-      else if (w.startsWith('--')) recursive ||= longOpt(w, '--recursive');
-      else recursive ||= /[rR]/.test(w);
+  for (const shell of ['posix', 'powershell'] as const) {
+    const words = roughWords(text, shell);
+    for (let i = 0; i < words.length; i++) {
+      if (!REMOVERS.has((words[i] ?? '').replace(/^.*\//, '').replace(/\.exe$/i, '').toLowerCase())) continue;
+      let recursive = false;
+      let operands = false;
+      const targets: string[] = [];
+      for (let k = i + 1; k < words.length && words[k] !== null; k++) {
+        // PowerShell takes en and em dashes for "-" too.
+        const w = words[k]!.replace(/^[\u2013\u2014\u2015]/, '-');
+        if (operands || w === '-' || !w.startsWith('-')) targets.push(w);
+        else if (w === '--') operands = true;
+        else if (w.startsWith('--')) recursive ||= longOpt(w, '--recursive');
+        else {
+          // -r, -R, -rf, PowerShell's -Recurse (any abbreviation, any case); -Path:C:\ names a target too.
+          recursive ||= /[rR]/.test(w.split(':')[0]);
+          if (w.includes(':')) targets.push(w.slice(w.indexOf(':') + 1));
+        }
+      }
+      if (recursive && targets.some(wholeTree)) return true;
     }
-    if (recursive && targets.some(wholeTree)) return true;
   }
   return false;
 }

@@ -30,8 +30,10 @@ import { allowedRoots, isConfined } from './paths';
 import { ProxyModelClient, RemoteStore } from './remote';
 
 // Executes the user's runs that target this computer. Work arrives as a
-// Realtime "wake" broadcast on this device's private channel (payload carries
-// nothing sensitive) plus a heartbeat every minute as a fallback.
+// Realtime "wake" broadcast on this device's own channel plus a heartbeat every
+// minute as a fallback. The channel is a public broadcast one whose name is a random
+// key only this device and the server know: the wake carries nothing but a reason
+// and a time, and only makes the device ask (signed in) for its work.
 
 interface Claim {
   claimed: boolean;

@@ -24,7 +24,9 @@ export const GET = route<Ctx>(async (req, ctx) => {
       'content-disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(a.name)}`,
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
-      'cache-control': 'private, max-age=3600',
+      // Never kept by the browser: a copy it kept would be shown again without asking Wren whose it is,
+      // after a sign-out or to another account using the same browser (W-176).
+      'cache-control': 'private, no-store',
     },
   });
 });

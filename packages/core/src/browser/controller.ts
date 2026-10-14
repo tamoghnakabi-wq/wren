@@ -295,10 +295,16 @@ const ENGINE = `({
     this.disarm();
     if (!el || this.focused() !== el) return { error: 'focus' };
     // Keys that type text, one at a time, are still typing: never into a credential field.
-    if (this.secret(el) && this.keyParts(key || 'Enter').some((p) => !new RegExp(${JSON.stringify(NO_TEXT_KEY.source)}).test(p))) return { error: 'secret' };
+    const texty = this.keyParts(key || 'Enter').some((p) => !new RegExp(${JSON.stringify(NO_TEXT_KEY.source)}).test(p));
+    if (texty && this.secret(el)) return { error: 'secret' };
     const page = el === document.documentElement;
     const parts = this.keyParts(key || 'Enter');
-    const g = { delivered: false, blocked: false, fixes: 0, downs: 0 };
+    const g = { delivered: false, blocked: false, changed: false, fixes: 0, downs: 0 };
+    // ...and the field must stay what was checked while the keys arrive: a page can make it a password
+    // field (or retitle it) in a handler of the chord's first key, before the one that types (W-173).
+    const before = texty ? this.fieldState(el) : '';
+    const changed = () => texty && (this.secret(el) || this.fieldState(el) !== before);
+    const refuse = (e) => { e.preventDefault(); e.stopImmediatePropagation(); g.changed = true; };
     const mine = (t) => t === el || (page && (t === document.body || t === document.documentElement || t === document));
     // Something moved focus before the key itself arrived (a timer, or a handler of one of the
     // chord's modifiers): put it back (after the mover's script ends).
@@ -318,6 +324,8 @@ const ENGINE = `({
     // press, so a page can't fake "the key arrived".
     const onKey = (e) => {
       if (!e.isTrusted) return;
+      // A keydown or keypress (what inserts the text) into a field that changed: nothing typed.
+      if (e.type !== 'keyup' && (g.changed || changed())) return refuse(e);
       const ok = mine(e.composedPath()[0]);
       if (!g.delivered) {
         if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); g.blocked = true; return; }
@@ -326,12 +334,18 @@ const ENGINE = `({
       }
       if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); }
     };
+    // The last moment before text goes in (a keydown handler of the typing key itself can change the field).
+    const onInput = (e) => {
+      if (e.isTrusted && (g.changed || changed())) refuse(e);
+    };
     const kinds = ['keydown', 'keypress', 'keyup'];
     document.addEventListener('focusin', keep, true); document.addEventListener('focusout', keep, true);
     for (const k of kinds) window.addEventListener(k, onKey, true);
+    window.addEventListener('beforeinput', onInput, true);
     g.off = () => {
       document.removeEventListener('focusin', keep, true); document.removeEventListener('focusout', keep, true);
       for (const k of kinds) window.removeEventListener(k, onKey, true);
+      window.removeEventListener('beforeinput', onInput, true);
     };
     this.guard = g;
     return { ok: true };
@@ -340,7 +354,7 @@ const ENGINE = `({
     const g = this.guard;
     if (!g) return { none: true };
     g.off(); this.guard = null;
-    return { delivered: g.delivered, blocked: g.blocked };
+    return { delivered: g.delivered, blocked: g.blocked, changed: g.changed };
   },
   query(root, sel) {
     const [op, a, b, c] = sel.split(' ');
@@ -505,7 +519,8 @@ export class BrowserController {
       await page.keyboard.press(key);
     } finally {
       // After a navigation the guard went with the old page, which is fine: the key arrived.
-      const r = await this.ask<{ blocked?: boolean; delivered?: boolean; none?: boolean }>(page, 'disarm').catch(() => ({ blocked: false, delivered: undefined, none: true }));
+      const r = await this.ask<{ blocked?: boolean; delivered?: boolean; changed?: boolean; none?: boolean }>(page, 'disarm').catch(() => ({ blocked: false, delivered: undefined, changed: false, none: true }));
+      if (r.changed) return TYPE_ERRORS.changed;
       if (r.blocked) return 'The page moved focus to something else just before the key press, so Wren stopped it. Take a new snapshot and check the page.';
       // The guard never saw the key arrive (the page stopped the events before Wren's check could):
       // don't claim it went where it was meant to.

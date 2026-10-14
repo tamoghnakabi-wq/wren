@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The cron route with every stage mocked: it must answer within its deadline whatever hangs.
 let staleRuns: { id: string }[] = [];
+let hangSql = (_text: string) => false;
 const sqlTag = (strings: TemplateStringsArray) => {
-  const text = strings.join('?').replace(/\s+/g, ' ');
+  const text = strings.join('?').replace(/\s+/g, ' ').trim();
+  if (hangSql(text)) return new Promise(() => {}); // a query that never comes back (a lock, a stuck pool)
   return Promise.resolve(text.includes("runtime = 'cloud' and status in ('queued', 'running')") ? staleRuns : []);
 };
 vi.mock('@/lib/db', () => ({ db: () => Object.assign(sqlTag, { begin: async () => [] }) }));
@@ -33,6 +35,7 @@ const call = () => POST(new Request('http://x/api/internal/cron', { method: 'POS
 
 beforeEach(() => {
   staleRuns = [];
+  hangSql = () => false;
   kick = async () => {};
   for (const k of Object.keys(calls)) delete calls[k];
 });
@@ -46,15 +49,31 @@ describe('cron deadline', () => {
     const res = call();
     await vi.advanceTimersByTimeAsync(45_000);
     const report = await (await res).json();
-    expect(report.skipped).toEqual(['schedules', 'approvals', 'unclaimed', 'orphaned', 'removed', 'cleanup', 'deletions']);
+    expect(report.late).toEqual(['kick']);
+    expect(report.skipped).toEqual(['schedules', 'approvals', 'unclaimed', 'orphaned', 'removed', 'cleanup', 'deletions', 'housekeeping']);
     expect(report.kicked).toBe(1);
     expect(calls.deletions).toBeUndefined();
+  });
+
+  it('answers by its deadline when a database query hangs, starting nothing after it', async () => {
+    vi.useFakeTimers();
+    staleRuns = [{ id: 'r1' }];
+    let kicks = 0;
+    kick = async () => void kicks++;
+    hangSql = (text) => text.startsWith('select id from public.runs');
+    const res = call();
+    await vi.advanceTimersByTimeAsync(45_000);
+    const report = await (await res).json();
+    expect(report.late).toEqual(['kick']);
+    expect(report.skipped).toContain('housekeeping');
+    expect(kicks).toBe(0);
   });
 
   it('runs every stage when there is time, handing each its share of the deadline', async () => {
     const before = Date.now();
     const report = await (await call()).json();
     expect(report.skipped).toEqual([]);
+    expect(report.late).toEqual([]);
     for (const name of ['unclaimed', 'removed']) {
       const until = calls[name][0] as number;
       expect(until, name).toBeGreaterThan(before);

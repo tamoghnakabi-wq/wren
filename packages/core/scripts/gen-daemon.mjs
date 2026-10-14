@@ -12,7 +12,7 @@ const server = `
 import { chromium, selectors } from 'playwright';
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { renameSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, renameSync, rmSync, writeSync } from 'node:fs';
 
 const home = process.env.HOME || '/tmp';
 // Only Wren's own requests are served (W-169). Pages in this browser can send requests to
@@ -20,9 +20,14 @@ const home = process.env.HOME || '/tmp';
 // with another Host (DNS rebinding), and none of it can know this token. A new one is made at
 // every start, in a file only commands Wren runs on this VM read (curl -H @file, so it's never
 // on a command line).
+// The file is made new and exclusively (never an existing file or link left there), then moved into place.
 const token = randomBytes(32).toString('hex');
-writeFileSync(home + '/.wren/browser.token.tmp', 'x-wren-token: ' + token + '\\n', { mode: 0o600 });
-renameSync(home + '/.wren/browser.token.tmp', home + '/.wren/browser.token');
+const tokenTmp = home + '/.wren/browser.token.tmp';
+rmSync(tokenTmp, { force: true });
+const tokenFd = openSync(tokenTmp, 'wx', 0o600);
+writeSync(tokenFd, 'x-wren-token: ' + token + '\\n');
+closeSync(tokenFd);
+renameSync(tokenTmp, home + '/.wren/browser.token');
 const expected = Buffer.from(token);
 await registerSelectors(selectors);
 const context = await chromium.launchPersistentContext(home + '/.wren/profile', {

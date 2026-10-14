@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -47,6 +47,34 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('trusted files in the sand
     expect(sb(command, `cat ${join(plugin, 'hooks', 'hooks.json')}`).stdout).toBe('');
     expect(sb(command, `echo '{}' > ${join(plugin, 'hooks', 'hooks.json')}`).status).not.toBe(0);
     expect(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).toBe('hook');
+  });
+});
+
+describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('the engine sign-in script Terminal runs (W-172)', () => {
+  it('is out of agents\' reach, where the temp folder (its old place) is not', async () => {
+    const { engineLoginScript } = await import('../src/main/login');
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'wren-login-')));
+    const project = join(root, 'project');
+    const data = join(root, 'data');
+    mkdirSync(project, { recursive: true });
+    const { file, dir } = engineLoginScript(data, 'claude-code');
+    expect(dir.startsWith(join(data, 'login') + '/')).toBe(true);
+    expect(statSync(file).mode & 0o777).toBe(0o700);
+    expect(readFileSync(file, 'utf8')).toMatch(/\nclaude\n$/);
+    const command = seatbeltProfile([project], data);
+    for (const evil of [`echo 'touch pwned' >> '${file}'`, `mv '${dir}' '${dir}.x'`, `ln -sf /tmp/x '${file}'`]) {
+      expect(sb(command, evil).status, evil).not.toBe(0);
+    }
+    sb(command, `rm -rf '${dir}'`); // rm -f says nothing about what it may not even look at
+    expect(existsSync(file)).toBe(true);
+    expect(sb(command, `cat '${file}'`).stdout).toBe(''); // not even readable
+    expect(readFileSync(file, 'utf8')).toMatch(/\nclaude\n$/);
+    // A second script gets its own new folder.
+    expect(engineLoginScript(data, 'claude-code').dir).not.toBe(dir);
+    // Agents can write the temp folder, which is why the script no longer goes there.
+    const temp = join(realpathSync(tmpdir()), `wren-claude-code-login-${process.pid}.command`);
+    expect(sb(command, `echo x > '${temp}'`).status).toBe(0);
+    rmSync(temp, { force: true });
   });
 });
 

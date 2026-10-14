@@ -65,7 +65,10 @@ export async function sendPush(n: NotifyInput): Promise<number> {
   return sent;
 }
 
-/** Wake a desktop device so it fetches new work immediately (payload is not sensitive). */
+/**
+ * Wake a desktop device so it fetches new work immediately. A public broadcast channel named by a random
+ * key only the device and the server know (not a private, RLS-checked one): send nothing on it but this.
+ */
 export async function nudgeDevice(deviceId: string, reason: string): Promise<void> {
   const sql = db();
   const rows = await sql`select channel_key from public.device_secrets where device_id = ${deviceId}`;

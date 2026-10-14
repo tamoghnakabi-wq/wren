@@ -5,7 +5,7 @@ import { finishRun, taskTx } from './runs';
  * Unlink a device (removed in Settings, or the desktop giving its token back): the token stops working at
  * once, and the device's unfinished tasks end as cancelled, since nothing is left to end them (W-147).
  */
-export async function revokeDevice(deviceId: string, opts: { onlyIfUnclaimed?: boolean } = {}): Promise<boolean> {
+export async function revokeDevice(deviceId: string, opts: { onlyIfUnclaimed?: boolean; until?: number } = {}): Promise<boolean> {
   // Together, so a retry never finds it half done (the token would no longer let the device retry).
   // `onlyIfUnclaimed` re-checks, in the same statement, that it still never checked in (W-154).
   const revoked = await taskTx(async (tx) => {
@@ -17,7 +17,7 @@ export async function revokeDevice(deviceId: string, opts: { onlyIfUnclaimed?: b
     await tx`delete from public.device_secrets where device_id = ${deviceId}`;
     return true;
   });
-  if (revoked) await endOrphanedRuns(deviceId);
+  if (revoked) await endOrphanedRuns(deviceId, opts.until); // the cron's deadline, when it's the cron
   return revoked;
 }
 
@@ -36,7 +36,7 @@ export async function revokeUnclaimedDevices(until = Infinity): Promise<number> 
   for (const d of rows) {
     if (Date.now() > until) break; // the cron's time is up: the rest next minute
     // It may have checked in since it was picked: then it stays linked.
-    const done = await revokeDevice(d.id, { onlyIfUnclaimed: true }).catch((e: Error) => (console.error(`[wren] unclaimed device ${d.id}: ${e.message}`), false));
+    const done = await revokeDevice(d.id, { onlyIfUnclaimed: true, until }).catch((e: Error) => (console.error(`[wren] unclaimed device ${d.id}: ${e.message}`), false));
     if (done) revoked++;
   }
   return revoked;

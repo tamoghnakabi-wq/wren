@@ -132,6 +132,9 @@ export async function fetchReadable(url: string, o: FetchOptions = {}): Promise<
         },
       });
       if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+        // A redirect's own body is never read: let it go now rather than at the time limit.
+        await res.body?.cancel().catch(() => {});
+        if (hop === 5) throw new Error(`Too many redirects (last one to ${new URL(res.headers.get('location')!, current)}).`);
         current = new URL(res.headers.get('location')!, current).toString();
         continue;
       }

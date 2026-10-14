@@ -8,6 +8,7 @@ import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
 import { closeBrowser, stopAllJobs } from './host';
+import { engineLoginScript } from './login';
 import { createPairing, type PairAnswer, type PairStart } from './pairing';
 import { giveBack, retryGiveBacks } from './revoke';
 import { DeviceRunner, setApproveScript } from './runner';
@@ -652,9 +653,10 @@ function registerIpc() {
 function openEngineLogin(engine: 'claude-code' | 'grok-build') {
   const cmd = engine === 'claude-code' ? 'claude' : 'grok login';
   if (process.platform === 'darwin') {
-    const f = join(app.getPath('temp'), `wren-${engine}-login.command`);
-    writeFileSync(f, `#!/bin/bash\necho "Signing in to ${engine === 'claude-code' ? 'Claude Code (type /login if asked)' : 'Grok Build'}…"\n${cmd}\n`, { mode: 0o755 });
-    void shell.openPath(f);
+    // In Wren's data folder, out of agents' reach (W-172); removed after a while, and at the next start.
+    const { file, dir } = engineLoginScript(dataDir(), engine);
+    void shell.openPath(file);
+    setTimeout(() => rmSync(dir, { recursive: true, force: true }), 10 * 60_000).unref();
   } else if (process.platform === 'win32') {
     spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', cmd], { detached: true, stdio: 'ignore' }).unref();
   }
@@ -700,19 +702,22 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   // Device tokens given back while the server couldn't be reached: retried now and every 10 minutes (W-148).
   void retryGiveBacks().catch(() => {});
   setInterval(() => void retryGiveBacks().catch(() => {}), 10 * 60_000).unref();
-  // Engine runs keep files in the data folder (Grok's hook plugin, Claude Code's approval files) and remove
-  // them when they end; a crash can leave some behind (W-137). No run has started yet, so none are in use.
-  for (const d of ['engines', 'approvals']) {
+  // Engine runs keep files in the data folder (Grok's hook plugin, Claude Code's approval files, engine
+  // sign-in scripts) and remove them when they end; a crash can leave some behind (W-137). None is in use yet.
+  for (const d of ['engines', 'approvals', 'login']) {
     try {
       rmSync(join(dataDir(), d), { recursive: true, force: true });
     } catch {
       /* never in the way of starting */
     }
   }
-  session.fromPartition('persist:wren').setPermissionRequestHandler((wc, permission, cb) => {
-    const ok = permission === 'notifications' || permission === 'clipboard-sanitized-write';
-    cb(ok && new URL(wc.getURL()).origin === APP_ORIGIN);
-  });
+  // Only Wren's own page, in its own frame, gets anything: notifications and writing to the clipboard.
+  // Electron asks the check handler for what a page only queries, so both answer the same way.
+  const allowed = (permission: string, ...urls: (string | undefined)[]) =>
+    (permission === 'notifications' || permission === 'clipboard-sanitized-write') && urls.every((u) => !!u && URL.canParse(u) && new URL(u).origin === APP_ORIGIN);
+  const wren = session.fromPartition('persist:wren');
+  wren.setPermissionRequestHandler((wc, permission, cb, details) => cb(allowed(permission, wc.getURL(), details.requestingUrl)));
+  wren.setPermissionCheckHandler((wc, permission, origin) => allowed(permission, wc?.getURL(), origin));
   registerIpc();
   createWindow();
   tray = new Tray(trayIcon());

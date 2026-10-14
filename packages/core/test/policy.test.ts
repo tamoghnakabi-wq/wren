@@ -181,6 +181,13 @@ describe('shell risk', () => {
     }
     for (const c of ['rm -r ./build', 'rm -rf ~/project/tmp', 'rm -f ~/.cache/x.log', 'rm ~/notes.txt', 'rm -r ""', 'rm -r /tmp/x', 'ls -r ~']) expect(desk(c).blocked, c).toBeFalsy();
   });
+  it("blocks PowerShell's recursive deletes of the system or a home folder, in any case (W-175)", () => {
+    const win = (c: string) => assessCall('computer.shell', { command: c }, 'desktop', { unsandboxed: true });
+    for (const c of ['RM -r ~ -Force', 'Remove-Item -Recurse -Force $HOME', 'remove-item ~ -rec', 'ri -R $env:USERPROFILE', 'del -r C:\\Users\\me', 'rd -Recurse C:\\', 'Remove-Item -Path:C:\\Windows -Recurse', 'RM \u2013r ~', '& { rm -r ~ }', 'rmdir -recurse ${env:USERPROFILE}\\', 'Remove-Item -Recurse $env:SystemRoot']) {
+      expect(win(c).blocked, c).toBeTruthy();
+    }
+    for (const c of ['Remove-Item -Recurse .\\build', 'rm -r C:\\Users\\me\\project\\tmp', 'Remove-Item ~\\notes.txt', 'Get-ChildItem ~ -Recurse']) expect(win(c).blocked, c).toBeFalsy();
+  });
 });
 
 describe('shell syntax the lexer does not follow (W-166)', () => {
@@ -201,6 +208,15 @@ describe('shell syntax the lexer does not follow (W-166)', () => {
     expect(isReadOnlyCommand('cat <<< hello')).toBe(true);
     // Inside a substitution too.
     expect(parseShell('echo "$(cat <<EOF\nx\nEOF\n)"').unsupported).toBe(true);
+  });
+  it('sees commands nested in backquotes with escaped backquotes (W-174)', () => {
+    // Bash, zsh and sh all run the inner touch (checked with echo).
+    for (const c of ['/bin/echo `/bin/echo \\`/usr/bin/touch ./marker\\``', '/bin/echo "`/bin/echo \\`/usr/bin/touch ./marker\\``"', 'echo `echo \\$(touch ./marker)`', 'echo "`echo \\"$(touch ./marker)\\"`"']) {
+      expect(parseShell(c).commands.some((k) => k.words[0]?.endsWith('touch')), c).toBe(true);
+      expect(desk(c).risk, c).not.toBe('low');
+    }
+    // An escaped backquote that stays escaped is text (\\\` -> \`).
+    expect(parseShell('echo `echo \\\\\\`x\\\\\\``').commands.map((k) => k.words[0])).toEqual(['echo', 'echo']);
   });
 });
 

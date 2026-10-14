@@ -419,7 +419,7 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
-  it('W-165: a key press never types into a credential field, one key at a time', async () => {
+  it('W-165/W-173: a key press never types into a credential field, one key at a time or by changing the field mid-press', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });
     try {
@@ -445,6 +445,23 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
       }
       expect((await press('#fine', 'a')).ok).toBe(true);
       expect(await page.locator('#fine').inputValue()).toBe('a');
+
+      // W-173: the page turns the same field into a credential field while the keys arrive.
+      await page.setContent(`
+        <input id=onshift aria-label="Name"><input id=onkey aria-label="Name"><input id=relabel aria-label="Name"><input id=plain aria-label="Name">
+        <script>
+          onshift.addEventListener('keydown', (e) => { if (e.key === 'Shift') onshift.type = 'password'; });
+          onkey.addEventListener('keydown', (e) => { if (e.key === 'A') onkey.type = 'password'; });
+          relabel.addEventListener('keydown', (e) => { if (e.key === 'Shift') relabel.setAttribute('aria-label', 'Password'); });
+        </script>`);
+      for (const sel of ['#onshift', '#onkey', '#relabel']) {
+        const r = await press(sel, 'Shift+A');
+        expect(r.ok, sel).toBe(false);
+        expect(r.error, sel).toMatch(/field changed/);
+        expect(await page.locator(sel).inputValue(), sel).toBe('');
+      }
+      expect((await press('#plain', 'Shift+A')).ok).toBe(true);
+      expect(await page.locator('#plain').inputValue()).toBe('A');
     } finally {
       await browser.close();
     }
