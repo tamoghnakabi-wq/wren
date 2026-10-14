@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-14: `main` is in sync with `origin/main`; the last code commit is `5c699aa` (re-audit #19 fixes W-160…W-162), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.26**. Wren credits are switched off for every account (`70afa23`, see Models). The nineteen Codex security audits (W-1…W-162) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-14: `main` is in sync with `origin/main`; the last code commit is `1445752` (re-audit #20 fixes W-163…W-164, web only), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.26**. Wren credits are switched off for every account (`70afa23`, see Models). The twenty Codex security audits (W-1…W-164) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -272,6 +272,7 @@ How each part works:
 | Re-audit #17 (of 0.1.23) | none new (W-151, W-148 remainders) | `d5b4b32`, 0.1.24 | See below; no migration (cron also unlinks computers that never checked in) |
 | Re-audit #18 (of 0.1.24) | W-154…W-159 | `a3e8d7a`, 0.1.25 | See below; migration 0012 (`wren_0014_external_cleanups`); W-156 documented |
 | Re-audit #19 (of 0.1.25) | W-160…W-162 | `5c699aa`, 0.1.26 | See below; no migration |
+| Re-audit #20 (of 0.1.26) | W-163…W-164 | `1445752`, web only | See below; no migration |
 
 Round 20 in brief (web only, desktop stays 0.1.26; Codex report /private/tmp/wren-re-audit-0.1.26-2026-10-14.md):
 - **W-163** (Medium) removing an agent cancelled its tasks one by one and ignored failures, with no backstop: all its tasks are marked to stop in one statement first, computers are deleted before the per-task work, errors are logged, and the cron ends removed agents' leftover tasks (tested locally: a removal cut short after archiving is finished by the cron, a held task once its lease lapses).
