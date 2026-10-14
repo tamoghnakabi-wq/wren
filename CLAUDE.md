@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-15: `main` has one local commit over `origin/main`, the re-audit #21 fixes (W-165…W-171, desktop **0.1.27**), not yet pushed or released; production still runs `1445752` and desktop 0.1.26 (the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-one Codex security audits (W-1…W-171) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-15: `main` is in sync with `origin/main`; the last code commit is `c6b41a1` (re-audit #21 fixes W-165…W-171), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.27** (released; the signed update feed serves it on all three platforms). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-one Codex security audits (W-1…W-171) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -280,7 +280,7 @@ How each part works:
 | Re-audit #18 (of 0.1.24) | W-154…W-159 | `a3e8d7a`, 0.1.25 | See below; migration 0012 (`wren_0014_external_cleanups`); W-156 documented |
 | Re-audit #19 (of 0.1.25) | W-160…W-162 | `5c699aa`, 0.1.26 | See below; no migration |
 | Re-audit #20 (of 0.1.26) | W-163…W-164 | `1445752`, web only | See below; no migration |
-| Re-audit #21 (of 0.1.26 + web) | W-165…W-171 | not yet pushed, 0.1.27 | See below; no migration |
+| Re-audit #21 (of 0.1.26 + web) | W-165…W-171 | `c6b41a1`, 0.1.27 | See below; no migration |
 
 Round 21 in brief (desktop 0.1.27; Codex report /private/tmp/wren-re-audit-0.1.26-web-2026-10-14.md; a fresh pass over unchanged policy, browser and integration code):
 - **W-165** (High) `"\n"`/`"\r"`, which Playwright presses as Enter, rated low on a "Place order" button: a press is low only if every part of the chord is a key known to be plain; Enter's and Space's spellings, unknown keys and Control/Alt/Meta chords are assessed against the focused element (policy and full-loop tests). Also: pressing letters into a password or card field one key at a time is blocked by the policy and refused by the controller (tested in Chrome).
