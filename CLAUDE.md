@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-15: `main` has one local commit over `origin/main`, the re-audit #22 fixes (W-172…W-176, desktop **0.1.28**), not yet pushed or released; production still runs `c6b41a1` and desktop 0.1.27 (the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-two Codex security audits (W-1…W-176) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-15: `main` is in sync with `origin/main`; the last code commit is `ca7b1e9` (re-audit #22 fixes W-172…W-176), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.28** (released; the signed update feed serves it on all three platforms). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-two Codex security audits (W-1…W-176) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -282,7 +282,7 @@ How each part works:
 | Re-audit #19 (of 0.1.25) | W-160…W-162 | `5c699aa`, 0.1.26 | See below; no migration |
 | Re-audit #20 (of 0.1.26) | W-163…W-164 | `1445752`, web only | See below; no migration |
 | Re-audit #21 (of 0.1.26 + web) | W-165…W-171 | `c6b41a1`, 0.1.27 | See below; no migration |
-| Re-audit #22 (of 0.1.27) | W-172…W-176 | not yet pushed, 0.1.28 | See below; no migration |
+| Re-audit #22 (of 0.1.27) | W-172…W-176 | `ca7b1e9`, 0.1.28 | See below; no migration |
 
 Round 22 in brief (desktop 0.1.28; Codex report /private/tmp/wren-re-audit-0.1.27-2026-10-15.md; the fresh pass covered every API route, RLS and definer functions, file delivery, the Electron window and IPC, web.fetch, schedules and account deletion):
 - **W-172** (High) the engine sign-in script Terminal runs was written to the temp folder, which agent commands may write, so a running agent could swap what Terminal ran outside the sandbox: it is made in a new folder inside Wren's data folder (tested in the real sandbox: an agent command can't write, move, replace or read it, and can write the old place).
