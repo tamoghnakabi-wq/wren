@@ -37,11 +37,14 @@ export const DELETE = route<Ctx>(async (req, ctx) => {
   // below) or sees it removed (W-158).
   const [a] = await sql`update public.agents set archived_at = now() where id = ${id} and user_id = ${user.id} returning id`;
   if (!a) notFound('Agent not found.');
+  // Every task of it is told to stop first, in one statement: whatever fails or takes long below, none is
+  // left running unmarked (a worker sees the mark at its next check), and the cron ends the rest (W-163).
+  const active = await sql`update public.runs set cancel_requested = true
+    where agent_id = ${a.id} and status in ('queued', 'running', 'waiting', 'paused') returning id`;
   await sql`update public.schedules set enabled = false where agent_id = ${a.id}`;
-  // Its tasks stop like Stop stops them: one nothing is running ends now, one being worked on is told to.
-  const active = await sql`select id from public.runs where agent_id = ${a.id} and status in ('queued', 'running', 'waiting', 'paused')`;
-  for (const r of active) await cancelRun(user.id, r.id).catch(() => {});
-  // Remove the agent's cloud computer and browser (and their snapshots).
+  // Its cloud computer and browser go next (with their snapshots); a cloud task's commands end with them.
   await SandboxHost.deleteComputers(a.id);
+  // Then tasks nothing is working on end now, like Stop.
+  for (const r of active) await cancelRun(user.id, r.id).catch((e: Error) => console.error(`[wren] removing agent ${a.id}: run ${r.id}: ${e.message}`));
   return json({ ok: true });
 });

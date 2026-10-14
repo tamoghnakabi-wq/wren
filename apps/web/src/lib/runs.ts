@@ -429,13 +429,40 @@ export async function pauseRun(userId: string, runId: string): Promise<boolean> 
   return r.paused;
 }
 
+/**
+ * End the unfinished tasks of removed agents (cron): every one is marked to stop, and one nothing holds is
+ * ended now. A backstop for removal steps that failed or were cut short (W-163). How many it ended.
+ */
+export async function endRemovedAgentRuns(): Promise<number> {
+  const sql = db();
+  await sql`update public.runs set cancel_requested = true
+    where status in ('queued', 'running', 'waiting', 'paused') and not cancel_requested
+      and agent_id in (select id from public.agents where archived_at is not null)`;
+  const idle = await sql`
+    select r.id from public.runs r join public.agents a on a.id = r.agent_id
+    where a.archived_at is not null and r.status in ('queued', 'running', 'waiting', 'paused')
+      and (r.lease_until is null or r.lease_until < now())
+    order by r.created_at limit 50`;
+  let ended = 0;
+  for (const r of idle) {
+    try {
+      if ((await finishRun(r.id, { kind: 'cancelled', steps: 0 }, undefined, { idle: true })) === 'ended') ended++;
+    } catch (e) {
+      console.error(`[wren] ending removed agent's run ${r.id}: ${(e as Error).message}`);
+    }
+  }
+  return ended;
+}
+
 export async function resumeRun(userId: string, runId: string) {
   const [ref] = await db()`select session_id from public.runs where id = ${runId} and user_id = ${userId}`;
   if (!ref) return;
   const resumed = await taskTx(async (tx) => {
     await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    // Not a removed agent's task (W-158).
     const [run] = await tx`update public.runs set pause_requested = false, status = 'queued', wake_at = null
-      where id = ${runId} and user_id = ${userId} and status = 'paused' returning id`;
+      where id = ${runId} and user_id = ${userId} and status = 'paused'
+        and exists (select 1 from public.agents a where a.id = runs.agent_id and a.archived_at is null) returning id`;
     if (run) await tx`update public.sessions set status = 'queued' where id = ${ref.session_id}`;
     return !!run;
   });

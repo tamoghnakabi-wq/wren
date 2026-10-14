@@ -37,7 +37,9 @@ export async function saveArtifact(a: ArtifactInput): Promise<{ id: string; name
     select ${id}, ${a.userId}, ${a.agentId ?? null}, ${a.sessionId ?? null}, ${a.runId ?? null}, ${name}, ${a.mime}, ${size}, ${a.kind ?? 'file'}, ${path}, ${a.source ?? 'cloud'}
     where ${a.leaseId && a.runId ? sql`exists (select 1 from public.runs where id = ${a.runId}::uuid and lease_id = ${a.leaseId}::uuid for share)` : sql`true`}
     returning id`.catch(async (e: unknown) => {
-    await deleteArtifactBlob(path); // the record failed (e.g. the account is being deleted): nothing stays behind
+    // The record failed (e.g. the account is being deleted): nothing stays behind. The record's error is
+    // the one reported; a failure to clean up as well is logged.
+    await deleteArtifactBlob(path).catch((ce: Error) => console.error(`[wren] removing unrecorded upload ${path}: ${ce.message}`));
     throw e;
   });
   if (!rows.length) {
