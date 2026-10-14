@@ -243,6 +243,20 @@ describe('agent loop', () => {
     expect((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).result?.output).toMatch(/page changed/);
   });
 
+  it("asks before pressing Playwright's Enter aliases on a purchase button, as for Enter (W-165)", async () => {
+    for (const key of ['Enter', '\n', '\r', 'Shift+\n']) {
+      const store = new MemStore();
+      await store.userSays('buy it');
+      const model = new ScriptModel([{ calls: [{ name: 'browser.press', args: { key } }] }, { text: 'Waiting.' }]);
+      const host = new FakeHost();
+      host.riskContext = async () => ({ browserTarget: { label: 'Place order', role: 'button', elementId: 'd1-7', url: 'https://shop.test/checkout' } });
+      const out = await base(store, model, host, { autonomy: 'autonomous' });
+      expect(out.kind, JSON.stringify(key)).toBe('waiting_approval');
+      expect(host.ran, JSON.stringify(key)).toEqual([]);
+      expect((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).risk, JSON.stringify(key)).toBe('critical');
+    }
+  });
+
   it('passes the assessed element to the browser', async () => {
     const store = new MemStore();
     await store.userSays('next page');

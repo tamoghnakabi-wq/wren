@@ -90,7 +90,6 @@ interface Rule {
 const RULES: Rule[] = [
   // never
   { re: /:\(\)\s*\{\s*:\|:&\s*\};:/, risk: 'critical', reason: 'fork bomb', block: true },
-  { re: /\brm\s+(-[a-z]*r[a-z]*f?|-[a-z]*f[a-z]*r)\s+(--no-preserve-root\s+)?(\/|~|\$HOME|\/\*)(\s|$)/i, risk: 'critical', reason: 'deletes the whole filesystem or home folder', block: true },
   { re: /\bmkfs(\.\w+)?\b|\bdd\s+[^|]*of=\/dev\/(sd|disk|nvme|hd)/i, risk: 'critical', reason: 'formats or overwrites a disk', block: true },
   { re: /\bdiskutil\s+(erase|zeroDisk|secureErase|partitionDisk)|\bformat\s+[a-z]:|\bClear-Disk\b/i, risk: 'critical', reason: 'erases a disk', block: true },
   // critical: credentials, privilege, system state
@@ -126,9 +125,14 @@ interface SimpleCommand {
  * A small shell lexer: splits on control operators outside quotes, removes quotes and
  * backslash escapes, records redirections, and treats $(...) / backticks as separate
  * commands. `normalized` is the command with quoting removed, for the pattern rules.
+ * `unsupported` is set for syntax it doesn't follow: here-documents (their text is data to the
+ * shell, so a quote in it isn't one) and comments (a quote after "#" is ignored by bash, but not
+ * by a shell without comments, e.g. interactive zsh). Past those, its commands may not be the
+ * shell's, so such a line is never counted as read-only (W-166).
  */
-export function parseShell(command: string): { commands: SimpleCommand[]; normalized: string } {
+export function parseShell(command: string): { commands: SimpleCommand[]; normalized: string; unsupported: boolean } {
   const commands: SimpleCommand[] = [];
+  let unsupported = false;
   let cur: SimpleCommand = { words: [], dynamic: [], outputs: [] };
   let word = '';
   let inWord = false;
@@ -136,6 +140,13 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
   let pending: 'out' | 'in' | null = null;
   let norm = '';
   const nested: SimpleCommand[] = [];
+  /** The commands in a substitution: checked like any other. */
+  const sub = (text: string) => {
+    const inner = parseShell(text);
+    nested.push(...inner.commands);
+    if (inner.unsupported) unsupported = true;
+    return inner;
+  };
   const endWord = () => {
     if (!inWord) return;
     if (pending === 'out') cur.outputs.push({ target: word, dynamic: dyn });
@@ -179,8 +190,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
         // "$(...)" and "`...`" still run commands: check them like any other.
         if (command[j] === '$' && command[j + 1] === '(' && command[j + 2] !== '(') {
           const end = closingParen(command, j + 2);
-          const inner = parseShell(command.slice(j + 2, end));
-          nested.push(...inner.commands);
+          const inner = sub(command.slice(j + 2, end));
           word += '$(…)';
           norm += `$(${inner.normalized})`;
           dyn = true;
@@ -190,8 +200,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
         if (command[j] === '`') {
           let end = j + 1;
           while (end < n && command[end] !== '`') end += command[end] === '\\' ? 2 : 1;
-          const inner = parseShell(command.slice(j + 1, end));
-          nested.push(...inner.commands);
+          const inner = sub(command.slice(j + 1, end));
           word += '$(…)';
           norm += `\`${inner.normalized}\``;
           dyn = true;
@@ -232,8 +241,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
     if ((c === '$' || c === '<' || c === '>') && command[i + 1] === '(' && !(c === '$' && command[i + 2] === '(')) {
       // $(...) / <(...) / >(...): the inner commands are checked on their own; this word's value is unknown
       const j = closingParen(command, i + 2);
-      const inner = parseShell(command.slice(i + 2, j));
-      nested.push(...inner.commands);
+      const inner = sub(command.slice(i + 2, j));
       if (c !== '$') endWord();
       word += '$(…)';
       dyn = true;
@@ -245,8 +253,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
     if (c === '`') {
       let j = i + 1;
       while (j < n && command[j] !== '`') j += command[j] === '\\' ? 2 : 1;
-      const inner = parseShell(command.slice(i + 1, j));
-      nested.push(...inner.commands);
+      const inner = sub(command.slice(i + 1, j));
       word += '$(…)';
       dyn = true;
       inWord = true;
@@ -299,6 +306,8 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
       let op = c;
       while (command[i + 1] === '<') op += command[++i];
       norm += op;
+      // "<<" / "<<-" start a here-document ("<<<" is a here-string: one word, read like any other)
+      if (op === '<<') unsupported = true;
       pending = 'in';
       continue;
     }
@@ -307,6 +316,8 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
       norm += c;
       continue;
     }
+    // A word starting with "#" is a comment to bash (to the end of the line), a word to some shells.
+    if (c === '#' && !inWord) unsupported = true;
     // Unquoted *, ?, [ and {a,b} expand to names only known when the command runs.
     if (c === '*' || c === '?' || c === '[' || c === '{') dyn = true;
     word += c;
@@ -314,7 +325,7 @@ export function parseShell(command: string): { commands: SimpleCommand[]; normal
     inWord = true;
   }
   endCommand();
-  return { commands: [...commands, ...nested], normalized: norm };
+  return { commands: [...commands, ...nested], normalized: norm, unsupported };
 }
 
 /** Decodes the escapes of a $'...' string (\\xHH, \\NNN, \\uHHHH, \\n, ...). */
@@ -361,13 +372,17 @@ function longOpt(arg: string, ...names: string[]): boolean {
 }
 
 function readOnlyForm(cmd: string, args: string[]): boolean {
-  const positional = args.filter((w) => !w.startsWith('-'));
+  // Operands: "-" is one (standard input: `uniq - OUT` writes OUT, W-167), and so is everything after "--".
+  // An option's value counts as an operand too, which only errs on the safe side.
+  const end = args.indexOf('--');
+  const positional = args.filter((w, i) => (end >= 0 && i > end) || (i !== end && (w === '-' || !w.startsWith('-'))));
   switch (cmd) {
     case 'sort':
       // --output writes; --compress-program runs a program (`--co=./x` works too).
       return !args.some((w) => /^-[a-zA-Z]*o/.test(w) || longOpt(w, '--output', '--compress-program'));
     case 'tree':
-      return !args.some((w) => /^-o/.test(w) || longOpt(w, '--output'));
+      // -R (with -H) writes an 00Tree.html into every folder it lists.
+      return !args.some((w) => /^-[a-zA-Z]*[oR]/.test(w) || longOpt(w, '--output'));
     case 'man':
       // -P names the pager (run even without a terminal), -C a config naming programs, -M/-H others:
       // only section numbers, page names and a few listing flags.
@@ -386,7 +401,8 @@ function readOnlyForm(cmd: string, args: string[]): boolean {
     case 'xxd':
       return !args.some((w) => /^-r|^-revert/.test(w)) && positional.length <= 1;
     case 'yq':
-      return !args.some((w) => /^-[a-zA-Z]*i/.test(w) || longOpt(w, '--inplace'));
+      // -i edits in place; -s (--split-exp) writes each result to a file it names.
+      return !args.some((w) => /^-[a-zA-Z]*[is]/.test(w) || longOpt(w, '--inplace', '--split-exp'));
     case 'rg':
       // --pre runs a program; -z runs decompressors found on PATH.
       return !args.some((w) => /^-[a-zA-Z]*z/.test(w) || longOpt(w, '--pre', '--search-zip'));
@@ -465,15 +481,80 @@ function commandIsReadOnly(c: SimpleCommand, trust?: ProgramTrust): boolean {
 
 /** True when every command in the line is a known read-only form with fully known arguments. */
 export function isReadOnlyCommand(command: string, trust?: ProgramTrust): boolean {
-  const { commands } = parseShell(command);
-  return commands.length > 0 && commands.every((c) => commandIsReadOnly(c, trust) && !c.dynamic.some(Boolean));
+  const { commands, unsupported } = parseShell(command);
+  return !unsupported && commands.length > 0 && commands.every((c) => commandIsReadOnly(c, trust) && !c.dynamic.some(Boolean));
+}
+
+/** Command-line words, split at blanks and operators whatever the quoting; null marks an operator. */
+function roughWords(text: string): (string | null)[] {
+  const out: (string | null)[] = [];
+  let w = '';
+  for (const c of text) {
+    if (/[ \t\n;&|()<>`]/.test(c)) {
+      if (w) out.push(w);
+      w = '';
+      if (!/[ \t]/.test(c)) out.push(null);
+    } else w += c;
+  }
+  if (w) out.push(w);
+  // $'...' decoded, then quotes and backslashes dropped: "r"m, \rm and $'\x72m' are all rm.
+  return out.map((x) => x && x.replace(/\$'((?:\\.|[^'])*)'?/g, (_, e: string) => decodeAnsiC(e)).replace(/['"\\]/g, ''));
+}
+
+/**
+ * The whole system, a top-level folder or a home folder (or everything in one): "/", "/usr/*",
+ * "~", "$HOME/.", "~/a/../..", "/Users/me/". Relative paths depend on the working folder: no.
+ */
+function wholeTree(path: string): boolean {
+  if (!path) return false;
+  const segs = path.split('/');
+  const home = /^(~[^/]*|\$HOME|\$\{HOME\})$/.test(segs[0]);
+  if (!home && segs[0] !== '') return false;
+  const parts: string[] = [];
+  for (const seg of segs.slice(1)) {
+    if (seg === '' || seg === '.') continue;
+    if (seg !== '..') parts.push(seg);
+    else if (!parts.length) return true; // above the home folder, or the root itself
+    else parts.pop();
+  }
+  while (parts.length && /^\.?\*$/.test(parts[parts.length - 1])) parts.pop();
+  if (home) return parts.length === 0;
+  return parts.length <= 1 || (parts.length === 2 && (parts[0] === 'Users' || parts[0] === 'home' || parts.join('/') === 'var/root'));
+}
+
+/**
+ * rm told to recurse into the whole system or a home folder, however the options are spelled:
+ * `rm -r -f ~`, `rm ~ -rf` (GNU reads options anywhere), `rm --recursive -- /` (W-168). Read from
+ * the words of the text, not the parse, so it holds wherever the lexer and the shell disagree.
+ */
+function wipesEverything(text: string): boolean {
+  const words = roughWords(text);
+  for (let i = 0; i < words.length; i++) {
+    if (words[i]?.replace(/^.*\//, '') !== 'rm') continue;
+    let recursive = false;
+    let operands = false;
+    const targets: string[] = [];
+    for (let k = i + 1; k < words.length && words[k] !== null; k++) {
+      const w = words[k]!;
+      if (operands || w === '-' || !w.startsWith('-')) targets.push(w);
+      else if (w === '--') operands = true;
+      else if (w.startsWith('--')) recursive ||= longOpt(w, '--recursive');
+      else recursive ||= /[rR]/.test(w);
+    }
+    if (recursive && targets.some(wholeTree)) return true;
+  }
+  return false;
 }
 
 export function assessShell(command: string, runtime: Runtime, trust?: ProgramTrust): Assessment {
   let risk: Risk = 'low';
   let reason: string | undefined;
   // Rules see both the text as written and with quoting removed ("rm" -rf ~ is rm -rf ~).
-  const { commands, normalized } = parseShell(command);
+  const { commands, normalized, unsupported } = parseShell(command);
+  if (wipesEverything(command) || wipesEverything(normalized)) {
+    const reason = 'deletes the whole filesystem, a top-level folder or a home folder';
+    return { risk: 'critical', reason, blocked: `Blocked: this command ${reason}.` };
+  }
   for (const rule of RULES) {
     if (rule.re.test(command) || rule.re.test(normalized)) {
       if (rule.block) return { risk: 'critical', reason: rule.reason, blocked: `Blocked: this command ${rule.reason}.` };
@@ -490,10 +571,12 @@ export function assessShell(command: string, runtime: Runtime, trust?: ProgramTr
     reason = 'runs a program whose name is only known when it runs';
   }
   if (risk === 'low') {
-    const ro = commands.every((c) => commandIsReadOnly(c, trust));
+    const ro = !unsupported && commands.every((c) => commandIsReadOnly(c, trust));
     if (!ro) {
       risk = 'medium';
-      reason = commands.every((c) => commandIsReadOnly(c))
+      reason = unsupported
+        ? 'has a here-document or a comment, so Wren can’t be sure which parts are commands'
+        : commands.every((c) => commandIsReadOnly(c))
         ? 'runs a program found in a folder agents can write to, so it may not be the usual one'
         : GIT_LOOKS_READ.test(normalized.trim())
           ? 'git can run programs named in the repository’s own settings (hooks, filters, diff tools)'
@@ -526,13 +609,15 @@ export interface BrowserTarget {
   elementId?: string;
 }
 
+/** A password, card, one-time code or similar field: agents never put text into one. */
+const secretField = (target: BrowserTarget | undefined) =>
+  /password|cc-|card|cvc|cvv|security code|one-time|otp|2fa|passcode|ssn|social security|iban|routing/.test(`${target?.inputType ?? ''} ${target?.autocomplete ?? ''} ${target?.label ?? ''}`.toLowerCase());
+const CREDENTIALS: Assessment = { risk: 'critical', reason: 'enters credentials or payment details', blocked: 'Blocked: agents never type passwords, card numbers or other credentials. Ask the user to do this step.' };
+
 export function assessBrowser(action: string, target: BrowserTarget | undefined, runtime: Runtime): Assessment {
   const text = `${target?.label ?? ''}`;
   if (action === 'type') {
-    const t = `${target?.inputType ?? ''} ${target?.autocomplete ?? ''} ${text}`.toLowerCase();
-    if (/password|cc-|card|cvc|cvv|security code|one-time|otp|2fa|passcode|ssn|social security|iban|routing/.test(t)) {
-      return { risk: 'critical', reason: 'enters credentials or payment details', blocked: 'Blocked: agents never type passwords, card numbers or other credentials. Ask the user to do this step.' };
-    }
+    if (secretField(target)) return CREDENTIALS;
     return { risk: runtime === 'desktop' ? 'medium' : 'low', reason: 'fills in a form field' };
   }
   if (action === 'click' || action === 'press') {
@@ -609,9 +694,11 @@ export function assessCall(
     case 'browser.type':
     case 'browser.press': {
       const action = name.split('.')[1];
+      const target = context.browserTarget;
+      // One key at a time is still typing: not into a password or card field.
+      if (action === 'press' && secretField(target) && typesText(s('key'))) return CREDENTIALS;
       // press acts on the focused element; only keys that can activate or submit it matter.
       if (action === 'press' && !isActivatingKey(s('key'))) return { risk: 'low' };
-      const target = context.browserTarget;
       const a = assessBrowser(action, target, runtime);
       if (a.blocked) return a;
       // Without knowing what the element is, never treat the action as routine.
@@ -650,14 +737,40 @@ export function assessCall(
   }
 }
 
+/** Playwright's key syntax: "Shift+Enter" is Shift, then Enter; "Shift++" ends in "+". Every part is pressed, in order. */
+export function keyParts(key: string): string[] {
+  const parts: string[] = [];
+  let part = '';
+  for (const c of key) {
+    if (c === '+' && part) {
+      parts.push(part);
+      part = '';
+    } else part += c;
+  }
+  parts.push(part);
+  return parts;
+}
+
+/** Keys of Playwright's layout that neither click, submit nor toggle what has focus (Enter, its "\n"/"\r" aliases and Space do). */
+const PLAIN_KEY = /^(Escape|F([1-9]|1[0-2])|Backquote|Digit[0-9]|Minus|Equal|Backslash|Backspace|Tab|Key[A-Z]|Bracket(Left|Right)|CapsLock|Semicolon|Quote|Comma|Period|Slash|Shift(Left|Right)?|AltGraph|ContextMenu|PrintScreen|ScrollLock|Pause|PageUp|PageDown|Insert|Delete|Home|End|Arrow(Left|Up|Right|Down)|AudioVolume(Mute|Down|Up)|Media(TrackNext|TrackPrevious|PlayPause)|NumLock|Numpad(Divide|Multiply|Subtract|Add|Decimal|[0-9]))$/;
+/** Modifiers that make a chord a shortcut (the page's, or an access key: Alt+Shift+S saves a wiki edit). */
+const SHORTCUT_MODIFIER = /^(Control|Alt|Meta)(Left|Right)?$|^ControlOrMeta$/;
+
 /**
- * Keys that can click, submit or toggle the focused element (alone or with
- * modifiers). A literal " " is Space; "" means the controller's default, Enter.
+ * Keys that can click, submit or toggle the focused element, or trigger a shortcut. Every part of a
+ * chord counts (Playwright presses them all: "Enter+a" presses Enter), and anything not known to be
+ * plain does too: Enter, "\n", "\r", Space, " ", a key Wren doesn't know (W-165). "" means the
+ * controller's default, Enter.
  */
 export function isActivatingKey(key: string): boolean {
-  if (key === '' || key === ' ' || key.endsWith('+ ') || key.endsWith('+')) return true;
-  const last = key.split('+').pop()!.trim().toLowerCase();
-  return /^(enter|return|numpadenter|space|spacebar)$/.test(last);
+  if (key === '') return true;
+  const parts = keyParts(key);
+  if (parts.length > 1 && parts.some((p) => SHORTCUT_MODIFIER.test(p))) return true;
+  return parts.some((p) => !SHORTCUT_MODIFIER.test(p) && !PLAIN_KEY.test(p) && !(p.length === 1 && /\S/.test(p)));
 }
+
+/** Keys that can't put text into a field: pressing any other into a password field types into it. */
+const NO_TEXT_KEY = /^(Enter|NumpadEnter|\n|\r|Tab|Escape|Backspace|Delete|Home|End|PageUp|PageDown|Arrow(Up|Down|Left|Right)|(Shift|Control|Alt|Meta)(Left|Right)?|ControlOrMeta|AltGraph|CapsLock|NumLock|ScrollLock|Pause|F([1-9]|1[0-2]))$/;
+export const typesText = (key: string) => keyParts(key || 'Enter').some((p) => !NO_TEXT_KEY.test(p));
 
 export { bump as bumpRisk };

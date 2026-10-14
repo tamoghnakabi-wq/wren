@@ -13,12 +13,15 @@ import { nextRunAfter } from '@/lib/schedules';
 //  1. re-kick cloud runs whose tick died (lease expired) or whose retry is due
 //  2. start due scheduled tasks
 //  3. expire stale approvals and tell the user
-//  4. finish cleaning up ended cloud runs whose commands weren't confirmed stopped
-//  5. end the tasks of computers that were unlinked (W-147), and unlink computers that never checked in
-//     with the sign-in they were handed (W-151)
+//  4. unlink computers that never checked in with the sign-in they were handed (W-151), end the tasks
+//     of computers that were unlinked (W-147) and what removed agents left unfinished (W-163)
+//  5. finish cleaning up ended cloud runs whose commands weren't confirmed stopped
 //  6. retry deletions of cloud computers and stored files that didn't go through (W-157)
-//  7. end what removed agents left unfinished (W-163)
+// The whole call ends well inside maxDuration: every stage gets what is left of DEADLINE_MS, the work
+// that only needs the database comes before the provider calls (computers, files), nothing new is
+// started once the time is up, and what wasn't reached is named in `skipped` and done next minute.
 export const maxDuration = 60;
+const DEADLINE_MS = 45_000;
 
 function authorized(req: Request) {
   const h = req.headers.get('authorization') ?? '';
@@ -27,63 +30,105 @@ function authorized(req: Request) {
 
 export const POST = route(async (req) => {
   if (!authorized(req)) throw new HttpError(401, 'Forbidden', 'forbidden');
+  const until = Date.now() + DEADLINE_MS;
+  const left = () => until - Date.now();
   const sql = db();
-  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, errors: [] as string[] };
+  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, errors: [] as string[], skipped: [] as string[] };
+  /** Wait for `work` at most `ms` (and never past the deadline): what is still going is not counted. */
+  const inTime = async <T,>(work: Promise<T>, late: T, ms = Infinity): Promise<T> => {
+    let timer: NodeJS.Timeout | undefined;
+    const out = new Promise<T>((resolve) => (timer = setTimeout(() => resolve(late), Math.max(0, Math.min(ms, left())))));
+    try {
+      return await Promise.race([work, out]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  /** Run a stage if there is time left for it. */
+  const stage = async (name: string, run: () => Promise<void>) => {
+    if (left() <= 0) report.skipped.push(name);
+    else await run();
+  };
 
-  const stale = await sql`
-    select id from public.runs
-    where runtime = 'cloud' and status in ('queued', 'running')
-      and (lease_until is null or lease_until < now() - interval '20 seconds')
-      and (wake_at is null or wake_at <= now())
-      and updated_at < now() - interval '45 seconds'
-    order by updated_at limit 20`;
-  // A run that was just created is kicked by the API; only old ones need help.
-  await Promise.allSettled(stale.map((r) => kickTick(r.id)));
-  report.kicked = stale.length;
-
-  const unclean = await sql`
-    select id, agent_id from public.runs
-    where cleanup_pending and runtime = 'cloud' and ended_at < now() - interval '30 seconds'
-    order by ended_at limit 10`;
-  const cleaned = await Promise.allSettled(unclean.map((r) => cleanUpCloudRun(r.agent_id, r.id)));
-  report.cleaned = cleaned.filter((c) => c.status === 'fulfilled' && c.value).length;
-
-  // Claim due schedules by moving them to their next occurrence first, so an
-  // interrupted invocation can at worst skip one occurrence, never stall a schedule.
-  const due = await sql.begin(async (tx) => {
-    const rows = await tx`select * from public.schedules where enabled and next_run_at <= now() order by next_run_at limit 10 for update skip locked`;
-    for (const s of rows) await tx`update public.schedules set next_run_at = ${nextRunAfter(s.cron, s.timezone, new Date(s.next_run_at))} where id = ${s.id}`;
-    return rows;
+  await stage('kick', async () => {
+    const stale = await sql`
+      select id from public.runs
+      where runtime = 'cloud' and status in ('queued', 'running')
+        and (lease_until is null or lease_until < now() - interval '20 seconds')
+        and (wake_at is null or wake_at <= now())
+        and updated_at < now() - interval '45 seconds'
+      order by updated_at limit 20`;
+    // A run that was just created is kicked by the API; only old ones need help. (Each kick gives up after 15 s.)
+    await inTime(Promise.allSettled(stale.map((r) => kickTick(r.id))), []);
+    report.kicked = stale.length;
   });
-  await Promise.allSettled(
-    due.map(async (s) => {
-      try {
-        const r = await startTask({ userId: s.user_id, agentId: s.agent_id, text: s.prompt, trigger: 'schedule', scheduleId: s.id, scheduleName: s.name });
-        await sql`update public.schedules set last_run_at = now(), last_session_id = ${r.sessionId} where id = ${s.id}`;
-        report.scheduled++;
-      } catch (e) {
-        const msg = (e as Error).message;
-        report.errors.push(`${s.id}: ${msg}`);
-        await notifyUser({ userId: s.user_id, kind: 'schedule_failed', title: `Scheduled task "${s.name}" didn't start`, body: msg, url: '/app/schedules' });
-      }
-    }),
-  );
 
-  const expired = await sql`
-    update public.approvals set status = 'expired' where status = 'pending' and expires_at < now()
-    returning run_id, session_id, user_id, title`;
-  report.expired = expired.length;
-  await Promise.allSettled(
-    expired.map(async (a) => {
-      const [run] = await sql`update public.runs set status = 'queued' where id = ${a.run_id} and status = 'waiting' returning id`;
-      if (run) await kickRun(a.run_id);
-    }),
-  );
+  await stage('schedules', async () => {
+    // Claim due schedules by moving them to their next occurrence first, so an
+    // interrupted invocation can at worst skip one occurrence, never stall a schedule.
+    const due = await sql.begin(async (tx) => {
+      const rows = await tx`select * from public.schedules where enabled and next_run_at <= now() order by next_run_at limit 10 for update skip locked`;
+      for (const s of rows) await tx`update public.schedules set next_run_at = ${nextRunAfter(s.cron, s.timezone, new Date(s.next_run_at))} where id = ${s.id}`;
+      return rows;
+    });
+    await inTime(
+      Promise.allSettled(
+        due.map(async (s) => {
+          try {
+            const r = await startTask({ userId: s.user_id, agentId: s.agent_id, text: s.prompt, trigger: 'schedule', scheduleId: s.id, scheduleName: s.name });
+            await sql`update public.schedules set last_run_at = now(), last_session_id = ${r.sessionId} where id = ${s.id}`;
+            report.scheduled++;
+          } catch (e) {
+            const msg = (e as Error).message;
+            report.errors.push(`${s.id}: ${msg}`);
+            await notifyUser({ userId: s.user_id, kind: 'schedule_failed', title: `Scheduled task "${s.name}" didn't start`, body: msg, url: '/app/schedules' });
+          }
+        }),
+      ),
+      [],
+    );
+  });
 
-  report.removed = await endRemovedAgentRuns().catch((e: Error) => (report.errors.push(`removed: ${e.message}`), 0));
-  report.deleted = await runCleanups().catch((e: Error) => (report.errors.push(`deleted: ${e.message}`), 0));
-  report.unclaimed = await revokeUnclaimedDevices().catch((e: Error) => (report.errors.push(`unclaimed: ${e.message}`), 0));
-  report.orphaned = await endOrphanedRuns().catch((e: Error & { ended?: number }) => (report.errors.push(`orphaned: ${e.message}`), e.ended ?? 0));
+  await stage('approvals', async () => {
+    const expired = await sql`
+      update public.approvals set status = 'expired' where status = 'pending' and expires_at < now()
+      returning run_id, session_id, user_id, title`;
+    report.expired = expired.length;
+    await inTime(
+      Promise.allSettled(
+        expired.map(async (a) => {
+          const [run] = await sql`update public.runs set status = 'queued' where id = ${a.run_id} and status = 'waiting' returning id`;
+          if (run) await kickRun(a.run_id);
+        }),
+      ),
+      [],
+    );
+  });
+
+  await stage('unclaimed', async () => {
+    report.unclaimed = await inTime(revokeUnclaimedDevices(until).catch((e: Error) => (report.errors.push(`unclaimed: ${e.message}`), 0)), 0);
+  });
+  await stage('orphaned', async () => {
+    report.orphaned = await inTime(endOrphanedRuns(undefined, until).catch((e: Error & { ended?: number }) => (report.errors.push(`orphaned: ${e.message}`), e.ended ?? 0)), 0);
+  });
+  await stage('removed', async () => {
+    report.removed = await inTime(endRemovedAgentRuns(until).catch((e: Error) => (report.errors.push(`removed: ${e.message}`), 0)), 0);
+  });
+
+  await stage('cleanup', async () => {
+    const unclean = await sql`
+      select id, agent_id from public.runs
+      where cleanup_pending and runtime = 'cloud' and ended_at < now() - interval '30 seconds'
+      order by ended_at limit 10`;
+    // At most 15 s here, so the deletions below still get their turn.
+    const cleaned = await inTime(Promise.allSettled(unclean.map((r) => cleanUpCloudRun(r.agent_id, r.id))), [], 15_000);
+    report.cleaned = cleaned.filter((c) => c.status === 'fulfilled' && c.value).length;
+  });
+
+  // Each deletion takes at most 15 s and starts only if it can end before the deadline.
+  await stage('deletions', async () => {
+    report.deleted = await runCleanups(10, Math.min(35_000, left())).catch((e: Error) => (report.errors.push(`deleted: ${e.message}`), 0));
+  });
 
   await sql`delete from public.device_pairings where expires_at < now() - interval '1 day'`;
   await sql`select public.wren_mfa_cleanup()`;

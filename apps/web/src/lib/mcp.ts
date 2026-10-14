@@ -14,7 +14,10 @@ export interface McpToolInfo {
 }
 
 async function connect(url: string, token?: string) {
-  await assertPublicUrl(url);
+  const u = await assertPublicUrl(url);
+  // A token sent over plain http can be read on the way (W-170): checked here, so both adding a
+  // connection and every later call refuse it.
+  if (token && u.protocol !== 'https:') throw new Error('An MCP server that needs a token must use an https:// address.');
   const client = new Client({ name: 'wren', version: '0.1.0' });
   // guardedFetch re-checks the address on every connection (DNS can change after assertPublicUrl).
   const transport = new StreamableHTTPClientTransport(new URL(url), { fetch: guardedFetch, requestInit: { headers: token ? { authorization: `Bearer ${token}` } : {} } });

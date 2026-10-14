@@ -433,7 +433,7 @@ export async function pauseRun(userId: string, runId: string): Promise<boolean> 
  * End the unfinished tasks of removed agents (cron): every one is marked to stop, and one nothing holds is
  * ended now. A backstop for removal steps that failed or were cut short (W-163). How many it ended.
  */
-export async function endRemovedAgentRuns(): Promise<number> {
+export async function endRemovedAgentRuns(until = Infinity): Promise<number> {
   const sql = db();
   await sql`update public.runs set cancel_requested = true
     where status in ('queued', 'running', 'waiting', 'paused') and not cancel_requested
@@ -445,6 +445,7 @@ export async function endRemovedAgentRuns(): Promise<number> {
     order by r.created_at limit 50`;
   let ended = 0;
   for (const r of idle) {
+    if (Date.now() > until) break; // the cron's time is up (a cloud run's finish cleans up its computer)
     try {
       if ((await finishRun(r.id, { kind: 'cancelled', steps: 0 }, undefined, { idle: true })) === 'ended') ended++;
     } catch (e) {

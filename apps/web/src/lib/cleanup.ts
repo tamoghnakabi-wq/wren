@@ -40,9 +40,11 @@ async function withDeadline<T>(ms: number, work: (signal: AbortSignal) => Promis
  * uses are deleted too (the provider does that part asynchronously). Each call is bounded, so one slow
  * provider can't use up the cron's time.
  */
+const REMOVE_MS = 15_000;
+
 async function remove(kind: Kind, ref: string): Promise<boolean> {
   try {
-    await withDeadline(15_000, async (signal) => {
+    await withDeadline(REMOVE_MS, async (signal) => {
       if (kind === 'sandbox') {
         const sb = await Sandbox.get({ name: ref, resume: false, signal });
         await sb.delete({ deleteOrphanSnapshots: true, signal });
@@ -68,8 +70,11 @@ export async function cleanUp(kind: Kind, ref: string): Promise<void> {
   }
 }
 
-/** Retry kept deletions that are due (cron), starting no new one after `budgetMs`; how many were done. */
-export async function runCleanups(limit = 10, budgetMs = 20_000): Promise<number> {
+/**
+ * Retry kept deletions that are due (cron); how many were done. Each starts only if it can end (at its own
+ * time limit) within `budgetMs`, so the whole batch ends within it too, give or take the database.
+ */
+export async function runCleanups(limit = 10, budgetMs = 35_000): Promise<number> {
   const started = Date.now();
   const sql = db();
   // xmin is the row's version: a row renewed meanwhile (another failure for the same thing, perhaps a
@@ -77,7 +82,7 @@ export async function runCleanups(limit = 10, budgetMs = 20_000): Promise<number
   const due = await sql`select id, kind, ref, attempts, xmin::text as version from public.external_cleanups where next_at <= now() order by next_at limit ${limit}`;
   let done = 0;
   for (const c of due) {
-    if (Date.now() - started > budgetMs) break; // the rest wait for the next minute
+    if (Date.now() - started + REMOVE_MS > budgetMs) break; // the rest wait for the next minute
     try {
       await remove(c.kind as Kind, c.ref);
       const gone = await sql`delete from public.external_cleanups where id = ${c.id} and xmin::text = ${c.version} returning id`;

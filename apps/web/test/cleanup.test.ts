@@ -79,12 +79,16 @@ describe('deleting what lives outside the database (W-157)', () => {
             { id: 2, kind: 'blob', ref: 'u/1/b', attempts: 0, version: '11' },
           ]
         : [];
-    const done = runCleanups(10, 10_000);
+    const done = runCleanups(10, 20_000);
     await vi.advanceTimersByTimeAsync(15_000);
     expect(await done).toBe(0);
     expect(seen?.aborted).toBe(true);
     expect((seen?.reason as Error).name).toBe('AbortError'); // not TimeoutError, which the Blob SDK retries
     const backoffs = queries.filter((q) => q.text.startsWith('update public.external_cleanups'));
-    expect(backoffs.map((q) => q.values.at(-2))).toEqual([1]); // only the first was tried: the budget was spent
+    expect(backoffs.map((q) => q.values.at(-2))).toEqual([1]); // only the first was tried: the second couldn't end in time
+    // A budget shorter than one call's limit starts nothing.
+    queries.length = 0;
+    expect(await runCleanups(10, 10_000)).toBe(0);
+    expect(queries.filter((q) => q.text.startsWith('update public.external_cleanups'))).toEqual([]);
   });
 });

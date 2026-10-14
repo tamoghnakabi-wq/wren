@@ -29,6 +29,26 @@ const SECRET_FIELD = /password|cc-|card|cvc|cvv|security code|one-time|otp|2fa|p
  * Tested on `SPLIT_WORDS` of them, so a camel-case name counts as words: `otpCode`, `userPIN` (W-118).
  */
 const SECRET_NAME = /password|passcode|cc-|card.?(number|num|no)|(^|[^a-z])(cvc|cvv|otp|pin)([^a-z]|$)|one-time|secret|token/i;
+/**
+ * Keys that can't put text into a field (Playwright names; "\n" and "\r" are its Enter). A press of any
+ * other into a password or card field would type a credential one key at a time. Same list as
+ * policy.ts NO_TEXT_KEY: this file can't import it (the cloud daemon runs it on its own).
+ */
+const NO_TEXT_KEY = /^(Enter|NumpadEnter|\n|\r|Tab|Escape|Backspace|Delete|Home|End|PageUp|PageDown|Arrow(Up|Down|Left|Right)|(Shift|Control|Alt|Meta)(Left|Right)?|ControlOrMeta|AltGraph|CapsLock|NumLock|ScrollLock|Pause|F([1-9]|1[0-2]))$/;
+/** Playwright's split of a key chord: "Shift+Enter" is Shift, then Enter; "Shift++" ends in "+". */
+function chordParts(key: string): string[] {
+  const parts: string[] = [];
+  let part = '';
+  for (const c of key) {
+    if (c === '+' && part) {
+      parts.push(part);
+      part = '';
+    } else part += c;
+  }
+  parts.push(part);
+  return parts;
+}
+export const pressTypesText = (key: string) => chordParts(key || 'Enter').some((p) => !NO_TEXT_KEY.test(p));
 /** Page-side code (an expression on `s`): camel-case identifiers as separate words, `otpCode` -> `otp Code`, `OTPInput` -> `OTP Input`. */
 const SPLIT_WORDS = `String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')`;
 
@@ -274,6 +294,8 @@ const ENGINE = `({
   arm(el, key) {
     this.disarm();
     if (!el || this.focused() !== el) return { error: 'focus' };
+    // Keys that type text, one at a time, are still typing: never into a credential field.
+    if (this.secret(el) && this.keyParts(key || 'Enter').some((p) => !new RegExp(${JSON.stringify(NO_TEXT_KEY.source)}).test(p))) return { error: 'secret' };
     const page = el === document.documentElement;
     const parts = this.keyParts(key || 'Enter');
     const g = { delivered: false, blocked: false, fixes: 0, downs: 0 };
@@ -476,7 +498,8 @@ export class BrowserController {
 
   /** Press a key on exactly this node: focus is held on it until the key arrives, and a key aimed elsewhere is stopped. */
   private async pressOn(page: Page, id: string, key: string): Promise<string | null> {
-    const armed = await this.ask<{ ok?: boolean }>(page, 'arm', id, encodeURIComponent(key));
+    const armed = await this.ask<{ ok?: boolean; error?: string }>(page, 'arm', id, encodeURIComponent(key));
+    if (armed.error === 'secret') return TYPE_ERRORS.secret;
     if (!armed.ok) return 'Focus is no longer on the element that was checked, so the key was not pressed. Take a new snapshot and try again.';
     try {
       await page.keyboard.press(key);
@@ -502,7 +525,8 @@ export class BrowserController {
         const t = await this.target(page, a);
         let refused = t.refused;
         if (!refused && !t.id) refused = a.action === 'press' ? 'Wren could not tell what has focus on this page. Take a new snapshot and try again.' : `Element ${a.ref ?? ''} is not on the page any more. Take a new snapshot and use a current ref.`;
-        if (!refused && a.action === 'type' && t.target && SECRET_FIELD.test(`${t.target.inputType ?? ''} ${t.target.autocomplete ?? ''} ${t.target.label ?? ''}`)) {
+        const typing = a.action === 'type' || (a.action === 'press' && pressTypesText(a.key ?? ''));
+        if (!refused && typing && t.target && SECRET_FIELD.test(`${t.target.inputType ?? ''} ${t.target.autocomplete ?? ''} ${t.target.label ?? ''}`)) {
           refused = 'Agents never type passwords, card numbers or other credentials. Ask the user to do this step.';
         }
         if (refused) return { ...(await this.state(page)), ok: false, error: refused };

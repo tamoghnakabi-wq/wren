@@ -39,7 +39,14 @@ export function safeEqual(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/**
+ * What a saved secret is shown as: its kind (up to the first "-", e.g. "sk-") and last 4 characters,
+ * but only when at least 16 characters, and half of it, stay hidden; a shorter one isn't shown at all
+ * (W-171: "abcd-1234" was shown as "abcd-…1234", all of it).
+ */
 export function hint(secret: string): string {
   const s = secret.trim();
-  return s.length <= 8 ? '••••' : `${s.slice(0, Math.min(6, s.indexOf('-') > 0 ? s.indexOf('-') + 1 : 3))}…${s.slice(-4)}`;
+  const head = Math.min(6, s.indexOf('-') > 0 ? s.indexOf('-') + 1 : 3);
+  const hidden = s.length - head - 4;
+  return hidden >= 16 && hidden >= s.length / 2 ? `${s.slice(0, head)}…${s.slice(-4)}` : '••••';
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { assessCall, assessShell, isReadOnlyCommand, needsApproval } from '../src/policy';
+import { assessCall, assessShell, isActivatingKey, isReadOnlyCommand, needsApproval, parseShell, typesText } from '../src/policy';
+import { pressTypesText } from '../src/browser/controller';
 import { isPrivateAddress } from '../src/net';
 
 describe('shell risk', () => {
@@ -173,6 +174,45 @@ describe('shell risk', () => {
     expect(desk('dd if=/dev/zero of=/dev/disk2').blocked).toBeTruthy();
     expect(desk('rm -rf ./build').blocked).toBeFalsy();
   });
+  it('blocks rm on the whole system or a home folder however its options are spelled (W-168)', () => {
+    for (const c of ['/bin/rm -r -f ~', 'rm -R ~', 'rm -r -- /', 'rm --recursive --force $HOME', 'rm --rec ~/', 'rm ~ -rf', 'rm -f -r -v "$HOME"/*', 'r\\m -r /usr', "\"rm\" -r -f '/'", "$'\\x72m' -r ~", 'rm -r /Users/me/', 'rm -r ~/a/../..', 'rm -rf //', 'rm -r ${HOME}/.', 'sh -c "rm -r -f ~"', 'cd /tmp && rm -r -f /*']) {
+      expect(desk(c).blocked, c).toBeTruthy();
+      expect(assessShell(c, 'cloud').blocked, c).toBeTruthy();
+    }
+    for (const c of ['rm -r ./build', 'rm -rf ~/project/tmp', 'rm -f ~/.cache/x.log', 'rm ~/notes.txt', 'rm -r ""', 'rm -r /tmp/x', 'ls -r ~']) expect(desk(c).blocked, c).toBeFalsy();
+  });
+});
+
+describe('shell syntax the lexer does not follow (W-166)', () => {
+  const desk = (c: string) => assessShell(c, 'desktop');
+  it('never counts a here-document or a comment as read-only', () => {
+    // Bash reads the quote in the here-document as text and runs touch; a lexer that took it as a
+    // quote would have seen only two cats.
+    const heredoc = "/bin/cat <<'EOF'\n/bin/cat '\nEOF\n/usr/bin/touch ./marker\n# '";
+    const comment = "ls # it's\n/usr/bin/touch ./marker\necho '";
+    for (const c of [heredoc, comment, 'cat <<EOF\n$(touch x)\nEOF', 'cat <<-EOF\n\tx\n\tEOF', 'ls;#', '/bin/ls -la # list']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+      expect(desk(c).risk, c).not.toBe('low');
+    }
+    expect(desk(heredoc).reason).toMatch(/here-document or a comment/);
+    expect(parseShell(heredoc).unsupported).toBe(true);
+    // Not comments or here-documents: $#, a "#" inside a word or quotes, a here-string.
+    for (const c of ['echo a#b', "grep '#' notes.txt", 'echo \\#x', 'cat <<< hello']) expect(parseShell(c).unsupported, c).toBe(false);
+    expect(isReadOnlyCommand('cat <<< hello')).toBe(true);
+    // Inside a substitution too.
+    expect(parseShell('echo "$(cat <<EOF\nx\nEOF\n)"').unsupported).toBe(true);
+  });
+});
+
+describe('operands (W-167)', () => {
+  const desk = (c: string) => assessShell(c, 'desktop');
+  it('counts "-" (standard input) and everything after "--" as operands', () => {
+    for (const c of ["/usr/bin/printf 'audit\\n' | /usr/bin/uniq - ./marker", "printf 'x' | xxd - ./marker", 'uniq -- in out', 'uniq -c - out', 'xxd -- - out', 'hostname -', 'yq -s .a f.yml', 'yq --split-exp .a f.yml', 'tree -R -H . .']) {
+      expect(isReadOnlyCommand(c), c).toBe(false);
+      expect(desk(c).risk, c).not.toBe('low');
+    }
+    for (const c of ['printf x | uniq -', 'uniq -c in.txt', 'uniq -- -odd-name', 'xxd -', 'printf x | xxd']) expect(isReadOnlyCommand(c), c).toBe(true);
+  });
 });
 
 describe('approval thresholds', () => {
@@ -211,6 +251,36 @@ describe('browser + other tools', () => {
     expect(assessCall('browser.press', { key: ' ' }, 'cloud', { browserTarget: { label: 'Place order' } }).risk).toBe('critical');
     expect(assessCall('browser.press', { key: 'Shift+ ' }, 'cloud', { browserTarget: { label: 'Place order' } }).risk).toBe('critical');
     expect(assessCall('browser.press', { key: 'ArrowDown' }, 'cloud').risk).toBe('low');
+  });
+  it("rates Playwright's other spellings of Enter and Space like Enter (W-165)", () => {
+    const buy = { browserTarget: { label: 'Place order' } };
+    const del = { browserTarget: { label: 'Delete account' } };
+    // "\n" and "\r" are Enter to Playwright; every part of a chord is pressed ("Enter+a" presses Enter).
+    for (const key of ['\n', '\r', 'Shift+\n', 'Control+\r', 'NumpadEnter', 'Enter+a', 'Space+Shift', 'enter', 'Return', 'Alt+Shift+s', 'Meta+a', '']) {
+      expect(isActivatingKey(key), JSON.stringify(key)).toBe(true);
+      expect(assessCall('browser.press', { key }, 'cloud', buy).risk, JSON.stringify(key)).toBe('critical');
+      expect(assessCall('browser.press', { key }, 'desktop', del).risk, JSON.stringify(key)).toBe('high');
+      // Without the element: never routine.
+      expect(assessCall('browser.press', { key }, 'cloud').risk, JSON.stringify(key)).toBe('high');
+    }
+    for (const key of ['Tab', 'Shift+Tab', 'Escape', 'ArrowUp', 'PageDown', 'a', 'A', 'Shift+a', 'Shift++', '+', 'KeyA', 'Digit1', 'Backspace', 'Control', 'F5']) {
+      expect(isActivatingKey(key), key).toBe(false);
+      expect(assessCall('browser.press', { key }, 'cloud', buy).risk, key).toBe('low');
+    }
+  });
+  it('never presses keys that type into a password or card field', () => {
+    for (const key of ['a', 'Shift+A', 'KeyA', 'Digit4', ' ', 'Control+v', 'Shift+Insert', 'Numpad1']) {
+      expect(assessCall('browser.press', { key }, 'cloud', { browserTarget: { inputType: 'password', label: 'Password' } }).blocked, key).toBeTruthy();
+      expect(assessCall('browser.press', { key }, 'desktop', { browserTarget: { autocomplete: 'cc-number' } }).blocked, key).toBeTruthy();
+    }
+    for (const key of ['Enter', '\n', 'Tab', 'Shift+Tab', 'Backspace', 'ArrowLeft', 'Escape']) {
+      expect(assessCall('browser.press', { key }, 'cloud', { browserTarget: { inputType: 'password' } }).blocked, key).toBeFalsy();
+    }
+  });
+  it('agrees with the controller on which keys type text', () => {
+    for (const key of ['a', 'Enter', '\n', '\r', 'Tab', 'Shift+Tab', 'Control+v', ' ', 'Shift++', 'Backspace', 'NumpadEnter', 'Numpad1', 'Insert', 'F5', 'ControlOrMeta+a', '']) {
+      expect(pressTypesText(key), JSON.stringify(key)).toBe(typesText(key));
+    }
   });
   it('fails closed when the element cannot be inspected', () => {
     expect(assessCall('browser.click', { ref: 'e9' }, 'cloud').risk).toBe('high');

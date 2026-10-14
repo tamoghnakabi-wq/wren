@@ -419,6 +419,37 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
+  it('W-165: a key press never types into a credential field, one key at a time', async () => {
+    const { chromium } = await import('playwright-core');
+    const browser = await chromium.launch({ channel: 'chrome', headless: true });
+    try {
+      const context = await browser.newContext();
+      const ctl = new BrowserController(context);
+      await ctl.act({ action: 'snapshot', tab: 'T' });
+      const page = context.pages()[0];
+      // #otp is a credential only by its name: the engine's own check catches it.
+      await page.setContent(`<input type=password id=pw aria-label="Password"><input id=otp name=otpCode aria-label="Verification"><input id=fine aria-label="Name">`);
+      const press = async (sel: string, key: string) => {
+        await page.focus(sel);
+        const t = (await ctl.act({ action: 'describe', ref: '@focused', tab: 'T' })).target!;
+        return ctl.act({ action: 'press', key, tab: 'T', expect: t });
+      };
+      for (const sel of ['#pw', '#otp']) {
+        for (const key of ['a', 'Shift+A', 'Digit4', ' ', 'Control+v']) {
+          const r = await press(sel, key);
+          expect(r.ok, `${sel} ${key}`).toBe(false);
+          expect(r.error, `${sel} ${key}`).toMatch(/never type passwords/);
+        }
+        expect(await page.locator(sel).inputValue(), sel).toBe('');
+        for (const key of ['Tab', 'Enter', 'Backspace']) expect((await press(sel, key)).ok, `${sel} ${key}`).toBe(true);
+      }
+      expect((await press('#fine', 'a')).ok).toBe(true);
+      expect(await page.locator('#fine').inputValue()).toBe('a');
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
   it('W-80: closing a task closes its popups too, and says so when it can\'t', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });

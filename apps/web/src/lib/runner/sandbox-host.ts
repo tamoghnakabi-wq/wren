@@ -25,6 +25,12 @@ const JOB_DIR = '$HOME/.wren/jobs';
 
 /** Changes whenever the daemon code does, so a stale daemon in a persistent VM gets replaced. */
 const DAEMON_VERSION = createHash('sha256').update(BROWSER_DAEMON_TS).digest('hex').slice(0, 16);
+/**
+ * POST stdin (JSON) to the browser daemon's /act. The daemon only serves requests with the token it
+ * wrote at its start (W-169), sent from that file so it's never on a command line; a daemon from
+ * before that (replaced at the next browser use) has no file and takes the request without it.
+ */
+const ACT = (seconds: number) => `t="$HOME/.wren/browser.token"; h=(); [ -f "$t" ] && h=(-H "@$t"); curl -s -m ${seconds} -X POST -H 'content-type: application/json' "\${h[@]}" --data-binary @- http://127.0.0.1:9333/act`;
 const HEALTH = `[ "$(cat "$HOME/.wren/browser.version" 2>/dev/null)" = "${DAEMON_VERSION}" ] && curl -s -m 2 http://127.0.0.1:9333/health`;
 
 // The command runs in a session of its own; its id ($id.sid) is what stopping a job kills,
@@ -181,7 +187,7 @@ export class SandboxHost implements ToolHost {
         const payload = Buffer.from(JSON.stringify({ action: 'close', tab: runId })).toString('base64');
         const r = await br.runCommand({
           cmd: 'bash',
-          args: ['-lc', `out=$(echo ${payload} | base64 -d | curl -s -m 10 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act); c=$?\n[ $c -eq 7 ] && exit 0\n[ $c -eq 0 ] && printf '%s' "$out" | grep -q '"ok":true' && exit 0\nexit 1`],
+          args: ['-lc', `out=$(echo ${payload} | base64 -d | { ${ACT(10)}; }); c=$?\n[ $c -eq 7 ] && exit 0\n[ $c -eq 0 ] && printf '%s' "$out" | grep -q '"ok":true' && exit 0\nexit 1`],
         });
         if (r.exitCode !== 0) return false;
       }
@@ -451,7 +457,7 @@ export class SandboxHost implements ToolHost {
   private async browserAct(action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; snapshot?: string; image?: string; preview?: string; url?: string; title?: string; target?: { label: string; role: string; inputType?: string; autocomplete?: string; elementId?: string; url?: string; href?: string; form?: string } }> {
     const sb = await this.browserVm();
     const payload = Buffer.from(JSON.stringify(action)).toString('base64');
-    const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | curl -s -m 60 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:9333/act`] });
+    const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', `echo ${payload} | base64 -d | { ${ACT(60)}; }`] });
     const out = await r.stdout();
     try {
       return JSON.parse(out);
