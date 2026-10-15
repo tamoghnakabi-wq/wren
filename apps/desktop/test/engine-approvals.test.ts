@@ -1,7 +1,11 @@
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
+// Wren's data folder: its own folder here, apart from the folder agents may use.
+process.env.WREN_DATA_DIR = realpathSync(mkdtempSync(join(tmpdir(), 'wren-data-')));
 const { decide, finishEngine, startApprovalBridge, TimelineWriter } = await import('../src/engines/common');
 
 // What an engine's permission prompt leaves on the step: a denial stays "Denied" when the engine then
@@ -33,6 +37,7 @@ function fakeStore(answer: 'approved' | 'denied') {
 
 const run = (store: unknown) => ({
   runId: 'r',
+  engine: 'claude-code' as const,
   store: store as never,
   agentName: 'a',
   autonomy: 'careful' as const,
@@ -46,6 +51,42 @@ const run = (store: unknown) => ({
   saveResumeId: async () => {},
 });
 const call = { callId: 'toolu_1', name: 'computer.write_file', args: { path: `${tmpdir()}/a.txt` }, title: 'Write a.txt', paths: [`${tmpdir()}/a.txt`] };
+
+describe("an engine's file tools (W-177)", () => {
+  it("never reach Wren itself, a credential store or another engine's state, even inside an allowed folder", async () => {
+    // The user allowed a folder that contains Wren's data folder (like their whole home folder).
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'wren-home-')));
+    const data = process.env.WREN_DATA_DIR!;
+    mkdirSync(join(home, 'project'), { recursive: true });
+    writeFileSync(join(home, 'project', 'notes.txt'), 'x');
+    symlinkSync(join(data, 'policy.json'), join(home, 'project', 'link.json'));
+    const r = { ...run(fakeStore('approved')), autonomy: 'autonomous' as const, folders: [home, data] };
+    const ask = (path: string, name = 'computer.write_file') => decide(r, new TimelineWriter(fakeStore('approved') as never, 'claude-code', 'm'), { callId: `c-${path}`, name, args: { path }, title: 'Write', paths: [path] }, () => true);
+    for (const p of [join(data, 'policy.json'), join(data, 'login', 'x', 'wren.command'), join(home, 'project', 'link.json'), join(homedir(), '.ssh', 'id_ed25519'), join(homedir(), '.grok', 'auth.json')]) {
+      const d = await ask(p);
+      expect(d.allow, p).toBe(false);
+      expect(d.message, p).toMatch(/part of Wren itself, a credential store/);
+      expect((await ask(p, 'computer.read_file')).allow, p).toBe(false);
+    }
+    expect((await ask(join(home, 'project', 'notes.txt'))).allow).toBe(true);
+    // Another engine's sign-in is off limits too (a file name and its backups).
+    const g = { ...r, engine: 'grok-build' as const };
+    const gd = await decide(g, new TimelineWriter(fakeStore('approved') as never, 'grok-build', 'm'), { callId: 'g1', name: 'computer.read_file', args: {}, title: 'Read', paths: [join(homedir(), '.claude.json.backup')] }, () => true);
+    expect(gd.allow).toBe(false);
+  });
+
+  it('go to Claude Code as deny rules for its own Read and Edit tools', async () => {
+    const { claudeDenyRules } = await import('../src/engines/claude-code');
+    const { enginePrivatePaths } = await import('../src/main/sandbox');
+    const rules = claudeDenyRules(enginePrivatePaths('claude-code', process.env.WREN_DATA_DIR!));
+    for (const p of [process.env.WREN_DATA_DIR!, join(homedir(), '.ssh'), join(homedir(), '.grok')]) {
+      expect(rules).toContain(`Read(/${p}/**)`);
+      expect(rules).toContain(`Edit(/${p}/**)`);
+    }
+    expect(rules.some((x) => x.includes('/.claude/') || x.endsWith('/.claude)'))).toBe(false); // its own state stays its own
+    expect(claudeDenyRules(['/a b/[x]*'])).toContain('Read(//a b/\\[x\\]\\*/**)');
+  });
+});
 
 describe('the approval bridge (W-129)', () => {
   const ask = (b: { url: string; token: string }, body: unknown, signal?: AbortSignal) =>

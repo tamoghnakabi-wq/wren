@@ -19,6 +19,7 @@ import {
 } from '@wren/core';
 import { runClaudeCode } from '../engines/claude-code';
 import { runGrokBuild } from '../engines/grok-build';
+import type { Engine } from './sandbox';
 import { deviceJson } from './api';
 import { engineImages, withSkipped } from '../engines/images';
 import { detect, type Capabilities } from './capabilities';
@@ -286,6 +287,7 @@ export class DeviceRunner {
       prompt,
       images,
       cwd: policy.folders[0],
+      engine: (engine === 'claude-code' ? 'claude-code' : 'grok-build') as Engine,
       folders: policy.folders,
       // Getters: the switches are checked as they are now on every permission request.
       allow: {

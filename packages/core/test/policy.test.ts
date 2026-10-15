@@ -188,6 +188,13 @@ describe('shell risk', () => {
     }
     for (const c of ['Remove-Item -Recurse .\\build', 'rm -r C:\\Users\\me\\project\\tmp', 'Remove-Item ~\\notes.txt', 'Get-ChildItem ~ -Recurse']) expect(win(c).blocked, c).toBeFalsy();
   });
+  it('reads every path of a PowerShell list, cmd rd /s and Directory.Delete (W-180)', () => {
+    const win = (c: string) => assessCall('computer.shell', { command: c }, 'desktop', { unsandboxed: true });
+    for (const c of ["Remove-Item -Recurse -Force 'C:\\Users\\victim','C:\\Temp\\spare'", 'Remove-Item -Recurse C:\\Temp\\a,~', 'rm -r -LiteralPath "D:\\x",$HOME', 'cmd /c rd /s /q C:\\', 'cmd /c rmdir /S /Q %USERPROFILE%\\..', "[System.IO.Directory]::Delete('C:\\Users\\me', $true)", "[IO.Directory]::Delete($env:USERPROFILE, $true)"]) {
+      expect(win(c).blocked, c).toBeTruthy();
+    }
+    for (const c of ["Remove-Item -Recurse 'C:\\Temp\\a','C:\\Temp\\b'", 'cmd /c rd /s /q C:\\Temp\\build', "[System.IO.Directory]::Delete('C:\\Temp\\x', $true)", 'Remove-Item ~\\a.txt,~\\b.txt']) expect(win(c).blocked, c).toBeFalsy();
+  });
 });
 
 describe('shell syntax the lexer does not follow (W-166)', () => {

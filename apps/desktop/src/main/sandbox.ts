@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
 
 // macOS Seatbelt profiles (sandbox-exec) for everything an agent runs on this
@@ -67,7 +67,9 @@ const ENGINE_STATE: Record<Engine, { dirs: string[]; prefixes: string[]; protect
   'grok-build': {
     dirs: ['.grok'],
     prefixes: [],
-    protect: ['.grok/hooks', '.grok/hooks-paths', '.grok/config.toml', '.grok/trusted_folders.toml', '.grok/managed_config.toml', '.grok/requirements.toml', '.grok/sandbox.toml', '.grok/bin', '.grok/bundled', '.grok/installed-plugins', '.grok/skills', '.grok/vendor', '.grok/marketplace-cache'],
+    // .grok/bin links to the real program in .grok/downloads (1.0.52), which the user also runs outside
+    // Wren; completions are scripts their shell may load (W-178).
+    protect: ['.grok/hooks', '.grok/hooks-paths', '.grok/config.toml', '.grok/trusted_folders.toml', '.grok/managed_config.toml', '.grok/requirements.toml', '.grok/sandbox.toml', '.grok/bin', '.grok/downloads', '.grok/completions', '.grok/bundled', '.grok/installed-plugins', '.grok/skills', '.grok/vendor', '.grok/marketplace-cache'],
   },
 };
 
@@ -149,6 +151,56 @@ function realpathOr(p: string): string {
 }
 
 const tempDirs = () => [realpathSync(tmpdir()), '/private/tmp', '/private/var/folders'];
+
+/**
+ * Whether an agent could have changed `p` (a real path): it is writable to agent commands (every engine's
+ * state off limits to them), or to Grok Build's (its own state, but not what's protected). Mirrors the
+ * profiles' rules in `build`. Wren never starts a program from such a place outside a sandbox (W-178).
+ */
+export function agentCanWrite(p: string, roots: string[], dataDir: string, home = homedir()): boolean {
+  const h = (x: string) => join(home, x);
+  const fold = (x: string) => (process.platform === 'linux' ? x : x.toLowerCase());
+  const inside = (list: string[]) => list.some((r) => fold(p) === fold(r) || fold(p).startsWith(fold(r.endsWith(sep) ? r : r + sep)) || fold(p).startsWith(fold(r) + '.'));
+  const writable = agentWritable(roots, home);
+  const never = [...appDirs(), dataDir];
+  const state = (e: Engine) => [...ENGINE_STATE[e].dirs, ...ENGINE_STATE[e].prefixes].map(h);
+  if (inside(writable) && !inside([...never, ...SECRETS.map(h), ...state('claude-code'), ...state('grok-build')])) return true;
+  const grok = ENGINE_STATE['grok-build'];
+  const own = grok.dirs.map(h);
+  return inside([...writable, ...own]) && !inside([...never, ...SECRETS.map(h).filter((x) => !own.includes(x)), ...state('claude-code'), ...grok.protect.map(h)]);
+}
+
+/**
+ * Why Wren won't start this engine program, if it won't: agents could have changed it (it, or something
+ * hard-linked to it such as a pnpm store file, is somewhere they may write). Claude Code runs outside any
+ * sandbox, so a rewritten program would run with the user's full access (W-178).
+ */
+export function untrustedProgram(path: string, roots: string[], dataDir: string): string | null {
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return `${path} can't be resolved`;
+  }
+  if (agentCanWrite(real, roots, dataDir)) return `${real} is in a folder agents on this computer may change`;
+  if (statSync(real).nlink > 1) return `${real} shares its contents with another file (a package store agents may change)`;
+  return null;
+}
+
+/**
+ * What an engine's own file tools must never read or write, whatever folders are allowed: Wren's data
+ * folder and Wren itself, credential stores, and the other engines' state (W-177). Claude Code's
+ * built-in Read/Write/Edit/Grep/Glob run in its own process, outside any profile: these go to it as
+ * deny rules, and Wren's approval check refuses them too. (A file-name prefix such as ~/.claude.json
+ * covers its backups as well.)
+ */
+export function enginePrivatePaths(engine: Engine, dataDir: string, home = homedir()): string[] {
+  const h = (p: string) => join(home, p);
+  const own = new Set(ENGINE_STATE[engine].dirs.map(h));
+  const others = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== engine).flatMap((e) => [...ENGINE_STATE[e].dirs, ...ENGINE_STATE[e].prefixes].map(h));
+  const paths = [dataDir, ...appDirs(), ...SECRETS.map(h).filter((p) => !own.has(p)), ...others];
+  return [...new Set(paths.flatMap((p) => [p, realpathOr(p)]))];
+}
 
 /** Everything agent shell commands may write (besides /dev): the allowed folders, temp and package caches. */
 export function agentWritable(roots: string[], home = homedir()): string[] {

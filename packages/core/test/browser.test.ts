@@ -419,7 +419,7 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
     }
   }, 60_000);
 
-  it('W-165/W-173: a key press never types into a credential field, one key at a time or by changing the field mid-press', async () => {
+  it('W-165/W-173/W-179: a key press never types into a credential field, one key at a time or by changing the field mid-press', async () => {
     const { chromium } = await import('playwright-core');
     const browser = await chromium.launch({ channel: 'chrome', headless: true });
     try {
@@ -462,6 +462,24 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
       }
       expect((await press('#plain', 'Shift+A')).ok).toBe(true);
       expect(await page.locator('#plain').inputValue()).toBe('A');
+
+      // W-179: the page's own handlers run after Wren's first check: relabelling in beforeinput (bubbling
+      // normally, or stopped there) or right after the text went in (input).
+      await page.setContent(`
+        <input id=bi aria-label="Name"><input id=bistop aria-label="Name"><input id=after aria-label="Name"><input id=area-ok aria-label="Name">
+        <script>
+          bi.addEventListener('beforeinput', () => bi.setAttribute('aria-label', 'Password'));
+          bistop.addEventListener('beforeinput', (e) => { bistop.setAttribute('aria-label', 'Password'); e.stopPropagation(); });
+          after.addEventListener('input', () => after.setAttribute('aria-label', 'Password'));
+        </script>`);
+      for (const sel of ['#bi', '#bistop', '#after']) {
+        const r = await press(sel, 'a');
+        expect(r.ok, sel).toBe(false);
+        expect(r.error, sel).toMatch(/field changed/);
+        expect(await page.locator(sel).inputValue(), sel).toBe('');
+      }
+      expect((await press('#area-ok', 'a')).ok).toBe(true);
+      expect(await page.locator('#area-ok').inputValue()).toBe('a');
     } finally {
       await browser.close();
     }

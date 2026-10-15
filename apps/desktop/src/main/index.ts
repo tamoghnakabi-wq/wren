@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
@@ -653,10 +653,18 @@ function registerIpc() {
 function openEngineLogin(engine: 'claude-code' | 'grok-build') {
   const cmd = engine === 'claude-code' ? 'claude' : 'grok login';
   if (process.platform === 'darwin') {
-    // In Wren's data folder, out of agents' reach (W-172); removed after a while, and at the next start.
+    // In Wren's data folder, out of agents' reach (W-172); removed after a while (or at a start after that).
     const { file, dir } = engineLoginScript(dataDir(), engine);
-    void shell.openPath(file);
-    setTimeout(() => rmSync(dir, { recursive: true, force: true }), 10 * 60_000).unref();
+    void shell.openPath(file).then((err) => {
+      if (err && Notification.isSupported()) new Notification({ title: 'Couldn’t open Terminal to sign in', body: err }).show();
+    });
+    setTimeout(() => {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* removed at a later start */
+      }
+    }, 10 * 60_000).unref();
   } else if (process.platform === 'win32') {
     spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', cmd], { detached: true, stdio: 'ignore' }).unref();
   }
@@ -702,14 +710,24 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   // Device tokens given back while the server couldn't be reached: retried now and every 10 minutes (W-148).
   void retryGiveBacks().catch(() => {});
   setInterval(() => void retryGiveBacks().catch(() => {}), 10 * 60_000).unref();
-  // Engine runs keep files in the data folder (Grok's hook plugin, Claude Code's approval files, engine
-  // sign-in scripts) and remove them when they end; a crash can leave some behind (W-137). None is in use yet.
-  for (const d of ['engines', 'approvals', 'login']) {
+  // Engine runs keep files in the data folder (Grok's hook plugin, Claude Code's approval files) and remove
+  // them when they end; a crash can leave some behind (W-137). No run has started yet, so none are in use.
+  for (const d of ['engines', 'approvals']) {
     try {
       rmSync(join(dataDir(), d), { recursive: true, force: true });
     } catch {
       /* never in the way of starting */
     }
+  }
+  // Engine sign-in scripts: a Terminal opened before a restart may not have read its script yet, so only
+  // those older than the 10 minutes they're kept for.
+  try {
+    const login = join(dataDir(), 'login');
+    for (const d of existsSync(login) ? readdirSync(login) : []) {
+      if (Date.now() - statSync(join(login, d)).mtimeMs > 10 * 60_000) rmSync(join(login, d), { recursive: true, force: true });
+    }
+  } catch {
+    /* never in the way of starting */
   }
   // Only Wren's own page, in its own frame, gets anything: notifications and writing to the clipboard.
   // Electron asks the check handler for what a page only queries, so both answer the same way.
@@ -717,7 +735,8 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
     (permission === 'notifications' || permission === 'clipboard-sanitized-write') && urls.every((u) => !!u && URL.canParse(u) && new URL(u).origin === APP_ORIGIN);
   const wren = session.fromPartition('persist:wren');
   wren.setPermissionRequestHandler((wc, permission, cb, details) => cb(allowed(permission, wc.getURL(), details.requestingUrl)));
-  wren.setPermissionCheckHandler((wc, permission, origin) => allowed(permission, wc?.getURL(), origin));
+  // A check without a page (Wren's service worker, for notifications) answers by the asking origin alone.
+  wren.setPermissionCheckHandler((wc, permission, origin) => allowed(permission, wc ? wc.getURL() : origin, origin));
   registerIpc();
   createWindow();
   tray = new Tray(trayIcon());

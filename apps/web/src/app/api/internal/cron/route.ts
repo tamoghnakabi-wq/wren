@@ -94,8 +94,11 @@ export const POST = route(async (req) => {
   });
 
   await stage('approvals', async () => {
+    // At most 100 a minute, so the wake-ups below (which run even past the deadline) stay bounded.
     const expired = await sql`
-      update public.approvals set status = 'expired' where status = 'pending' and expires_at < now()
+      update public.approvals set status = 'expired'
+      where id in (select id from public.approvals where status = 'pending' and expires_at < now() order by expires_at limit 100)
+        and status = 'pending'
       returning run_id, session_id, user_id, title`;
     report.expired = expired.length;
     // Woken even past the deadline: no later call would find these runs again.
@@ -121,11 +124,12 @@ export const POST = route(async (req) => {
   await stage(
     'cleanup',
     async () => {
+      const capped = Date.now() + 15_000;
       const unclean = await sql`
         select id, agent_id from public.runs
         where cleanup_pending and runtime = 'cloud' and ended_at < now() - interval '30 seconds'
         order by ended_at limit 10`;
-      if (!open()) return;
+      if (!open() || Date.now() > capped) return;
       await Promise.allSettled(unclean.map(async (r) => (await cleanUpCloudRun(r.agent_id, r.id)) && report.cleaned++));
     },
     15_000,
@@ -138,7 +142,7 @@ export const POST = route(async (req) => {
 
   await stage('housekeeping', async () => {
     await sql`delete from public.device_pairings where expires_at < now() - interval '1 day'`;
-    await sql`select public.wren_mfa_cleanup()`;
+    if (open()) await sql`select public.wren_mfa_cleanup()`;
   });
   return json(report);
 });

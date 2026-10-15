@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { LoopOutcome } from '@wren/core';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
-import { approvalServerProfile, hasSeatbelt } from '../main/sandbox';
+import { approvalServerProfile, enginePrivatePaths, hasSeatbelt, untrustedProgram } from '../main/sandbox';
 import { appPaths, claudeSupportsRestricted, decide, findCli, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
@@ -33,6 +33,28 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
 const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet,Task';
 /** Claude Code's own to-do list: shown as the task's plan, not as steps. */
 const PLAN_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet']);
+
+/**
+ * A path as Claude Code's permission rules write it: "//" + the absolute path (gitignore syntax, so its
+ * special characters escaped); on Windows Claude Code matches C:\\Users\\me as /c/Users/me.
+ */
+export function claudeRulePath(p: string): string {
+  const posix = process.platform === 'win32' ? p.replace(/^([A-Za-z]):/, (_, d: string) => '/' + d.toLowerCase()).replace(/\\/g, '/') : p;
+  return '/' + posix.replace(/([*?[\]\\!#])/g, '\\$1');
+}
+
+/**
+ * Deny rules for Claude Code's own file tools, which run in its unsandboxed process and read the working
+ * folders without asking (W-177): Wren's data and app, credential stores, other engines' state. Its
+ * permission prompts reach Wren's check too, but reads don't prompt. Checked with Claude Code 2.1.300:
+ * Read, Grep and Write are refused there, also through a link.
+ */
+export function claudeDenyRules(paths: string[]): string[] {
+  return paths.flatMap((p) => {
+    const r = claudeRulePath(p);
+    return [`Read(${r})`, `Read(${r}/**)`, `Edit(${r})`, `Edit(${r}/**)`];
+  });
+}
 
 function mapTool(name: string, input: Record<string, unknown>) {
   const m = TOOL_MAP[name];
@@ -121,6 +143,8 @@ function resultText(content: unknown): string {
 export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => boolean, approveScript: string): Promise<LoopOutcome> {
   const cli = findCli('claude');
   if (!cli) return { kind: 'failed', error: 'Claude Code isn’t installed on this computer. Install it (code.claude.com), run `claude` once and sign in with your Claude account, then try again.', code: 'engine_missing', steps: 0 };
+  const changed = untrustedProgram(cli, allowedRoots(run.folders), dataDir());
+  if (changed) return { kind: 'failed', error: `Wren won't start Claude Code from where it is installed: ${changed}, and Claude Code runs outside the sandbox. Install it with its own installer (code.claude.com), or don't allow agents that folder.`, code: 'engine_untrusted', steps: 0 };
   if (!claudeSupportsRestricted(cli)) return { kind: 'failed', error: 'This version of Claude Code is too old for Wren. Update it (run `claude update` in Terminal), then try again.', code: 'engine_outdated', steps: 0 };
 
   const writer = new TimelineWriter(run.store, 'claude-code', run.model === 'default' ? 'Claude Code' : run.model);
@@ -149,6 +173,9 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     if (hasSeatbelt()) serverEnv.WREN_APPROVAL_SB = approvalServerProfile(allowedRoots(run.folders), dataDir(), appPaths(approveScript), privateDir);
     const mcpFile = join(privateDir, 'mcp.json');
     writeFileSync(mcpFile, JSON.stringify({ mcpServers: { wren: { command: process.execPath, args: [approveScript], env: serverEnv } } }), { mode: 0o600 });
+    // --settings still applies in restricted mode (the user's own settings files don't).
+    const settingsFile = join(privateDir, 'settings.json');
+    writeFileSync(settingsFile, JSON.stringify({ permissions: { deny: claudeDenyRules(enginePrivatePaths('claude-code', dataDir())) } }), { mode: 0o600 });
     const args = [
       '-p',
       '--input-format',
@@ -167,6 +194,8 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       '--strict-mcp-config',
       '--mcp-config',
       mcpFile,
+      '--settings',
+      settingsFile,
       '--append-system-prompt',
       `You are working for the user through Wren as the agent "${run.agentName}". ${run.instructions}`.slice(0, 20000),
     ];

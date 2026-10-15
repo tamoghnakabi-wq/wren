@@ -9,9 +9,9 @@ import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcom
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
 import { dataDir } from '../main/config';
-import { allowedRoots } from '../main/paths';
+import { allowedRoots, reachesAny } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
-import { engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
+import { enginePrivatePaths, engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
 import { agentEnv, SHELL_PREFIX, toolEnv } from '../main/shellenv';
 import { currentProgramTrust } from '../main/trust';
 
@@ -21,6 +21,8 @@ import { currentProgramTrust } from '../main/trust';
 
 export interface EngineRun {
   runId: string;
+  /** Which CLI runs it: decides which engine state counts as its own. */
+  engine: Engine;
   store: RemoteStore;
   agentName: string;
   autonomy: Autonomy;
@@ -336,6 +338,12 @@ export async function decide(
   const over = () => run.signal.aborted || !!asker?.aborted;
   const stopped = { allow: false, message: 'Stopped by the user.' };
   if (over()) return stopped;
+  // Never Wren itself, a credential store or another engine's state, even inside an allowed folder (W-177).
+  if (call.paths?.length) {
+    const priv = enginePrivatePaths(run.engine, dataDir());
+    const base = allowedRoots(run.folders)[0] ?? homedir();
+    for (const p of call.paths) if (reachesAny(p, base, priv)) return { allow: false, message: `Blocked by Wren: ${p} is part of Wren itself, a credential store or another app's sign-in, which agents never use.` };
+  }
   for (const p of call.paths ?? []) if (!inFolders(p)) return { allow: false, message: `Blocked by Wren: ${p} is outside the folders allowed on this computer.` };
   if (call.name === 'computer.shell' && !run.allow.shell) return { allow: false, message: 'Blocked by Wren: terminal access is turned off on this computer (Wren → Settings → This computer).' };
   if (call.name.startsWith('browser.') && !run.allow.browser) return { allow: false, message: 'Blocked by Wren: browser use is turned off on this computer.' };

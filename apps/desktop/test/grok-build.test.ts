@@ -59,6 +59,8 @@ writeFileSync(agentPath, AGENT);
 
 const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0, bridgesOpen: 0, spawnFails: false }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
+// The CLI here is a stand-in script, not an installed program: the install-location check is tested on its own.
+vi.mock('../src/main/sandbox', async (orig) => ({ ...(await orig<typeof import('../src/main/sandbox')>()), untrustedProgram: () => null }));
 process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-grok-data-'));
 vi.mock('../src/engines/common', () => {
   class TimelineWriter {
@@ -109,6 +111,7 @@ const run = (resumeId?: string, prompt = 'how are you', images?: { mime: string;
     run: {
       runId: `r-${Math.random().toString(36).slice(2)}`,
       store: { usageSource: '', append: async () => ({ id: 'e' }), update: async () => {} } as never,
+      engine: 'grok-build' as const,
       agentName: 'chitti',
       autonomy: 'balanced' as const,
       instructions: '',

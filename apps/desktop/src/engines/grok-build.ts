@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import readline from 'node:readline';
 import type { LoopOutcome } from '@wren/core';
 import { dataDir } from '../main/config';
+import { allowedRoots } from '../main/paths';
+import { untrustedProgram } from '../main/sandbox';
 import { decide, findCli, finishEngine, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
 // Grok Build engine: drives xAI's official `grok` CLI through its documented
@@ -71,6 +73,8 @@ const LOAD_MS = 180_000;
 export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boolean, hookScript: string): Promise<LoopOutcome> {
   const cli = findCli('grok');
   if (!cli) return { kind: 'failed', error: 'Grok Build isn’t installed on this computer. Install it (docs.x.ai/build), run `grok login` with your xAI account, then try again.', code: 'engine_missing', steps: 0 };
+  const changed = untrustedProgram(cli, allowedRoots(run.folders), dataDir());
+  if (changed) return { kind: 'failed', error: `Wren won't start Grok Build from where it is installed: ${changed}. Install it with its own installer (docs.x.ai/build), or don't allow agents that folder.`, code: 'engine_untrusted', steps: 0 };
 
   if (run.signal.aborted) return { kind: 'cancelled', steps: 0 }; // stopped before it started (W-122)
   const writer = new TimelineWriter(run.store, 'grok-build', run.model === 'default' ? 'Grok Build' : run.model);

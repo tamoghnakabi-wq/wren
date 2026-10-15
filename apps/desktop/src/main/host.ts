@@ -257,7 +257,9 @@ export class LocalHost implements ToolHost {
     const { chromium, selectors } = await import('playwright-core');
     await registerSelectors(selectors);
     const profile = browserProfile();
-    const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chrome', 'msedge', 'chromium'];
+    // Installed browsers only: Playwright's own Chromium lives in a cache agents may write (and Wren starts
+    // the browser outside any sandbox), so it is never a fallback (W-178).
+    const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chrome', 'msedge'];
     let lastErr: unknown;
     for (const channel of channels) {
       try {

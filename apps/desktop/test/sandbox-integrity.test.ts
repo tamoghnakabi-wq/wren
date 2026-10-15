@@ -78,6 +78,42 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('the engine sign-in script
   });
 });
 
+describe('programs Wren starts outside the sandbox (W-178)', () => {
+  it('are never ones agents could have changed', async () => {
+    const { agentCanWrite } = await import('../src/main/sandbox');
+    const home = '/Users/someone';
+    const data = `${home}/Library/Application Support/Wren`;
+    const can = (p: string, roots: string[] = [`${home}/Projects`]) => agentCanWrite(p, roots, data, home);
+    // Playwright's own Chromium, a bun or pnpm global install: in caches agents may write.
+    expect(can(`${home}/Library/Caches/ms-playwright/chromium-1243/chrome-mac/Chromium.app/Contents/MacOS/Chromium`)).toBe(true);
+    expect(can(`${home}/.bun/install/global/node_modules/@anthropic-ai/claude-code/cli.js`)).toBe(true);
+    expect(can(`${home}/Library/pnpm/store/v10/files/00/abc`)).toBe(true);
+    // Claude Code's and Grok Build's own installs, even when the whole home folder is allowed.
+    for (const roots of [[`${home}/Projects`], [home]]) {
+      expect(can(`${home}/.local/share/claude/versions/2.1.300`, roots)).toBe(false);
+      expect(can(`${home}/.grok/downloads/grok-1.0.52-macos-aarch64`, roots)).toBe(false);
+      expect(can(`${home}/.grok/bin/grok`, roots)).toBe(false);
+      expect(can(`${data}/policy.json`, roots)).toBe(false);
+    }
+    // Grok's commands may still write the rest of its state (sessions, logs).
+    expect(can(`${home}/.grok/sessions/x.json`)).toBe(true);
+    // A program in an allowed folder (an npm global prefix under an allowed home) could be changed.
+    expect(can(`${home}/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js`, [home])).toBe(true);
+    expect(can('/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js', [home])).toBe(false);
+  });
+
+  it('refuses a program whose file is shared with another (a hard link into a package store)', async () => {
+    const { untrustedProgram } = await import('../src/main/sandbox');
+    const { linkSync } = await import('node:fs');
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'wren-prog-')));
+    writeFileSync(join(root, 'tool'), '#!/bin/sh\n');
+    linkSync(join(root, 'tool'), join(root, 'store-copy'));
+    // (In the temp folder it is agent-writable anyway; outside it, the shared file alone is enough.)
+    expect(untrustedProgram(join(root, 'tool'), [], join(root, 'data'))).toMatch(/may change|shares its contents/);
+    expect(untrustedProgram(join(root, 'missing'), [], join(root, 'data'))).toMatch(/can't be resolved/);
+  });
+});
+
 describe("Wren's own file tool (W-128)", () => {
   it('refuses to write into Wren itself, even inside an allowed folder', async () => {
     const own = appDirs()[0];

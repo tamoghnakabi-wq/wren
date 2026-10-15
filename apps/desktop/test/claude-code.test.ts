@@ -68,6 +68,8 @@ writeFileSync(cliPath, CLI);
 
 const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[], bridgesOpen: 0, spawnFails: false }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
+// The CLI here is a stand-in script, not an installed program: the install-location check is tested on its own.
+vi.mock('../src/main/sandbox', async (orig) => ({ ...(await orig<typeof import('../src/main/sandbox')>()), untrustedProgram: () => null }));
 process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-claude-data-'));
 vi.mock('../src/engines/common', () => {
   class TimelineWriter {
@@ -124,6 +126,7 @@ beforeEach(() => {
 
 const engineRun = (prompt: string, extra: Record<string, unknown> = {}) => ({
   runId: 'r1',
+  engine: 'claude-code' as const,
   store: { usageSource: '', append: async (type: string, data: unknown) => (type === 'plan' && h.plans.push(data), { id: 'e' }), update: async () => {}, recordUsage: async (u: unknown) => void h.log.push(`usage:${JSON.stringify(u)}`) } as never,
   agentName: 'coder',
   autonomy: 'balanced' as const,
@@ -217,6 +220,7 @@ describe('Claude Code to-do list', () => {
     const run = {
       runId: 'r1',
       store: { usageSource: '', append: async (type: string, data: unknown) => (type === 'plan' && h.plans.push(data), { id: 'e' }), update: async () => {}, recordUsage: async () => {} } as never,
+      engine: 'claude-code' as const,
       agentName: 'coder',
       autonomy: 'balanced' as const,
       instructions: '',

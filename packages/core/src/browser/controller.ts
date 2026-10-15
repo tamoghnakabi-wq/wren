@@ -299,12 +299,23 @@ const ENGINE = `({
     if (texty && this.secret(el)) return { error: 'secret' };
     const page = el === document.documentElement;
     const parts = this.keyParts(key || 'Enter');
-    const g = { delivered: false, blocked: false, changed: false, fixes: 0, downs: 0 };
+    const g = { delivered: false, blocked: false, changed: false, kept: false, fixes: 0, downs: 0 };
     // ...and the field must stay what was checked while the keys arrive: a page can make it a password
     // field (or retitle it) in a handler of the chord's first key, before the one that types (W-173).
     const before = texty ? this.fieldState(el) : '';
     const changed = () => texty && (this.secret(el) || this.fieldState(el) !== before);
     const refuse = (e) => { e.preventDefault(); e.stopImmediatePropagation(); g.changed = true; };
+    // The field's contents before each key, to put back if text reached a field that changed anyway (a
+    // page handler running after Wren's checks, W-179).
+    const field = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? Object.getOwnPropertyDescriptor(el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype, 'value') : null;
+    const read = () => (field ? field.get.call(el) : el.innerHTML);
+    let prev = texty ? read() : '';
+    const restore = () => {
+      g.changed = true;
+      if (read() === prev) return;
+      if (field) field.set.call(el, prev); else el.innerHTML = prev;
+      if (read() !== prev) g.kept = true;
+    };
     const mine = (t) => t === el || (page && (t === document.body || t === document.documentElement || t === document));
     // Something moved focus before the key itself arrived (a timer, or a handler of one of the
     // chord's modifiers): put it back (after the mover's script ends).
@@ -326,6 +337,7 @@ const ENGINE = `({
       if (!e.isTrusted) return;
       // A keydown or keypress (what inserts the text) into a field that changed: nothing typed.
       if (e.type !== 'keyup' && (g.changed || changed())) return refuse(e);
+      if (texty && e.type === 'keydown') prev = read();
       const ok = mine(e.composedPath()[0]);
       if (!g.delivered) {
         if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); g.blocked = true; return; }
@@ -334,27 +346,39 @@ const ENGINE = `({
       }
       if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); }
     };
-    // The last moment before text goes in (a keydown handler of the typing key itself can change the field).
+    // The last moments before text goes in (a keydown handler of the typing key itself can change the
+    // field): as beforeinput starts, and again once the page's own handlers for it have run (bubbling
+    // back to the window), when it can still be cancelled.
     const onInput = (e) => {
       if (e.isTrusted && (g.changed || changed())) refuse(e);
+    };
+    // If text went in anyway (a page handler stopped beforeinput before it bubbled back), take it out.
+    const onInputted = (e) => {
+      if (e.isTrusted && (g.changed || changed())) restore();
     };
     const kinds = ['keydown', 'keypress', 'keyup'];
     document.addEventListener('focusin', keep, true); document.addEventListener('focusout', keep, true);
     for (const k of kinds) window.addEventListener(k, onKey, true);
     window.addEventListener('beforeinput', onInput, true);
+    window.addEventListener('beforeinput', onInput, false);
+    window.addEventListener('input', onInputted, true);
     g.off = () => {
       document.removeEventListener('focusin', keep, true); document.removeEventListener('focusout', keep, true);
       for (const k of kinds) window.removeEventListener(k, onKey, true);
       window.removeEventListener('beforeinput', onInput, true);
+      window.removeEventListener('beforeinput', onInput, false);
+      window.removeEventListener('input', onInputted, true);
     };
+    // A last look when the press ends: a field that changed after the text went in gets it taken back out.
+    g.final = () => { if (texty && !g.changed && changed()) restore(); };
     this.guard = g;
     return { ok: true };
   },
   disarm() {
     const g = this.guard;
     if (!g) return { none: true };
-    g.off(); this.guard = null;
-    return { delivered: g.delivered, blocked: g.blocked, changed: g.changed };
+    g.final(); g.off(); this.guard = null;
+    return { delivered: g.delivered, blocked: g.blocked, changed: g.changed, kept: g.kept };
   },
   query(root, sel) {
     const [op, a, b, c] = sel.split(' ');
@@ -519,7 +543,8 @@ export class BrowserController {
       await page.keyboard.press(key);
     } finally {
       // After a navigation the guard went with the old page, which is fine: the key arrived.
-      const r = await this.ask<{ blocked?: boolean; delivered?: boolean; changed?: boolean; none?: boolean }>(page, 'disarm').catch(() => ({ blocked: false, delivered: undefined, changed: false, none: true }));
+      const r = await this.ask<{ blocked?: boolean; delivered?: boolean; changed?: boolean; kept?: boolean; none?: boolean }>(page, 'disarm').catch(() => ({ blocked: false, delivered: undefined, changed: false, kept: false, none: true }));
+      if (r.kept) return TYPE_ERRORS.kept;
       if (r.changed) return TYPE_ERRORS.changed;
       if (r.blocked) return 'The page moved focus to something else just before the key press, so Wren stopped it. Take a new snapshot and check the page.';
       // The guard never saw the key arrive (the page stopped the events before Wren's check could):

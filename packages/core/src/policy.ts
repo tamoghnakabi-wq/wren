@@ -499,14 +499,15 @@ export function isReadOnlyCommand(command: string, trust?: ProgramTrust): boolea
  * way PowerShell would, where \ separates folders, ` is the escape and { } enclose script blocks.
  */
 function roughWords(text: string, shell: 'posix' | 'powershell'): (string | null)[] {
-  const operator = shell === 'posix' ? /[ \t\n;&|()<>`]/ : /[ \t\n;&|()<>{}]/;
+  // PowerShell's "," makes a list of arguments ('C:\Users\me','C:\Temp' is two paths, W-180).
+  const operator = shell === 'posix' ? /[ \t\n;&|()<>`]/ : /[ \t\n;&|()<>{},]/;
   const out: (string | null)[] = [];
   let w = '';
   for (const c of text) {
     if (operator.test(c)) {
       if (w) out.push(w);
       w = '';
-      if (!/[ \t]/.test(c)) out.push(null);
+      if (!/[ \t,]/.test(c)) out.push(null);
     } else w += c;
   }
   if (w) out.push(w);
@@ -518,14 +519,15 @@ function roughWords(text: string, shell: 'posix' | 'powershell'): (string | null
 /**
  * The whole system, a top-level folder or a home folder (or everything in one): "/", "/usr/*", "~",
  * "$HOME/.", "~/a/../..", "/Users/me/", and on Windows "C:\\", "C:\\Users\\me", "$env:USERPROFILE",
- * "$env:SystemRoot". Case doesn't matter (Windows ignores it). Relative paths depend on the working folder: no.
+ * "%USERPROFILE%", "$env:SystemRoot". Case doesn't matter (Windows ignores it). Relative paths depend on the working folder: no.
  */
 function wholeTree(path: string): boolean {
   const segs = path.toLowerCase().replace(/\\/g, '/').split('/');
   if (!path) return false;
-  const home = /^(~[^/]*|\$home|\$\{home\}|\$env:userprofile|\$\{env:userprofile\})$/.test(segs[0]);
-  // Some other folder an environment variable names (the Windows folder, Program Files…): treated as a top-level one.
-  const named = !home && /^\$\{?env:/.test(segs[0]);
+  const home = /^(~[^/]*|\$home|\$\{home\}|\$env:userprofile|\$\{env:userprofile\}|%userprofile%)$/.test(segs[0]);
+  // Some other folder an environment variable names (the Windows folder, Program Files…, in PowerShell's
+  // or cmd's spelling): treated as a top-level one.
+  const named = !home && /^(\$\{?env:|%[a-z_()]+%)/.test(segs[0]);
   if (!home && !named && segs[0] !== '' && !/^[a-z]:$/.test(segs[0])) return false;
   const parts: string[] = [];
   for (const seg of segs.slice(1)) {
@@ -539,8 +541,11 @@ function wholeTree(path: string): boolean {
   return parts.length <= 1 || (parts.length === 2 && (parts[0] === 'users' || parts[0] === 'home' || parts.join('/') === 'var/root'));
 }
 
-/** rm, and PowerShell's Remove-Item under its names (PowerShell ignores case, so RM is rm too). */
-const REMOVERS = new Set(['rm', 'remove-item', 'ri', 'del', 'erase', 'rd', 'rmdir']);
+/**
+ * rm, and PowerShell's Remove-Item under its names (PowerShell ignores case, so RM is rm too), cmd's rd
+ * and .NET's Directory.Delete (recursive with $true).
+ */
+const REMOVERS = new Set(['rm', 'remove-item', 'ri', 'del', 'erase', 'rd', 'rmdir', '[system.io.directory]::delete', '[io.directory]::delete']);
 
 /**
  * A recursive delete of the whole system, a top-level folder or a home folder, however its options are
@@ -552,13 +557,22 @@ function wipesEverything(text: string): boolean {
   for (const shell of ['posix', 'powershell'] as const) {
     const words = roughWords(text, shell);
     for (let i = 0; i < words.length; i++) {
-      if (!REMOVERS.has((words[i] ?? '').replace(/^.*\//, '').replace(/\.exe$/i, '').toLowerCase())) continue;
+      const name = (words[i] ?? '').toLowerCase();
+      if (!REMOVERS.has(name.startsWith('[') ? name : name.replace(/^.*\//, '').replace(/\.exe$/, ''))) continue;
       let recursive = false;
       let operands = false;
       const targets: string[] = [];
-      for (let k = i + 1; k < words.length && words[k] !== null; k++) {
+      const cmd = name === 'rd' || name === 'rmdir';
+      // Directory.Delete's arguments follow its "(".
+      for (let k = name.startsWith('[') && words[i + 1] === null ? i + 2 : i + 1; k < words.length && words[k] !== null; k++) {
         // PowerShell takes en and em dashes for "-" too.
         const w = words[k]!.replace(/^[\u2013\u2014\u2015]/, '-');
+        // cmd's rd /s (its /q is just quiet), and Directory.Delete(path, $true), are recursive too.
+        if (cmd && /^\/[sq]$/i.test(w)) {
+          recursive ||= /s/i.test(w);
+          continue;
+        }
+        if (w.toLowerCase() === '$true') recursive = true;
         if (operands || w === '-' || !w.startsWith('-')) targets.push(w);
         else if (w === '--') operands = true;
         else if (w.startsWith('--')) recursive ||= longOpt(w, '--recursive');
