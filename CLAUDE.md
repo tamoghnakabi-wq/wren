@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-16: `main` has one local commit over `origin/main`, the re-audit #24 fixes (W-181…W-186, desktop **0.1.31**), not yet pushed or released; production runs `ed1c8aa` and desktop 0.1.30 (the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-four Codex security audits (W-1…W-186) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-16: `main` is in sync with `origin/main`; the last code commit is `737bf84` (re-audit #24 fixes W-181…W-186), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.31** (released; the signed update feed serves it on all three platforms). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-four Codex security audits (W-1…W-186) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -289,7 +289,7 @@ How each part works:
 | Re-audit #22 (of 0.1.27) | W-172…W-176 | `ca7b1e9`, 0.1.28 | See below; no migration |
 | Re-audit #23 (of 0.1.28) | W-177…W-180 | `12d2a8d`, 0.1.29 | See below; no migration |
 | (hardening) | files that run later (AUTORUN) | `ed1c8aa`, 0.1.30 | Shell startup files, git global config, LaunchAgents, Claude settings |
-| Re-audit #24 (of 0.1.30) | W-181…W-186 | not yet pushed, 0.1.31 | See below; no migration |
+| Re-audit #24 (of 0.1.30) | W-181…W-186 | `737bf84`, 0.1.31 | See below; no migration |
 
 Round 24 in brief (desktop 0.1.31; Codex report /private/tmp/wren-re-audit-0.1.29-2026-10-16.md, of `ed1c8aa`; the fresh pass covered Windows code, the task lifecycle and leases, Sign in with ChatGPT and the model adapters, and the desktop's other tools):
 - **W-181** (High) the program-trust check counted `<protected folder>.anything` as protected (`~/.claude.payload/cli`), unlike the profiles: it now matches folders exactly and only real file-name prefixes by prefix.
