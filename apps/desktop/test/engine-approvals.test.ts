@@ -75,6 +75,17 @@ describe("an engine's file tools (W-177)", () => {
     expect(gd.allow).toBe(false);
   });
 
+  it('never change what runs programs later (shell startup files, git config, Claude Code settings), but may read them', async () => {
+    const r = { ...run(fakeStore('approved')), autonomy: 'autonomous' as const, folders: [homedir()] };
+    const ask = (path: string, name: string) => decide(r, new TimelineWriter(fakeStore('approved') as never, 'claude-code', 'm'), { callId: `a-${name}-${path}`, name, args: { path }, title: name, paths: [path] }, () => true);
+    for (const f of ['.zshrc', '.gitconfig', 'Library/LaunchAgents/x.plist', '.claude/settings.json', '.claude/hooks/pre.sh', '.oh-my-zsh/custom/x.zsh']) {
+      const d = await ask(join(homedir(), f), 'computer.write_file');
+      expect(d.allow, f).toBe(false);
+      expect(d.message, f).toMatch(/run later outside Wren's sandbox/);
+    }
+    expect((await ask(join(homedir(), '.zshrc'), 'computer.read_file')).allow).toBe(true);
+  });
+
   it('go to Claude Code as deny rules for its own Read and Edit tools', async () => {
     const { claudeDenyRules } = await import('../src/engines/claude-code');
     const { enginePrivatePaths } = await import('../src/main/sandbox');

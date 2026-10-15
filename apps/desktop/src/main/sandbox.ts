@@ -46,6 +46,24 @@ const CACHES = [
 const HELPER_PROGRAMS = ['/bin/cat', '/bin/sh', '/bin/bash', '/bin/mkdir', '/usr/bin/dirname', '/usr/bin/find', '/usr/bin/xargs', '/usr/bin/stat', '/usr/bin/head', '/private/var/select/sh'];
 const SYSTEM_RUNTIME = ['/usr/lib', '/System/Library/dyld', '/System/Volumes/Preboot/Cryptexes/OS', '/System/Cryptexes/OS', '/private/var/db/dyld', '/dev'];
 
+/**
+ * Places that make programs run later, outside any sandbox: when the user opens a terminal (shell startup
+ * files and what they load), opens an editor or tmux, uses git anywhere (its global config: aliases, hooks
+ * path, filters), logs in (LaunchAgents), or starts Claude Code (its settings, hooks, instructions, MCP
+ * servers). No agent writes them, even when an allowed folder (the home folder) contains them; reading is
+ * fine. Windows has its own: the Startup folder and PowerShell profiles.
+ */
+export const AUTORUN = [
+  '.zshrc', '.zshenv', '.zprofile', '.zlogin', '.zlogout', '.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.kshrc', '.mkshrc',
+  '.oh-my-zsh', '.zsh', '.p10k.zsh', '.zinit', '.zplug', '.antigen', '.config/zsh', '.config/fish', '.config/nushell', '.config/starship.toml',
+  '.tmux.conf', '.config/tmux', '.vimrc', '.vim', '.config/nvim', '.emacs', '.emacs.d', '.config/emacs',
+  '.gitconfig', '.config/git',
+  'Library/LaunchAgents',
+  '.claude/settings.json', '.claude/settings.local.json', '.claude/CLAUDE.md', '.claude/hooks', '.claude/commands', '.claude/agents', '.claude/plugins', '.claude/skills', '.claude/output-styles', '.claude.json',
+  ...(process.platform === 'win32' ? ['AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup', 'Documents/WindowsPowerShell', 'Documents/PowerShell', '.config/powershell'] : []),
+];
+export const autorunPaths = (home = homedir()) => AUTORUN.map((p) => join(home, p));
+
 /** Never readable: credential stores, other apps' private data, registry/cloud tokens. */
 const SECRETS = [
   '.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azure', '.terraform.d', '.vercel', '.huggingface', '.netrc', '.git-credentials',
@@ -219,7 +237,7 @@ function build(s: Spec): string {
   const writable = [...s.roots, ...temp, ...caches, ...engineDirs];
   const readable = [...s.roots, ...caches, ...engineDirs, ...(s.tools ? TOOLCHAINS.map(h) : []), ...(s.readOnly ?? [])];
   const ownState = new Set(engineDirs);
-  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? [])])];
+  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? []), ...autorunPaths(home)])];
   const secrets = [...SECRETS.map(h).filter((p) => !ownState.has(p)), s.dataDir];
   const otherEngines = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== s.engine);
   for (const e of otherEngines) for (const d of ENGINE_STATE[e].dirs) secrets.push(h(d));

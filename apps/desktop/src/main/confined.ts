@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync, unlinkSync, writeSync, type BigIntStats } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
-import { confinePath } from './paths';
-import { appDirs, fileOpsProfile, hasSeatbelt } from './sandbox';
+import { homedir } from 'node:os';
+import { confinePath, reachesAny } from './paths';
+import { appDirs, autorunPaths, fileOpsProfile, hasSeatbelt } from './sandbox';
 
 // File reads, writes and listings the agent asks for. A path is checked against
 // the allowed folders first (paths.ts), but a folder could be swapped for a link
@@ -81,6 +82,10 @@ const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p)
 const isPrivate = (p: string, dataDir: string) => privateRoots(dataDir).some((r) => within(fold(p), fold(r)));
 function refusePrivate(p: string, dataDir: string) {
   if (isPrivate(p, dataDir)) throw new Error(`"${p}" is part of Wren itself, so the agent can't use it.`);
+}
+/** A file that makes programs run later outside the sandbox (a shell startup file, git's global config…). */
+function refuseAutorun(p: string, roots: string[]) {
+  if (reachesAny(p, roots[0] ?? homedir(), autorunPaths())) throw new Error(`"${p}" makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.`);
 }
 
 function lstatOrNull(p: string): BigIntStats | null {
@@ -163,6 +168,7 @@ export async function readConfined(path: string, roots: string[], dataDir: strin
 /** Create or replace a file already checked to be inside `roots` (parent folders included). */
 export async function writeConfined(path: string, content: Buffer, roots: string[], dataDir: string): Promise<void> {
   refusePrivate(path, dataDir);
+  refuseAutorun(path, roots);
   if (hasSeatbelt()) {
     await helper(['/bin/sh', '-c', '/bin/mkdir -p -- "$(/usr/bin/dirname -- "$1")" && /bin/cat > "$1"', 'sh', path], roots, dataDir, content, 0);
     return;

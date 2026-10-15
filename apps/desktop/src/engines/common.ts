@@ -11,7 +11,7 @@ import type { EngineImage } from './images';
 import { dataDir } from '../main/config';
 import { allowedRoots, reachesAny } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
-import { enginePrivatePaths, engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
+import { autorunPaths, enginePrivatePaths, engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
 import { agentEnv, SHELL_PREFIX, toolEnv } from '../main/shellenv';
 import { currentProgramTrust } from '../main/trust';
 
@@ -343,6 +343,10 @@ export async function decide(
     const priv = enginePrivatePaths(run.engine, dataDir());
     const base = allowedRoots(run.folders)[0] ?? homedir();
     for (const p of call.paths) if (reachesAny(p, base, priv)) return { allow: false, message: `Blocked by Wren: ${p} is part of Wren itself, a credential store or another app's sign-in, which agents never use.` };
+    // Nor, for anything but reading, a file that makes programs run later outside the sandbox.
+    if (call.name !== 'computer.read_file' && call.name !== 'computer.list_files') {
+      for (const p of call.paths) if (reachesAny(p, base, autorunPaths())) return { allow: false, message: `Blocked by Wren: ${p} makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.` };
+    }
   }
   for (const p of call.paths ?? []) if (!inFolders(p)) return { allow: false, message: `Blocked by Wren: ${p} is outside the folders allowed on this computer.` };
   if (call.name === 'computer.shell' && !run.allow.shell) return { allow: false, message: 'Blocked by Wren: terminal access is turned off on this computer (Wren → Settings → This computer).' };
