@@ -352,9 +352,11 @@ const ENGINE = `({
     const onInput = (e) => {
       if (e.isTrusted && (g.changed || changed())) refuse(e);
     };
-    // If text went in anyway (a page handler stopped beforeinput before it bubbled back), take it out.
+    // If text went in anyway (a page handler stopped beforeinput before it bubbled back), take it out:
+    // only for input into the checked field itself.
     const onInputted = (e) => {
-      if (e.isTrusted && (g.changed || changed())) restore();
+      const t = e.composedPath()[0];
+      if (e.isTrusted && (t === el || (el.contains && el.contains(t))) && (g.changed || changed())) restore();
     };
     const kinds = ['keydown', 'keypress', 'keyup'];
     document.addEventListener('focusin', keep, true); document.addEventListener('focusout', keep, true);
@@ -369,8 +371,9 @@ const ENGINE = `({
       window.removeEventListener('beforeinput', onInput, false);
       window.removeEventListener('input', onInputted, true);
     };
-    // A last look when the press ends: a field that changed after the text went in gets it taken back out.
-    g.final = () => { if (texty && !g.changed && changed()) restore(); };
+    // A last look when the press ends, also after an earlier refusal or restore (a later handler may have
+    // put the text back): a field that changed holds its contents from before the key, or the press says so.
+    g.final = () => { if (texty && (g.changed || changed())) restore(); };
     this.guard = g;
     return { ok: true };
   },

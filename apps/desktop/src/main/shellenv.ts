@@ -49,6 +49,16 @@ export function agentEnv(base: NodeJS.ProcessEnv, tool: Record<string, string>, 
 const fallbackPath = () => [join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
 
 let cached: Promise<Record<string, string>> | null = null;
+let resolved: Record<string, string> | null = null;
+
+/**
+ * The folders on the user's PATH, as far as known now (the login shell's, once read; else the usual
+ * ones): a program put in one runs whenever the user types its name, outside Wren's sandbox.
+ */
+export function userPathDirs(platform = process.platform): string[] {
+  const path = resolved?.PATH ?? (platform === 'darwin' ? fallbackPath() : process.env.PATH ?? '');
+  return absolutePath(path, platform).split(platform === 'win32' ? ';' : ':').filter(Boolean);
+}
 
 /** Only absolute PATH entries: "", "." or "bin" would look up programs in whatever folder a command runs in. */
 export function absolutePath(path: string, platform = process.platform): string {
@@ -60,7 +70,7 @@ export function absolutePath(path: string, platform = process.platform): string 
 /** PATH and toolchain variables from the user's login shell (macOS), resolved once. */
 export function toolEnv(): Promise<Record<string, string>> {
   cached ??= new Promise((resolve) => {
-    if (process.platform !== 'darwin') return resolve({ PATH: absolutePath(process.env.PATH ?? '') });
+    if (process.platform !== 'darwin') return resolve((resolved = { PATH: absolutePath(process.env.PATH ?? '') }));
     const fallback = { PATH: fallbackPath() };
     const sh = /^\/(bin|usr\/local\/bin|opt\/homebrew\/bin)\/(zsh|bash)$/.test(process.env.SHELL ?? '') ? process.env.SHELL! : '/bin/zsh';
     const p = spawn(sh, ['-ilc', 'printf "\\n__WREN_ENV_START__\\n"; /usr/bin/env; printf "\\n__WREN_ENV_END__\\n"'], {
@@ -70,7 +80,7 @@ export function toolEnv(): Promise<Record<string, string>> {
     });
     let out = '';
     p.stdout.on('data', (c) => (out = (out + c).slice(-200_000)));
-    p.on('error', () => resolve(fallback));
+    p.on('error', () => resolve((resolved = fallback)));
     p.on('close', () => {
       const block = /__WREN_ENV_START__\n([\s\S]*)\n__WREN_ENV_END__/.exec(out)?.[1] ?? '';
       const env: Record<string, string> = {};
@@ -79,11 +89,11 @@ export function toolEnv(): Promise<Record<string, string>> {
         if (i > 0 && TOOL_VARS.test(line.slice(0, i))) env[line.slice(0, i)] = line.slice(i + 1);
       }
       if (env.PATH !== undefined) env.PATH = absolutePath(env.PATH);
-      if (!env.PATH?.includes('/usr/bin')) return resolve(fallback);
+      if (!env.PATH?.includes('/usr/bin')) return resolve((resolved = fallback));
       // Keep the usual locations even if the shell's PATH left some out.
       const seen = new Set(env.PATH.split(':'));
       env.PATH = [env.PATH, ...fallback.PATH.split(':').filter((d) => !seen.has(d))].join(':');
-      resolve(env);
+      resolve((resolved = env));
     });
   });
   return cached;

@@ -192,7 +192,9 @@ export class LocalHost implements ToolHost {
 
   private async shell(command: string, cwd: string, timeoutSec: number, background: boolean, ctx: ToolContext, resume?: ToolCallData['background']): Promise<ToolResult | { yield: true }> {
     let id = resume?.kind === 'job' ? resume.handle : '';
+    // Only this task's own job (W-186): another task's, even with its id, is as good as gone.
     let job = id ? jobs.get(id) : undefined;
+    if (job && job.runId !== this.runId) job = undefined;
     if (id && !job) return { output: 'The command was interrupted (Wren restarted while it was running).', isError: true };
     if (!job) {
       if (!command.trim()) return { output: 'Empty command.', isError: true };
@@ -240,7 +242,8 @@ export class LocalHost implements ToolHost {
 
   private async jobStatus(id: string, waitSec: number, ctx: ToolContext): Promise<ToolResult> {
     const job = jobs.get(id);
-    if (!job) return { output: 'Unknown or finished job id.', isError: true };
+    // Another task's job is not this task's to read or release (W-186).
+    if (!job || job.runId !== this.runId) return { output: 'Unknown or finished job id.', isError: true };
     const until = Math.min(Date.now() + waitSec * 1000, ctx.deadline - 3000);
     while (job.exit === null && Date.now() < until) await new Promise((r) => setTimeout(r, 500));
     if (job.exit !== null) {

@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { installId, readJson, readSecret, writeJson, writeSecret } from './config';
+import { clearSecret, installId, readJson, readSecret, writeJson, writeSecret } from './config';
 
 // "Sign in with ChatGPT" for open-source, locally hosted apps, following
 // developers.openai.com/siwc/token-sharing-open-source:
@@ -71,7 +71,23 @@ function savedClient(): { client_id?: string; email?: string; id_token?: string 
 }
 
 const b64url = (b: Buffer) => b.toString('base64url');
-const load = () => readSecret<Registration>(SECRET);
+/** Marks a sign-out whose stored sign-in couldn't be removed, so a restart doesn't bring it back (W-185). */
+const SIGNED_OUT = 'chatgpt-signed-out.json';
+/** Signed out here, but the stored sign-in is still on disk: it is never used, and removed when possible. */
+let clearFailed = false;
+const load = () => {
+  if (clearFailed || readJson<{ at?: string } | null>(SIGNED_OUT, null)) {
+    if (!clearSecret(SECRET)) return null;
+    clearFailed = false;
+    try {
+      writeJson(SIGNED_OUT, null);
+    } catch {
+      /* the sign-in itself is gone, which is what counts */
+    }
+    return null;
+  }
+  return readSecret<Registration>(SECRET);
+};
 
 export function status(): ChatGPTStatus {
   const r = load();
@@ -102,8 +118,10 @@ function cancelPending(why: string) {
 
 export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<ChatGPTStatus> {
   cancelPending('Superseded by a new sign-in.');
-  // A sign-out (or another sign-in) while this one is open makes it stale: it must not save.
-  const startGeneration = authGeneration;
+  // A sign-out or a newer sign-in while this one is open makes it stale: it must not save. Its own
+  // generation is taken now, before anything waits, so an older sign-in still exchanging its code can't
+  // save over this one (W-184).
+  const startGeneration = ++authGeneration;
   const verifier = b64url(randomBytes(48));
   const challenge = b64url(createHash('sha256').update(verifier).digest());
   const state = b64url(randomBytes(24));
@@ -190,6 +208,12 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
     if (authGeneration !== startGeneration) throw new Error('Sign-in was cancelled.');
     authGeneration++;
     writeSecret(SECRET, reg);
+    clearFailed = false;
+    try {
+      writeJson(SIGNED_OUT, null);
+    } catch {
+      /* only matters after a sign-out whose clean-up failed */
+    }
     // Kept for the next sign-in's hints; the id token goes in encrypted storage only.
     writeJson('chatgpt-client.json', { client_id: clientId, email: reg.email });
     writeSecret(HINT_SECRET, { id_token: reg.id_token });
@@ -253,12 +277,21 @@ export async function accessToken(): Promise<string> {
   return promise;
 }
 
-export async function signOut(): Promise<{ revoked: boolean }> {
+export async function signOut(): Promise<{ revoked: boolean; cleared: boolean }> {
   // Local sign-out takes effect at once: tokens are gone before any network wait, refreshes and
-  // sign-ins already under way can no longer save, and an open sign-in is closed.
+  // sign-ins already under way can no longer save, and an open sign-in is closed. If the stored
+  // sign-in can't be removed, it is still never used again, here or after a restart (W-185).
   const r = load();
   authGeneration++;
-  writeSecret(SECRET, null);
+  const cleared = clearSecret(SECRET);
+  if (!cleared) {
+    clearFailed = true;
+    try {
+      writeJson(SIGNED_OUT, { at: new Date().toISOString() });
+    } catch {
+      /* this run still won't use it */
+    }
+  }
   cancelPending('Signed out.');
   let revoked = false;
   if (r?.refresh_token) {
@@ -277,7 +310,7 @@ export async function signOut(): Promise<{ revoked: boolean }> {
     }
   }
   // The client/account mapping and host id stay for a later sign-in.
-  return { revoked };
+  return { revoked, cleared };
 }
 
 export async function models(): Promise<{ id: string; name: string }[]> {

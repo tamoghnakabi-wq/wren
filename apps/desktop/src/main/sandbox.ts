@@ -2,6 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
+import { userPathDirs } from './shellenv';
 
 // macOS Seatbelt profiles (sandbox-exec) for everything an agent runs on this
 // computer: shell commands, Wren's own file operations, and the Claude Code /
@@ -55,14 +56,26 @@ const SYSTEM_RUNTIME = ['/usr/lib', '/System/Library/dyld', '/System/Volumes/Pre
  */
 export const AUTORUN = [
   '.zshrc', '.zshenv', '.zprofile', '.zlogin', '.zlogout', '.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.kshrc', '.mkshrc',
+  '.tcshrc', '.cshrc', '.login', '.logout',
   '.oh-my-zsh', '.zsh', '.p10k.zsh', '.zinit', '.zplug', '.antigen', '.config/zsh', '.config/fish', '.config/nushell', '.config/starship.toml',
   '.tmux.conf', '.config/tmux', '.vimrc', '.vim', '.config/nvim', '.emacs', '.emacs.d', '.config/emacs',
   '.gitconfig', '.config/git',
   'Library/LaunchAgents',
   '.claude/settings.json', '.claude/settings.local.json', '.claude/CLAUDE.md', '.claude/hooks', '.claude/commands', '.claude/agents', '.claude/plugins', '.claude/skills', '.claude/output-styles', '.claude.json',
+  // The engine programs Wren itself starts (Claude Code outside any sandbox): not even by their own file tools (W-182).
+  '.local/share/claude', '.claude/local', '.grok/bin', '.grok/downloads',
   ...(process.platform === 'win32' ? ['AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup', 'Documents/WindowsPowerShell', 'Documents/PowerShell', '.config/powershell'] : []),
 ];
-export const autorunPaths = (home = homedir()) => AUTORUN.map((p) => join(home, p));
+/**
+ * AUTORUN under `home`, plus the folders on the user's PATH (a program put there runs when its name is typed).
+ */
+export function autorunPaths(home = homedir(), roots: string[] = []): string[] {
+  const temp = tempDirs();
+  const under = (p: string, r: string) => p === r || p.startsWith(r.endsWith(sep) ? r : r + sep);
+  // Never a temp folder or an allowed folder itself, or one above them: that would take writing away altogether.
+  const path = userPathDirs().filter((d) => d !== '/' && !temp.some((t) => under(t, d)) && !roots.some((r) => under(r, d)));
+  return [...AUTORUN.map((p) => join(home, p)), ...path];
+}
 
 /** Never readable: credential stores, other apps' private data, registry/cloud tokens. */
 const SECRETS = [
@@ -178,14 +191,23 @@ const tempDirs = () => [realpathSync(tmpdir()), '/private/tmp', '/private/var/fo
 export function agentCanWrite(p: string, roots: string[], dataDir: string, home = homedir()): boolean {
   const h = (x: string) => join(home, x);
   const fold = (x: string) => (process.platform === 'linux' ? x : x.toLowerCase());
-  const inside = (list: string[]) => list.some((r) => fold(p) === fold(r) || fold(p).startsWith(fold(r.endsWith(sep) ? r : r + sep)) || fold(p).startsWith(fold(r) + '.'));
+  // As the profiles match: a folder covers itself and what's inside (never "<folder>.anything", W-181);
+  // only an engine's listed file-name prefixes (~/.claude.json and its backups) match by prefix.
+  const under = (list: string[]) => list.some((r) => fold(p) === fold(r) || fold(p).startsWith(fold(r.endsWith(sep) ? r : r + sep)));
+  const prefixed = (list: string[]) => list.some((r) => fold(p).startsWith(fold(r)));
+  const dirs = (e: Engine) => ENGINE_STATE[e].dirs.map(h);
+  const prefixes = (e: Engine) => ENGINE_STATE[e].prefixes.map(h);
   const writable = agentWritable(roots, home);
-  const never = [...appDirs(), dataDir];
-  const state = (e: Engine) => [...ENGINE_STATE[e].dirs, ...ENGINE_STATE[e].prefixes].map(h);
-  if (inside(writable) && !inside([...never, ...SECRETS.map(h), ...state('claude-code'), ...state('grok-build')])) return true;
+  const autorun = autorunPaths(home, roots);
+  const never = [...appDirs(), dataDir, ...autorun];
+  // Agent commands and Wren's file helper: no engine's state is theirs.
+  if (under(writable) && !under([...never, ...SECRETS.map(h), ...dirs('claude-code'), ...dirs('grok-build')]) && !prefixed([...prefixes('claude-code'), ...prefixes('grok-build')])) return true;
+  // Grok Build and its commands: its own state too, except what's protected.
   const grok = ENGINE_STATE['grok-build'];
-  const own = grok.dirs.map(h);
-  return inside([...writable, ...own]) && !inside([...never, ...SECRETS.map(h).filter((x) => !own.includes(x)), ...state('claude-code'), ...grok.protect.map(h)]);
+  const own = dirs('grok-build');
+  if ((under([...writable, ...own]) || prefixed(prefixes('grok-build'))) && !under([...never, ...SECRETS.map(h).filter((x) => !own.includes(x)), ...dirs('claude-code'), ...grok.protect.map(h)]) && !prefixed(prefixes('claude-code'))) return true;
+  // Claude Code's own file tools, outside any sandbox (W-182): the allowed folders, minus its deny rules.
+  return under(roots) && !under([...enginePrivatePaths('claude-code', dataDir, home), ...autorun]);
 }
 
 /**
@@ -237,7 +259,7 @@ function build(s: Spec): string {
   const writable = [...s.roots, ...temp, ...caches, ...engineDirs];
   const readable = [...s.roots, ...caches, ...engineDirs, ...(s.tools ? TOOLCHAINS.map(h) : []), ...(s.readOnly ?? [])];
   const ownState = new Set(engineDirs);
-  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? []), ...autorunPaths(home)])];
+  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? []), ...autorunPaths(home, s.roots)])];
   const secrets = [...SECRETS.map(h).filter((p) => !ownState.has(p)), s.dataDir];
   const otherEngines = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== s.engine);
   for (const e of otherEngines) for (const d of ENGINE_STATE[e].dirs) secrets.push(h(d));

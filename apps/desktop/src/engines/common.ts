@@ -12,7 +12,7 @@ import { dataDir } from '../main/config';
 import { allowedRoots, reachesAny } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
 import { autorunPaths, enginePrivatePaths, engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
-import { agentEnv, SHELL_PREFIX, toolEnv } from '../main/shellenv';
+import { agentEnv, SHELL_PREFIX, toolEnv, userPathDirs } from '../main/shellenv';
 import { currentProgramTrust } from '../main/trust';
 
 // Shared plumbing for external agent engines (Claude Code, Grok Build): they
@@ -51,9 +51,10 @@ export function findCli(name: 'claude' | 'grok'): string | null {
       ? [join(home, '.local', 'bin', `${name}.exe`), join(home, `.${name}`, 'bin', `${name}.exe`), join(home, 'AppData', 'Roaming', 'npm', `${name}.cmd`)]
       : [join(home, '.local', 'bin', name), join(home, `.${name}`, 'bin', name), '/opt/homebrew/bin/' + name, '/usr/local/bin/' + name, join(home, '.npm-global', 'bin', name)];
   for (const c of candidates) if (existsSync(c)) return c;
-  const which = spawnSync(process.platform === 'win32' ? 'where' : '/bin/bash', process.platform === 'win32' ? [name] : ['-lc', `command -v ${name}`], { encoding: 'utf8' });
-  const p = which.stdout?.trim().split('\n')[0];
-  return p && existsSync(p) ? p : null;
+  // Then the user's PATH, as read from their login shell once (no shell is run for this, W-183).
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd'] : [''];
+  for (const d of userPathDirs()) for (const x of exts) if (existsSync(join(d, name + x))) return join(d, name + x);
+  return null;
 }
 
 /**
@@ -345,7 +346,7 @@ export async function decide(
     for (const p of call.paths) if (reachesAny(p, base, priv)) return { allow: false, message: `Blocked by Wren: ${p} is part of Wren itself, a credential store or another app's sign-in, which agents never use.` };
     // Nor, for anything but reading, a file that makes programs run later outside the sandbox.
     if (call.name !== 'computer.read_file' && call.name !== 'computer.list_files') {
-      for (const p of call.paths) if (reachesAny(p, base, autorunPaths())) return { allow: false, message: `Blocked by Wren: ${p} makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.` };
+      for (const p of call.paths) if (reachesAny(p, base, autorunPaths(homedir(), allowedRoots(run.folders)))) return { allow: false, message: `Blocked by Wren: ${p} makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.` };
     }
   }
   for (const p of call.paths ?? []) if (!inFolders(p)) return { allow: false, message: `Blocked by Wren: ${p} is outside the folders allowed on this computer.` };

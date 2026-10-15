@@ -85,7 +85,7 @@ function refusePrivate(p: string, dataDir: string) {
 }
 /** A file that makes programs run later outside the sandbox (a shell startup file, git's global config…). */
 function refuseAutorun(p: string, roots: string[]) {
-  if (reachesAny(p, roots[0] ?? homedir(), autorunPaths())) throw new Error(`"${p}" makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.`);
+  if (reachesAny(p, roots[0] ?? homedir(), autorunPaths(homedir(), roots))) throw new Error(`"${p}" makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.`);
 }
 
 function lstatOrNull(p: string): BigIntStats | null {

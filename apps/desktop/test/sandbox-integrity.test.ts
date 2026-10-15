@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -103,6 +103,18 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('files that run programs l
       expect(sb(profile, `echo ok > ${home}/project/file.txt`).status).toBe(0); // the rest of the home folder is still theirs
       expect(sb(profile, `cat ${home}/.zshrc`).stdout).toBe('original');
     }
+    // A folder on the user's PATH inside the allowed home folder (~/.local/bin is on the default one): a program
+    // put there would run when its name is typed in a terminal.
+    const saved = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      mkdirSync(join(home, '.local', 'bin'), { recursive: true });
+      const withPath = seatbeltProfile([home], data, home);
+      expect(sb(withPath, `echo x > ${home}/.local/bin/git`).status).not.toBe(0);
+      expect(sb(withPath, `echo x > ${home}/project/also-fine.txt`).status).toBe(0);
+    } finally {
+      process.env.HOME = saved;
+    }
     // Claude Code's settings are off limits to commands too (all of its state is).
     expect(sb(seatbeltProfile([home], data, home), `echo '{}' > ${home}/.claude/settings.json`).status).not.toBe(0);
     for (const f of ['.zshrc', '.gitconfig', '.claude/settings.json']) expect(readFileSync(join(home, f), 'utf8'), f).toBe('original');
@@ -149,6 +161,15 @@ describe('programs Wren starts outside the sandbox (W-178)', () => {
     }
     // Grok's commands may still write the rest of its state (sessions, logs).
     expect(can(`${home}/.grok/sessions/x.json`)).toBe(true);
+    // W-181: a sibling named like a protected folder is not protected ("<folder>.anything").
+    expect(can(`${home}/.claude.payload/cli`, [home])).toBe(true);
+    expect(can(`${data}.other/cli`, [home])).toBe(true);
+    // W-182: Claude Code's own file tools count as a writer too: what its deny rules leave open in an
+    // allowed folder (its own session files) is writable; its installed program is not.
+    expect(can(`${home}/.claude/projects/x`, [home])).toBe(true);
+    expect(can(`${home}/.claude/projects/x`, [`${home}/Projects`])).toBe(false);
+    // The folders on the user's PATH are out of agents' reach even with the home folder allowed.
+    expect(agentCanWrite(join(homedir(), '.local', 'bin', 'claude'), [homedir()], join(homedir(), 'Library', 'Application Support', 'Wren'))).toBe(false);
     // A program in an allowed folder (an npm global prefix under an allowed home) could be changed.
     expect(can(`${home}/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js`, [home])).toBe(true);
     expect(can('/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js', [home])).toBe(false);

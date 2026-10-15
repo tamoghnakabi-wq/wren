@@ -499,15 +499,18 @@ export function isReadOnlyCommand(command: string, trust?: ProgramTrust): boolea
  * way PowerShell would, where \ separates folders, ` is the escape and { } enclose script blocks.
  */
 function roughWords(text: string, shell: 'posix' | 'powershell'): (string | null)[] {
-  // PowerShell's "," makes a list of arguments ('C:\Users\me','C:\Temp' is two paths, W-180).
+  // PowerShell's "," makes a list of arguments ('C:\Users\me','C:\Temp' is two paths, W-180), and
+  // ( ) group them (@('a','b')): neither ends a command there.
   const operator = shell === 'posix' ? /[ \t\n;&|()<>`]/ : /[ \t\n;&|()<>{},]/;
+  const separator = shell === 'posix' ? /[ \t]/ : /[ \t,()]/;
   const out: (string | null)[] = [];
   let w = '';
-  for (const c of text) {
+  // PowerShell's ${env:USERPROFILE} is a variable, not a script block.
+  for (const c of shell === 'posix' ? text : text.replace(/\$\{([^}]*)\}/g, '$$$1')) {
     if (operator.test(c)) {
       if (w) out.push(w);
       w = '';
-      if (!/[ \t,]/.test(c)) out.push(null);
+      if (!separator.test(c)) out.push(null);
     } else w += c;
   }
   if (w) out.push(w);
@@ -558,27 +561,32 @@ function wipesEverything(text: string): boolean {
     const words = roughWords(text, shell);
     for (let i = 0; i < words.length; i++) {
       const name = (words[i] ?? '').toLowerCase();
-      if (!REMOVERS.has(name.startsWith('[') ? name : name.replace(/^.*\//, '').replace(/\.exe$/, ''))) continue;
+      const base = name.startsWith('[') ? name : name.replace(/^.*\//, '').replace(/\.exe$/, '');
+      // Each shell by its own rules: POSIX has rm; PowerShell has rm and Remove-Item's other names.
+      if (shell === 'posix' ? base !== 'rm' : !REMOVERS.has(base)) continue;
       let recursive = false;
       let operands = false;
       const targets: string[] = [];
-      const cmd = name === 'rd' || name === 'rmdir';
+      const cmd = base === 'rd' || base === 'rmdir';
       // Directory.Delete's arguments follow its "(".
       for (let k = name.startsWith('[') && words[i + 1] === null ? i + 2 : i + 1; k < words.length && words[k] !== null; k++) {
         // PowerShell takes en and em dashes for "-" too.
         const w = words[k]!.replace(/^[\u2013\u2014\u2015]/, '-');
         // cmd's rd /s (its /q is just quiet), and Directory.Delete(path, $true), are recursive too.
-        if (cmd && /^\/[sq]$/i.test(w)) {
+        if (shell === 'powershell' && cmd && /^\/[sq]$/i.test(w)) {
           recursive ||= /s/i.test(w);
           continue;
         }
-        if (w.toLowerCase() === '$true') recursive = true;
+        if (name.startsWith('[') && w.toLowerCase() === '$true') recursive = true;
         if (operands || w === '-' || !w.startsWith('-')) targets.push(w);
         else if (w === '--') operands = true;
-        else if (w.startsWith('--')) recursive ||= longOpt(w, '--recursive');
-        else {
-          // -r, -R, -rf, PowerShell's -Recurse (any abbreviation, any case); -Path:C:\ names a target too.
-          recursive ||= /[rR]/.test(w.split(':')[0]);
+        else if (shell === 'posix') {
+          // -r, -R, -rf, --rec… (GNU long options in any abbreviation)
+          recursive ||= w.startsWith('--') ? longOpt(w, '--recursive') : /[rR]/.test(w);
+        } else {
+          // PowerShell's -Recurse, in any abbreviation and case (not -Confirm or -ErrorAction); -Path:C:\ names a target too.
+          const param = w.split(':')[0].slice(1).toLowerCase();
+          recursive ||= param.length > 0 && 'recurse'.startsWith(param);
           if (w.includes(':')) targets.push(w.slice(w.indexOf(':') + 1));
         }
       }

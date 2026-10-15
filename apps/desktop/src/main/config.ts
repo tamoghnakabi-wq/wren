@@ -1,6 +1,6 @@
 import { app, safeStorage } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +48,28 @@ export function readSecret<T>(name: string): T | null {
     return JSON.parse(safeStorage.decryptString(buf)) as T;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Remove a secret for good: emptied, or failing that deleted. True only once nothing readable is left, so
+ * a caller can say when it couldn't (W-185).
+ */
+export function clearSecret(name: string): boolean {
+  const p = file(name);
+  try {
+    writeAtomic(p, '');
+  } catch {
+    try {
+      rmSync(p, { force: true });
+    } catch {
+      /* checked below */
+    }
+  }
+  try {
+    return !existsSync(p) || readFileSync(p).length === 0;
+  } catch {
+    return false;
   }
 }
 

@@ -480,6 +480,18 @@ describe.skipIf(!process.env.WREN_BROWSER_TEST)('browser controller', () => {
       }
       expect((await press('#area-ok', 'a')).ok).toBe(true);
       expect(await page.locator('#area-ok').inputValue()).toBe('a');
+
+      // The page puts the text back after Wren took it out: the last check at the end of the press sees it.
+      await page.setContent(`
+        <input id=again aria-label="Name">
+        <script>
+          again.addEventListener('beforeinput', (e) => { again.setAttribute('aria-label', 'Password'); e.stopPropagation(); });
+          again.addEventListener('input', (e) => { again.value = e.data; });
+        </script>`);
+      const back = await press('#again', 'a');
+      expect(back.ok).toBe(false);
+      expect(back.error).toMatch(/field changed/);
+      expect(await page.locator('#again').inputValue()).toBe('');
     } finally {
       await browser.close();
     }

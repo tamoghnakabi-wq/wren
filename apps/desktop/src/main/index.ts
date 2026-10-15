@@ -617,7 +617,8 @@ function registerIpc() {
     const r = await chatgpt.signOut();
     void runner.tick();
     pushStatus();
-    if (!r.revoked) new Notification({ title: 'Signed out of ChatGPT on this computer', body: 'Remote revocation wasn’t confirmed. You can also disconnect Wren in ChatGPT Settings → Apps.' }).show();
+    if (!r.cleared) new Notification({ title: 'Signed out of ChatGPT, but its sign-in is still stored', body: 'Wren won’t use it, and removes it as soon as it can write to its data folder.' }).show();
+    else if (!r.revoked) new Notification({ title: 'Signed out of ChatGPT on this computer', body: 'Remote revocation wasn’t confirmed. You can also disconnect Wren in ChatGPT Settings → Apps.' }).show();
   });
   handle('openEngineLogin', (engine) => openEngineLogin(engine === 'grok-build' ? 'grok-build' : 'claude-code'));
   handle('checkUpdate', () => updater.check());
@@ -655,9 +656,12 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
   if (process.platform === 'darwin') {
     // In Wren's data folder, out of agents' reach (W-172); removed after a while (or at a start after that).
     const { file, dir } = engineLoginScript(dataDir(), engine);
-    void shell.openPath(file).then((err) => {
-      if (err && Notification.isSupported()) new Notification({ title: 'Couldn’t open Terminal to sign in', body: err }).show();
-    });
+    void shell
+      .openPath(file)
+      .then((err) => err, (e: Error) => e.message)
+      .then((err) => {
+        if (err && Notification.isSupported()) new Notification({ title: 'Couldn’t open Terminal to sign in', body: err }).show();
+      });
     setTimeout(() => {
       try {
         rmSync(dir, { recursive: true, force: true });
@@ -738,6 +742,8 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   // A check without a page (Wren's service worker, for notifications) answers by the asking origin alone.
   wren.setPermissionCheckHandler((wc, permission, origin) => allowed(permission, wc ? wc.getURL() : origin, origin));
   registerIpc();
+  // The login shell's PATH, read once now: its folders are among what agents may not change.
+  void import('./shellenv').then((m) => m.toolEnv()).catch(() => {});
   createWindow();
   tray = new Tray(trayIcon());
   tray.on('click', () => showWindow());

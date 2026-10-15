@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { LoopOutcome } from '@wren/core';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
+import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt, untrustedProgram } from '../main/sandbox';
 import { appPaths, claudeSupportsRestricted, decide, findCli, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 
@@ -174,10 +175,12 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     if (hasSeatbelt()) serverEnv.WREN_APPROVAL_SB = approvalServerProfile(allowedRoots(run.folders), dataDir(), appPaths(approveScript), privateDir);
     const mcpFile = join(privateDir, 'mcp.json');
     writeFileSync(mcpFile, JSON.stringify({ mcpServers: { wren: { command: process.execPath, args: [approveScript], env: serverEnv } } }), { mode: 0o600 });
-    // --settings still applies in restricted mode (the user's own settings files don't).
+    // --settings still applies in restricted mode (the user's own settings files don't). The user's PATH
+    // folders are among what it may not change, so they are read first.
+    await toolEnv();
     const settingsFile = join(privateDir, 'settings.json');
     // Plus no edits to what runs programs later outside the sandbox (shell startup files, its own settings and hooks).
-    writeFileSync(settingsFile, JSON.stringify({ permissions: { deny: claudeDenyRules(enginePrivatePaths('claude-code', dataDir()), autorunPaths()) } }), { mode: 0o600 });
+    writeFileSync(settingsFile, JSON.stringify({ permissions: { deny: claudeDenyRules(enginePrivatePaths('claude-code', dataDir()), autorunPaths(undefined, allowedRoots(run.folders))) } }), { mode: 0o600 });
     const args = [
       '-p',
       '--input-format',

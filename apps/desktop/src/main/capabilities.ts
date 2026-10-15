@@ -1,6 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { findCli, engineEnv } from '../engines/common';
+import { dataDir } from './config';
+import { allowedRoots } from './paths';
+import { untrustedProgram } from './sandbox';
 import * as chatgpt from './chatgpt';
 import type { Policy } from './config';
 
@@ -9,17 +12,23 @@ import type { Policy } from './config';
 
 export interface Capabilities {
   chatgpt: { signedIn: boolean; email?: string; planUsage?: boolean; models?: { id: string; name: string }[] };
-  claudeCode: { installed: boolean; version?: string };
-  grokBuild: { installed: boolean; version?: string };
+  claudeCode: { installed: boolean; version?: string; untrusted?: string };
+  grokBuild: { installed: boolean; version?: string; untrusted?: string };
   local: { baseUrl: string; reachable: boolean; models: { id: string; name: string }[] };
   browser: { available: boolean; name?: string };
 }
 
 const versionCache = new Map<string, { at: number; v?: string }>();
-function cliVersion(name: 'claude' | 'grok'): { installed: boolean; version?: string } {
+/**
+ * Whether the CLI is installed, and its version. Asking for the version runs it, outside any sandbox, so
+ * not from a place agents could have changed (W-183): such a CLI is reported, and never run.
+ */
+function cliVersion(name: 'claude' | 'grok', folders: string[]): { installed: boolean; version?: string; untrusted?: string } {
+  const cli = findCli(name);
+  const untrusted = cli ? untrustedProgram(cli, allowedRoots(folders), dataDir()) : null;
+  if (cli && untrusted) return { installed: true, untrusted };
   const cached = versionCache.get(name);
   if (cached && Date.now() - cached.at < 10 * 60_000) return { installed: !!cached.v, version: cached.v };
-  const cli = findCli(name);
   let v: string | undefined;
   if (cli) {
     const r = spawnSync(cli, name === 'claude' ? ['--version'] : ['version'], { encoding: 'utf8', timeout: 8000, env: engineEnv(name === 'claude' ? 'claude-code' : 'grok-build') });
@@ -32,7 +41,7 @@ function cliVersion(name: 'claude' | 'grok'): { installed: boolean; version?: st
 function browserName(): string | undefined {
   const paths: [string, string][] =
     process.platform === 'darwin'
-      ? [['/Applications/Google Chrome.app', 'Google Chrome'], ['/Applications/Microsoft Edge.app', 'Microsoft Edge'], ['/Applications/Chromium.app', 'Chromium']]
+      ? [['/Applications/Google Chrome.app', 'Google Chrome'], ['/Applications/Microsoft Edge.app', 'Microsoft Edge']]
       : process.platform === 'win32'
         ? [[`${process.env['PROGRAMFILES(X86)']}\\Microsoft\\Edge\\Application\\msedge.exe`, 'Microsoft Edge'], [`${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe`, 'Google Chrome'], [`${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`, 'Google Chrome']]
         : [['/usr/bin/google-chrome', 'Google Chrome'], ['/usr/bin/chromium', 'Chromium']];
@@ -60,8 +69,8 @@ export async function detect(policy: Policy): Promise<Capabilities> {
   const browser = browserName();
   return {
     chatgpt: { ...st, models: st.signedIn ? chatgptModels.list : [] },
-    claudeCode: cliVersion('claude'),
-    grokBuild: cliVersion('grok'),
+    claudeCode: cliVersion('claude', policy.folders),
+    grokBuild: cliVersion('grok', policy.folders),
     local,
     browser: { available: !!browser, name: browser },
   };

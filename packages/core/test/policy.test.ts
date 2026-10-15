@@ -193,6 +193,13 @@ describe('shell risk', () => {
     for (const c of ["Remove-Item -Recurse -Force 'C:\\Users\\victim','C:\\Temp\\spare'", 'Remove-Item -Recurse C:\\Temp\\a,~', 'rm -r -LiteralPath "D:\\x",$HOME', 'cmd /c rd /s /q C:\\', 'cmd /c rmdir /S /Q %USERPROFILE%\\..', "[System.IO.Directory]::Delete('C:\\Users\\me', $true)", "[IO.Directory]::Delete($env:USERPROFILE, $true)"]) {
       expect(win(c).blocked, c).toBeTruthy();
     }
+    // Grouped lists, and an array given as one argument (W-180 remainder).
+    for (const c of ["Remove-Item -Recurse @('C:\\Users\\me','C:\\Temp\\spare')", "Remove-Item -Recurse ('C:\\Temp\\a', ('D:\\', 'E:\\x'))", 'Remove-Item -Recurse -Path @(~)']) {
+      expect(win(c).blocked, c).toBeTruthy();
+    }
+    expect(win("Remove-Item -Recurse @('C:\\Temp\\a','C:\\Temp\\b')").blocked).toBeFalsy();
+    // $true only means recursive for Directory.Delete.
+    expect(win('Remove-Item ~ -Confirm:$true').blocked).toBeFalsy();
     for (const c of ["Remove-Item -Recurse 'C:\\Temp\\a','C:\\Temp\\b'", 'cmd /c rd /s /q C:\\Temp\\build', "[System.IO.Directory]::Delete('C:\\Temp\\x', $true)", 'Remove-Item ~\\a.txt,~\\b.txt']) expect(win(c).blocked, c).toBeFalsy();
   });
 });
