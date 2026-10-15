@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-16: `main` has one local commit over `origin/main`, the re-audit #23 fixes (W-177…W-180, desktop **0.1.29**), not yet pushed or released; production still runs `ca7b1e9` and desktop 0.1.28 (the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-three Codex security audits (W-1…W-180) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-16: `main` is in sync with `origin/main`; the last code commit is `12d2a8d` (re-audit #23 fixes W-177…W-180), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.29** (released; the signed update feed serves it on all three platforms). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-three Codex security audits (W-1…W-180) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -284,7 +284,7 @@ How each part works:
 | Re-audit #20 (of 0.1.26) | W-163…W-164 | `1445752`, web only | See below; no migration |
 | Re-audit #21 (of 0.1.26 + web) | W-165…W-171 | `c6b41a1`, 0.1.27 | See below; no migration |
 | Re-audit #22 (of 0.1.27) | W-172…W-176 | `ca7b1e9`, 0.1.28 | See below; no migration |
-| Re-audit #23 (of 0.1.28) | W-177…W-180 | not yet pushed, 0.1.29 | See below; no migration |
+| Re-audit #23 (of 0.1.28) | W-177…W-180 | `12d2a8d`, 0.1.29 | See below; no migration |
 
 Round 23 in brief (desktop 0.1.29; Codex report /private/tmp/wren-re-audit-0.1.28-2026-10-15.md; the fresh pass covered the macOS profiles, the updater, the engines, the cloud shell layer and agent-written content):
 - **W-177** (High) Claude Code's built-in file tools run in its unsandboxed process and only Wren's folder check applied to them, and reads didn't even ask: with a folder allowed that contains them (the home folder), Claude Code could read or rewrite Wren's data (its policy), the sign-in scripts or `~/.ssh`. Claude Code now gets deny rules for Wren's data and app, credential stores and other engines' state, and Wren's approval check refuses those paths (tested with the real CLI: refused directly, through a link and with the folder added; without the rule it read the file).
