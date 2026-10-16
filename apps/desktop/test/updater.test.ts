@@ -379,7 +379,10 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     const staging = join(dir, 'install-ghi');
     mkdirSync(staging, { recursive: true });
     const script = join(staging, 'install.sh');
-    writeFileSync(script, 'sleep 30\n');
+    // Waits in a builtin on an open pipe instead of running `sleep`: a forked child, between its fork and exec,
+    // still shows bash's own command line, and if bash is killed in that moment the child outlives it looking
+    // like the installer (failed once on a loaded CI runner).
+    writeFileSync(script, 'read -r -t 30 _\n');
     writeFileSync(join(dir, 'update-pending.json'), JSON.stringify({ version: '0.1.9', installer: script, at: Date.now() }));
     expect(u.installerState()).toBe('gone'); // not started (yet)
     // Something that only mentions the script isn't the installer (W-120).
@@ -390,7 +393,7 @@ describe.skipIf(process.platform === 'win32')('Updater reopened mid-install (W-9
     viewer.kill('SIGKILL');
     tail.kill('SIGKILL');
     // Started the way install() starts it.
-    const child = realSpawn('/bin/bash', [script, '123', 'more args'], { stdio: 'ignore' });
+    const child = realSpawn('/bin/bash', [script, '123', 'more args'], { stdio: ['pipe', 'ignore', 'ignore'] });
     await new Promise((r) => child.once('spawn', r));
     try {
       expect(u.installerState()).toBe('running');
