@@ -87,6 +87,11 @@ const root = process.getuid?.() === 0; // permissions don't stop root
 
 afterEach(() => {
   chmodSync(data, 0o700);
+  try {
+    chmodSync(marker, 0o600);
+  } catch {
+    /* no marker */
+  }
   locked.clear();
 });
 
@@ -200,6 +205,71 @@ describe('Sign in with ChatGPT', () => {
       expect(c.status().signedIn).toBe(false);
     } finally {
       locked.delete(marker);
+    }
+  });
+  // Re-audit #26: a marker that can't be read, or isn't a marker, was taken for no marker at all.
+  it.skipIf(root)('keeps a recorded sign-out after a restart even when its marker can’t be read (W-185)', async () => {
+    let c = await restart();
+    await signInAs('L', c);
+    const stored = readFileSync(bin);
+    locked.add(bin); // the stored sign-in can't be removed, so the sign-out rests on the marker
+    try {
+      expect(await c.signOut()).toMatchObject({ cleared: false, recorded: true });
+      chmodSync(marker, 0o000); // and then the marker can't be read
+      c = await restart();
+      expect(c.status().signedIn).toBe(false);
+      await expect(c.accessToken()).rejects.toThrow(/Not signed in/);
+      expect(readFileSync(bin)).toEqual(stored); // nothing was decided about it: still there, unused
+    } finally {
+      chmodSync(marker, 0o600);
+      locked.delete(bin);
+    }
+    expect(c.status().signedIn).toBe(false); // readable again: the marker covers it, so it is removed
+    expect(readFileSync(bin).length).toBe(0);
+    expect(config.readJson('chatgpt-signed-out.json', 'missing')).toBeNull();
+  });
+
+  it('keeps the stored sign-in unused while the marker isn’t a marker, and replaces it once nothing is stored (W-185)', async () => {
+    let c = await restart();
+    await signInAs('M', c);
+    for (const bad of ['{"at": ', '[]', '{"of": 5}', '"signed out"', '']) {
+      writeFileSync(marker, bad);
+      c = await restart();
+      expect(c.status().signedIn, JSON.stringify(bad)).toBe(false);
+      expect(readFileSync(bin).length).toBeGreaterThan(0);
+    }
+    expect(await c.signOut()).toMatchObject({ cleared: true });
+    expect(c.status().signedIn).toBe(false);
+    expect(config.readJson('chatgpt-signed-out.json', 'missing')).toBeNull(); // nothing stored: safe to replace
+  });
+
+  it.skipIf(root)('replaces an unreadable 0.1.31 marker at a new sign-in, so a restart doesn’t undo it (W-185)', async () => {
+    let c = await restart();
+    await signInAs('N', c);
+    writeFileSync(marker, JSON.stringify({ at: new Date().toISOString() })); // names no sign-in
+    chmodSync(marker, 0o000);
+    try {
+      expect((await signInAs('O', c)).email).toBe('o@example.test');
+    } finally {
+      chmodSync(marker, 0o600); // readable again, if it is still the old one
+    }
+    c = await restart();
+    expect(c.status()).toMatchObject({ signedIn: true, email: 'o@example.test' });
+    expect(config.readJson('chatgpt-signed-out.json', 'missing')).toBeNull();
+  });
+
+  it.skipIf(root)('refuses a new sign-in while an unreadable marker can’t be replaced either (W-185)', async () => {
+    const c = await restart();
+    writeFileSync(marker, JSON.stringify({ at: new Date().toISOString() }));
+    chmodSync(marker, 0o000);
+    locked.add(marker);
+    try {
+      await expect(signInAs('P', c)).rejects.toThrow(/couldn’t keep this sign-in/);
+      expect(readFileSync(bin).length).toBe(0);
+      expect(c.status().signedIn).toBe(false);
+    } finally {
+      locked.delete(marker);
+      chmodSync(marker, 0o600);
     }
   });
 });

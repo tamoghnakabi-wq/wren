@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { clearSecret, installId, readJson, readSecret, secretDigest, writeJson, writeSecret } from './config';
+import { clearSecret, installId, readJson, readSecret, readText, secretDigest, writeJson, writeSecret } from './config';
 
 // "Sign in with ChatGPT" for open-source, locally hosted apps, following
 // developers.openai.com/siwc/token-sharing-open-source:
@@ -84,9 +84,29 @@ interface SignedOut {
 /** Signed out here, but the stored sign-in (`of`, if it could be read) is still on disk: nothing stored is used, and it is removed when possible. */
 let clearFailed: { of?: string } | null = null;
 
-const readMarker = () => readJson<SignedOut | null>(SIGNED_OUT, null);
+/**
+ * What the marker says, read strictly: `none` (no file, or the `null` a removal writes), a `marker`, or
+ * `unknown` (it can't be read, or isn't a marker). Unknown is never taken for none: a sign-out may be
+ * recorded there, so nothing stored is used until it is known again (W-185).
+ */
+type MarkerState = { kind: 'none' } | { kind: 'marker'; m: SignedOut } | { kind: 'unknown' };
+function readMarker(): MarkerState {
+  let v: unknown;
+  try {
+    const text = readText(SIGNED_OUT);
+    if (text === null) return { kind: 'none' };
+    v = JSON.parse(text);
+  } catch {
+    return { kind: 'unknown' };
+  }
+  if (v === null) return { kind: 'none' };
+  if (typeof v !== 'object' || Array.isArray(v)) return { kind: 'unknown' };
+  const { at, of } = v as Record<string, unknown>;
+  if ((at !== undefined && typeof at !== 'string') || (of !== undefined && typeof of !== 'string')) return { kind: 'unknown' };
+  return { kind: 'marker', m: { at, of } };
+}
 /** Whether marker `m` signs out the stored sign-in with this digest (undefined: unknown). */
-const covers = (m: SignedOut | null, digest: string | undefined) => !!m && (!m.of || m.of === digest);
+const covers = (m: SignedOut, digest: string | undefined) => !m.of || m.of === digest;
 /** The stored sign-in's digest: null when none is stored, undefined when it can't be read. */
 function storedDigest(): string | null | undefined {
   try {
@@ -95,24 +115,28 @@ function storedDigest(): string | null | undefined {
     return undefined;
   }
 }
-/** Writes the marker (synced to disk); true once the one on disk covers that sign-in. */
+/** Writes the marker (synced to disk); true once the one on disk is read back and covers that sign-in. */
 function recordSignOut(of: string | undefined): boolean {
   try {
     writeJson(SIGNED_OUT, { at: new Date().toISOString(), of }, { durable: true });
   } catch {
     /* checked below */
   }
-  return covers(readMarker(), of);
+  const s = readMarker();
+  return s.kind === 'marker' && covers(s.m, of);
 }
-/** Removes the marker (synced, so it can't outlast what made it stale); true once there is none. */
+/**
+ * Removes the marker (synced, so it can't outlast what made it stale); true only once it is known to be gone,
+ * never because it couldn't be read (an unreadable one is replaced, which also makes it readable again).
+ */
 function dropMarker(): boolean {
-  if (!readMarker()) return true;
+  if (readMarker().kind === 'none') return true;
   try {
     writeJson(SIGNED_OUT, null, { durable: true });
   } catch {
     /* checked below */
   }
-  return !readMarker();
+  return readMarker().kind === 'none';
 }
 
 const load = (): Registration | null => {
@@ -122,20 +146,27 @@ const load = (): Registration | null => {
     if (clearSecret(SECRET)) {
       clearFailed = null;
       dropMarker();
-    } else if (!covers(readMarker(), clearFailed.of)) {
-      recordSignOut(clearFailed.of);
+    } else {
+      const s = readMarker();
+      if (!(s.kind === 'marker' && covers(s.m, clearFailed.of))) recordSignOut(clearFailed.of);
     }
     return null;
   }
   const marker = readMarker();
-  if (marker) {
+  if (marker.kind === 'unknown') {
+    // A sign-out may be recorded there, so nothing stored is used. Only with nothing stored is it safe to
+    // replace; a new sign-in replaces it too.
+    if (storedDigest() === null) dropMarker();
+    return null;
+  }
+  if (marker.kind === 'marker') {
     const stored = storedDigest();
     if (stored === undefined) return null; // can't tell which sign-in is stored, so none is used
     if (stored === null) {
       dropMarker(); // nothing stored: the marker is left over
       return null;
     }
-    if (covers(marker, stored)) {
+    if (covers(marker.m, stored)) {
       // The sign-in that was signed out: never used, removed at the first chance.
       if (clearSecret(SECRET)) dropMarker();
       return null;
@@ -266,8 +297,10 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
     writeSecret(SECRET, reg);
     clearFailed = null;
     // A sign-out marker that can't be removed names the sign-in it was for, so it doesn't sign out this one.
-    // One from 0.1.31 names none and would remove this one at the next read: then it can't be kept (W-185).
-    if (!dropMarker() && covers(readMarker(), storedDigest() ?? undefined)) {
+    // One from 0.1.31 names none and would remove this one at the next read, and one that can't be read might:
+    // then this sign-in isn't kept (W-185).
+    const left = dropMarker() ? null : readMarker();
+    if (left && (left.kind !== 'marker' || covers(left.m, storedDigest() ?? undefined))) {
       clearSecret(SECRET);
       throw new Error('Wren couldn’t keep this sign-in: a file in its data folder can’t be changed. Check that the folder can be written, then sign in again.');
     }

@@ -69,6 +69,16 @@ export function readJson<T>(name: string, fallback: T): T {
   }
 }
 
+/** A data file's text, or null when there is none. Any other failure throws: unreadable isn't the same as absent. */
+export function readText(name: string): string | null {
+  try {
+    return readFileSync(file(name), 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
 export function writeJson(name: string, value: unknown, opts: { durable?: boolean } = {}) {
   writeAtomic(file(name), JSON.stringify(value, null, 2), opts.durable);
 }
