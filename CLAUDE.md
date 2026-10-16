@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-17: the re-audit #27 fixes (W-188…W-190) are desktop **0.1.34** plus a web deploy, not yet committed or released; production runs desktop 0.1.33 (`d13df74`; the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Update this line when 0.1.34 ships. Wren credits are switched off for every account (`70afa23`, see Models). The twenty-seven Codex security audits (W-1…W-190) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-17: `main` is in sync with `origin/main`; the last code commit is `b80232b` (re-audit #27 fixes W-188…W-190), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.34** (released; the signed update feed serves it on all three platforms). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-seven Codex security audits (W-1…W-190) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -294,7 +294,7 @@ How each part works:
 | Re-audit #24 (of 0.1.30) | W-181…W-186 | `737bf84`, 0.1.31 | See below; no migration |
 | Re-audit #25 (of 0.1.31) | W-187 (+W-183, W-185 remainders) | `c0e887a`, 0.1.32 | See below; no migration |
 | Re-audit #26 (of 0.1.32) | none new (W-185 remainder) | `d13df74`, 0.1.33 | See below; no migration |
-| Re-audit #27 (of 0.1.33) | W-188…W-190 | (this commit), 0.1.34 + web | See below; no migration |
+| Re-audit #27 (of 0.1.33) | W-188…W-190 | `b80232b`, 0.1.34 + web | See below; no migration |
 
 Round 27 in brief (desktop 0.1.34 and the web app; Codex report /private/tmp/wren-re-audit-0.1.33-2026-10-16.md, of `30660b4`; W-185 confirmed closed; a fresh pass over MFA, the web app's own code, the desktop runner and the GitHub/MCP brokers; W-189 and W-190 were fixed by two subagents in parallel):
 - **W-188** (High) `PATCH /repos/o/r {private:false}` (make a private repository public) rated high, so an autonomous agent did it without asking (reproduced in the loop on both runtimes): repository settings, access, security, publishing and account-wide endpoints, workflow files and GraphQL mutations are critical, and the path is read as the broker's fetch resolves it (see "GitHub" under Approvals and risk).
