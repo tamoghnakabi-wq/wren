@@ -165,7 +165,8 @@ export class LocalHost implements ToolHost {
       if (!this.policy.browser) return { output: 'Browser use is turned off on this computer.', isError: true };
       return this.browser(name.slice(8), args, ctx.expect);
     }
-    if (name.startsWith('mcp_')) return deviceJson<ToolResult>(`/api/device/runs/${this.runId}/mcp`, { name, args }, { lease: this.lease });
+    // Stop (or a lost lease) aborts the request, and with it the server's call if it isn't sent yet (W-190).
+    if (name.startsWith('mcp_')) return deviceJson<ToolResult>(`/api/device/runs/${this.runId}/mcp`, { name, args }, { lease: this.lease, signal: ctx.signal });
     return { output: `Tool ${name} is not available on this computer.`, isError: true };
   }
 

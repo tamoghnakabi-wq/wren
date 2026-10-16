@@ -181,7 +181,11 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
 
 // ---------------------------------------------------------------- Dialog
 
-export function Dialog({ open, onClose, title, children, footer, wide }: { open: boolean; onClose: () => void; title: string; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+/**
+ * A modal dialog. While `busy` (something it started is still committing) it can't be dismissed:
+ * the backdrop, Escape and its close button do nothing until that's done.
+ */
+export function Dialog({ open, onClose, title, children, footer, wide, busy }: { open: boolean; onClose: () => void; title: string; children: ReactNode; footer?: ReactNode; wide?: boolean; busy?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   useEffect(() => {
@@ -190,11 +194,21 @@ export function Dialog({ open, onClose, title, children, footer, wide }: { open:
     if (open && !d.open) d.showModal();
     if (!open && d.open) d.close();
   }, [open]);
+  // Escape can still close it while busy: Chrome lets a repeated Escape through when nothing was
+  // clicked in between, and older browsers ignore `closedby`. Then it opens again.
+  const reopen = () => {
+    const d = ref.current;
+    if (!open) onClose();
+    else if (d && !d.open && d.isConnected) d.showModal();
+  };
   return (
     <dialog
       ref={ref}
-      onClose={onClose}
-      onClick={(e) => e.target === ref.current && onClose()}
+      closedby={busy ? 'none' : undefined}
+      onCancel={busy ? (e) => e.preventDefault() : undefined}
+      onClose={busy ? reopen : onClose}
+      onClick={(e) => !busy && e.target === ref.current && onClose()}
+      aria-busy={busy || undefined}
       aria-labelledby={titleId}
       className={cx('dialog-in m-auto w-[calc(100%-24px)] rounded-2xl border border-border bg-surface p-0 text-text shadow-pop backdrop:bg-black/40 backdrop:backdrop-blur-[2px]', wide ? 'max-w-2xl' : 'max-w-lg')}
     >
@@ -204,7 +218,7 @@ export function Dialog({ open, onClose, title, children, footer, wide }: { open:
             <h2 id={titleId} className="text-base font-semibold text-balance">
               {title}
             </h2>
-            <button type="button" onClick={onClose} className="rounded-lg p-1 text-faint transition-colors hover:bg-bg-subtle hover:text-text" aria-label="Close">
+            <button type="button" onClick={onClose} disabled={busy} className="rounded-lg p-1 text-faint transition-colors hover:bg-bg-subtle hover:text-text disabled:pointer-events-none disabled:opacity-50" aria-label="Close">
               <X className="h-5 w-5" />
             </button>
           </div>

@@ -171,7 +171,15 @@ export const POST = route<Ctx>(async (req, ctx) => {
       const tool = (c?.config.tools as McpToolInfo[] | undefined)?.find((t) => t.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) === b.name.slice(ns.length + 1));
       if (!c || !tool) return json({ output: 'That connected tool is no longer available.', isError: true });
       const secret = await connectionSecret(run.user_id, 'mcp', c.id);
-      return json(await callMcp(c.config.url, secret?.secret, tool.name, b.args));
+      // The device's Stop aborts this request. Before the tool is called the run is read again (W-190): it must
+      // still be active, not stopped and this lease's (a lost lease answers 409, as above), so a Stop that came
+      // while connecting means no call.
+      const stillWanted = async () => {
+        const now = await loadRun(device, runId);
+        requireLease(now, lease);
+        return (now.status === 'queued' || now.status === 'running') && !now.cancel_requested;
+      };
+      return json(await callMcp(c.config.url, secret?.secret, tool.name, b.args, { signal: req.signal, stillWanted }));
     }
     case 'github': {
       const b = z.object({ method: z.enum(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']), path: z.string().max(500), body: z.unknown().optional() }).parse(raw);

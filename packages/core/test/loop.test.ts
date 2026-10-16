@@ -115,6 +115,20 @@ describe('agent loop', () => {
     expect(turns[1]).toMatchObject({ kind: 'assistant', calls: [{ name: 'list_files', output: 'ok computer.list_files' }] });
   });
 
+  it('asks before a GitHub change that would make a private repository public, even when autonomous (W-188)', async () => {
+    for (const runtime of ['cloud', 'desktop'] as const) {
+      const store = new MemStore();
+      await store.userSays('tidy the repo');
+      const model = new ScriptModel([{ calls: [{ name: 'github.request', args: { method: 'PATCH', path: '/repos/audit/private-repo', body: { private: false } } }] }, { text: 'Done.' }]);
+      const host = Object.assign(new FakeHost(), { runtime });
+      const out = await base(store, model, host as ToolHost, { autonomy: 'autonomous', tools: toolCatalog({ runtime, tools: { ...DEFAULT_TOOLS, github: true }, githubConnected: true }) });
+      expect(out.kind, runtime).toBe('waiting_approval');
+      expect(host.ran, runtime).toEqual([]);
+      const tool = store.events_.find((e) => e.type === 'tool')!;
+      expect((tool.data as ToolCallData).risk, runtime).toBe('critical');
+    }
+  });
+
   it('pauses for approval on a high-risk call and resumes once approved', async () => {
     const store = new MemStore();
     await store.userSays('push it');

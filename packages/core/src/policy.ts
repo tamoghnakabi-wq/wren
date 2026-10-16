@@ -687,13 +687,51 @@ export function assessFileWrite(path: string, runtime: Runtime, existing: boolea
   return { risk: existing ? 'medium' : 'medium', reason: existing ? 'overwrites a file on your computer' : 'creates a file on your computer' };
 }
 
-export function assessGithub(method: string, path: string): Assessment {
-  const m = method.toUpperCase();
-  if (m === 'GET') return { risk: 'low' };
-  if (/\/(collaborators|keys|hooks|secrets|actions\/secrets|deployments|transfer|branches\/[^/]+\/protection)/.test(path) || m === 'DELETE') {
-    return { risk: 'critical', reason: 'changes repository security, access or deletes data' };
+/** Repository sub-resources that change who can reach the code, how it is protected, or where it is published. */
+const GITHUB_REPO_GUARDED =
+  /^\/repos\/[^/]+\/[^/]+\/(collaborators|invitations|teams|keys|hooks|secrets|actions\/(secrets|permissions|variables)|dependabot|codespaces|environments|deployments|transfer|forks|generate|pages|rulesets|tags\/protection|branches\/[^/]+\/protection|vulnerability-alerts|automated-security-fixes|private-vulnerability-reporting|code-scanning|secret-scanning|properties|interaction-limits)(\/|$)/;
+/** Account-wide settings: organisations, teams, the user's own keys and emails, apps and enterprises. */
+const GITHUB_ACCOUNT_GUARDED = /^\/(orgs|teams|enterprises|admin|authorizations|applications|app|installation)(\/|$)|^\/user(\/(emails|keys|gpg_keys|ssh_signing_keys|memberships|repository_invitations|installations|blocks|interaction-limits|social_accounts|codespaces\/secrets)(\/|$)|$)/;
+/** Workflow files run with the repository's Actions secrets, so writing one is like reading them. */
+const GITHUB_WORKFLOWS = /^\/repos\/[^/]+\/[^/]+\/contents\/\.github\/(workflows|actions)(\/|$)/;
+
+/**
+ * The path GitHub will act on, as the brokers' `fetch` resolves `https://api.github.com` + path: dot segments
+ * resolved (also `%2e`), query and fragment dropped, then percent-escapes decoded, repeated slashes merged, lower
+ * case and no trailing slash, so no spelling reads as a different endpoint. Null if it can't be read.
+ */
+function githubPath(path: string): string | null {
+  try {
+    const p = decodeURIComponent(new URL(`https://api.github.com${path}`).pathname).toLowerCase().replace(/\/{2,}/g, '/');
+    return p.length > 1 ? p.replace(/\/$/, '') : p;
+  } catch {
+    return null;
   }
-  if (/\/merge$|\/pulls\/\d+\/merge/.test(path)) return { risk: 'high', reason: 'merges a pull request' };
+}
+
+/**
+ * GitHub calls by what they change. Only the method and path are known for most of the API, so whole
+ * endpoints are rated by the most they can do: repository settings (`PATCH /repos/o/r`: visibility, security
+ * features, archiving) and the access, security and publishing endpoints are critical, so even an autonomous
+ * agent asks (W-188). GraphQL is read-only only when the document has no mutation in it.
+ */
+export function assessGithub(method: string, path: string, body?: unknown): Assessment {
+  const m = method.toUpperCase();
+  if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(m)) return { risk: 'critical', reason: 'uses an HTTP method Wren doesn’t know', blocked: 'Blocked: GitHub requests use GET, POST, PATCH, PUT or DELETE.' };
+  const p = githubPath(path);
+  if (p === null) return { risk: 'critical', reason: 'calls a GitHub address Wren can’t read' };
+  if (m === 'GET') return { risk: 'low' };
+  if (p === '/graphql') {
+    const q = body && typeof body === 'object' ? (body as { query?: unknown }).query : undefined;
+    // An operation's type is a bare keyword in the document: without "mutation" it can only read.
+    if (m === 'POST' && typeof q === 'string' && !/\bmutation\b/i.test(q)) return { risk: 'low' };
+    return { risk: 'critical', reason: 'changes GitHub through GraphQL, which Wren can’t check' };
+  }
+  if (m === 'DELETE') return { risk: 'critical', reason: 'deletes data on GitHub' };
+  if (/^\/repos\/[^/]+\/[^/]+$/.test(p)) return { risk: 'critical', reason: 'changes repository settings (visibility, security or access)' };
+  if (GITHUB_REPO_GUARDED.test(p) || GITHUB_ACCOUNT_GUARDED.test(p)) return { risk: 'critical', reason: 'changes repository or account security, access or publishing' };
+  if (GITHUB_WORKFLOWS.test(p)) return { risk: 'critical', reason: 'changes a GitHub Actions workflow, which runs with the repository’s secrets' };
+  if (/\/pulls\/\d+\/merge$|\/merges?$/.test(p)) return { risk: 'high', reason: 'merges a pull request' };
   return { risk: 'high', reason: 'writes to GitHub' };
 }
 
@@ -767,7 +805,7 @@ export function assessCall(
     case 'web.fetch':
       return { risk: 'low' };
     case 'github.request':
-      return assessGithub(s('method') || 'GET', s('path'));
+      return assessGithub(s('method') || 'GET', s('path'), args.body);
     case 'screen.capture':
       return { risk: 'high', reason: 'captures your screen' };
     case 'memory.remember':

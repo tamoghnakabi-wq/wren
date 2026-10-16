@@ -324,6 +324,29 @@ describe('browser + other tools', () => {
     expect(assessCall('github.request', { method: 'POST', path: '/repos/a/b/issues' }, 'cloud').risk).toBe('high');
     expect(assessCall('github.request', { method: 'DELETE', path: '/repos/a/b' }, 'cloud').risk).toBe('critical');
   });
+  it('rates repository settings, access, security and publishing changes critical, however the path is written (W-188)', () => {
+    const gh = (method: string, path: string, body?: unknown) => assessCall('github.request', { method, path, body }, 'cloud').risk;
+    // Making a private repository public is a settings PATCH on the repository itself.
+    expect(gh('PATCH', '/repos/audit/private-repo', { private: false })).toBe('critical');
+    expect(gh('PATCH', '/repos/audit/private-repo', { visibility: 'public' })).toBe('critical');
+    expect(gh('PATCH', '/repos/audit/private-repo', { security_and_analysis: { secret_scanning: { status: 'disabled' } } })).toBe('critical');
+    // The same address written so a fetch resolves it there: dot segments, escapes, case, slashes, a query.
+    for (const p of ['/repos/audit/private-repo/issues/..', '/repos/audit/private-repo/x/%2e%2e', '/Repos/Audit/Private-Repo/', '//repos/audit/private-repo?x=1', '/repos/audit%2Fprivate-repo'])
+      expect(gh('PATCH', p, { private: false }), p).toBe('critical');
+    for (const p of ['/repos/a/b/rulesets', '/repos/a/b/environments/prod', '/repos/a/b/pages', '/repos/a/b/invitations/1', '/repos/a/b/forks', '/repos/a/b/generate', '/repos/a/b/vulnerability-alerts', '/repos/a/b/actions/permissions', '/repos/a/b/dependabot/secrets/X', '/repos/a/b/contents/.github/workflows/ci.yml', '/orgs/acme', '/orgs/acme/members/x', '/teams/1/repos/a/b', '/user', '/user/emails', '/user/gpg_keys'])
+      expect(gh('PUT', p, {}), p).toBe('critical');
+    // Ordinary writes stay high; reads stay low.
+    for (const p of ['/repos/a/b/issues', '/repos/a/b/pulls', '/repos/a/b/contents/src/app.ts', '/user/repos', '/repos/a/b/issues/1/comments'])
+      expect(gh('POST', p, {}), p).toBe('high');
+    expect(gh('GET', '/repos/a/b')).toBe('low');
+    // GraphQL: reading is fine; anything with a mutation in it, or that isn't a plain query, is critical.
+    expect(gh('POST', '/graphql', { query: '{ viewer { login } }' })).toBe('low');
+    expect(gh('POST', '/graphql', { query: 'mutation { updateRepository(input: {repositoryId: "x", visibility: PUBLIC}) { clientMutationId } }' })).toBe('critical');
+    expect(gh('POST', '/graphql', { query: 'query A { viewer { login } } MUTATION B { x }' })).toBe('critical');
+    expect(gh('POST', '/graphql', {})).toBe('critical');
+    // A method Wren doesn't know is refused outright.
+    expect(assessCall('github.request', { method: 'TRACE', path: '/repos/a/b' }, 'cloud').blocked).toMatch(/GET, POST, PATCH, PUT or DELETE/);
+  });
 });
 
 describe('ssrf guard', () => {

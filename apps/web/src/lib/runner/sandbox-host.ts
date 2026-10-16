@@ -323,7 +323,15 @@ export class SandboxHost implements ToolHost {
       const server = this.o.mcp?.get(ns);
       const tool = server?.tools.find((x) => x.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) === name.slice(ns.length + 1));
       if (!server || !tool) return { output: 'That connected tool is no longer available.', isError: true };
-      return callMcp(server.url, server.token, tool.name, args);
+      // Connecting can take a while: a Stop, or this tick losing the run, meanwhile means the tool isn't
+      // called (W-190). The lease is checked as the store does after a write that matched nothing.
+      const stillWanted = async () => {
+        if (await ctx.isCancelled?.()) return false;
+        if (!this.o.leaseId) return true;
+        return (await db()`select 1 from public.runs where id = ${this.o.runId} and lease_id = ${this.o.leaseId}`).length > 0;
+      };
+      // Over by the tick's deadline; one that starts just before it still gets 30 s, which the function's time leaves room for.
+      return callMcp(server.url, server.token, tool.name, args, { signal: ctx.signal, stillWanted, timeoutMs: Math.max(ctx.deadline - Date.now(), 30_000) });
     }
     return { output: `Tool ${name} is not available on the cloud computer.`, isError: true };
   }

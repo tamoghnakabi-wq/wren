@@ -3,6 +3,7 @@
 import { Copy, Download, KeyRound, Mail, Smartphone } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '@/lib/client/api';
+import { enrollFlow } from '@/lib/client/enroll';
 import { formatRecoveryCode, mfaError, mfaInfo, sendEmailCode, verifyEmailCode, type MfaInfo } from '@/lib/client/mfa';
 import { supabase } from '@/lib/client/supabase';
 import { Badge, Button, Dialog, Input, Label, useConfirm, useToast } from '../ui';
@@ -268,6 +269,45 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The setup's own state (verified yet? still open?) lives outside React's renders, so a step that
+  // finishes late reads where things stand now, not what they were when it started (W-189).
+  const [flow] = useState(() =>
+    enrollFlow(
+      {
+        verify: async (factorId, c) => {
+          const { error } = await supabase().auth.mfa.challengeAndVerify({ factorId, code: c.replace(/\s+/g, '') });
+          if (error) throw new Error(mfaError(error));
+        },
+        verifiedFactors: async () => {
+          const { data, error } = await supabase().auth.mfa.listFactors(); // asks Supabase, not the session
+          if (error) throw new Error(mfaError(error));
+          return data.totp.filter((f) => f.status === 'verified').map((f) => f.id);
+        },
+        // The session is aal2 by then, and the step-up from a moment ago covers this.
+        emailOff: () => api('/api/mfa/email', { method: 'DELETE' }).then(() => {}),
+        emailOn: async () => {
+          const now = await mfaInfo();
+          if (!now) throw new Error('Couldn’t read two-step sign-in settings.');
+          return now.email;
+        },
+        createRecoveryCodes: async () => {
+          const r = await supabase().auth.mfa.recoveryCodes.generate();
+          if (r.error) throw new Error(mfaError(r.error));
+          return r.data.codes;
+        },
+        discard: async (factorId) => {
+          // Only while Supabase still has it unfinished: a code whose answer was lost may have gone through.
+          const sb = supabase();
+          const { data } = await sb.auth.mfa.listFactors();
+          if (data?.all.some((f) => f.id === factorId && f.status === 'unverified')) await sb.auth.mfa.unenroll({ factorId });
+        },
+        notify: (text, tone) => toast(text, tone),
+      },
+      { email: info.email, firstApp: !info.recoveryCodes && existing.length === 0 },
+    ),
+  );
+  useEffect(() => () => flow.detach(), [flow]);
+
   // One enrollment per dialog, even if the effect runs twice (React's development mode does that).
   const started = useRef<Promise<{ id: string; qr: string; secret: string } | { error: string }> | null>(null);
   useEffect(() => {
@@ -284,14 +324,14 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
       return error ? { error: mfaError(error) } : { id: data.id, qr: data.totp.qr_code, secret: data.totp.secret };
     })();
     started.current.then((r) => {
-      if (cancelled) return;
-      if ('error' in r) setError(r.error);
-      else setFactor(r);
+      if ('error' in r) {
+        if (!cancelled) setError(r.error);
+      } else if (flow.enrolled(r.id) && !cancelled) setFactor(r); // closed meanwhile: it's removed again
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [flow]);
 
   async function verify(e: React.FormEvent) {
     e.preventDefault();
@@ -299,37 +339,24 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
     setBusy(true);
     setError(null);
     try {
-      const sb = supabase();
-      const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: factor.id, code: code.replace(/\s+/g, '') });
-      if (error) throw new Error(mfaError(error));
-      // The session is aal2 now. Email codes give way to the app (the step-up from a moment ago
-      // covers turning them off); the first app also gets recovery codes.
-      const emailOff = !info.email || (await api('/api/mfa/email', { method: 'DELETE' }).then(() => true, () => false));
-      let codes: string[] | null = null;
-      if (!info.recoveryCodes && existing.length === 0) {
-        const r = await sb.auth.mfa.recoveryCodes.generate();
-        if (r.error) toast(`Authenticator app added, but recovery codes couldn’t be created: ${mfaError(r.error)}`, 'error');
-        else codes = r.data.codes;
-      }
-      // If email codes couldn't be turned off they stay in charge of signing in; Settings shows them.
-      if (emailOff) toast('Two-step sign-in is on.', 'success');
-      else toast('Authenticator app added, but email codes are still on, so signing in still asks for an email code. Turn them off below.', 'error');
-      onDone(codes);
-    } catch (err) {
-      setError((err as Error).message);
-      setCode('');
+      // Verify, turn email codes off, create recovery codes, then re-read and report (lib/client/enroll.ts).
+      const r = await flow.commit(code);
+      if (r.status === 'retry') {
+        setError(r.error);
+        setCode('');
+      } else if (r.status === 'done') onDone(r.codes);
     } finally {
       setBusy(false);
     }
   }
 
+  // Refused while setup is finishing; removes the new app only if it was never verified.
   const close = () => {
-    if (factor) void supabase().auth.mfa.unenroll({ factorId: factor.id }); // not finished: don't leave it behind
-    onClose();
+    if (flow.close()) onClose();
   };
 
   return (
-    <Dialog open onClose={close} title="Set up an authenticator app">
+    <Dialog open busy={busy} onClose={close} title="Set up an authenticator app">
       <form onSubmit={verify} className="space-y-4">
         <ol className="list-decimal space-y-1 pl-5 text-sm text-muted">
           <li>Open your authenticator app and add an account.</li>
@@ -358,7 +385,7 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
           </p>
         )}
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={close}>
+          <Button variant="ghost" onClick={close} disabled={busy}>
             Cancel
           </Button>
           <Button type="submit" loading={busy} disabled={!factor}>
