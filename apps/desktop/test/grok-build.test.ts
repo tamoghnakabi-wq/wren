@@ -59,8 +59,8 @@ writeFileSync(agentPath, AGENT);
 
 const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0, bridgesOpen: 0, spawnFails: false }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
-// The CLI here is a stand-in script, not an installed program: the install-location check is tested on its own.
-vi.mock('../src/main/sandbox', async (orig) => ({ ...(await orig<typeof import('../src/main/sandbox')>()), untrustedProgram: () => null }));
+// The CLI here is a stand-in script, not an installed program: which program Wren may start is tested on its own.
+vi.mock('../src/engines/program', () => ({ engineProgram: async () => ({ program: '/fake/grok' }) }));
 process.env.WREN_DATA_DIR = mkdtempSync(join(tmpdir(), 'wren-grok-data-'));
 vi.mock('../src/engines/common', () => {
   class TimelineWriter {
@@ -88,7 +88,6 @@ vi.mock('../src/engines/common', () => {
   }
   return {
     TimelineWriter,
-    findCli: () => '/fake/grok',
     decide: async () => ({ allow: true }),
     startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
     spawnEngine: async () => {

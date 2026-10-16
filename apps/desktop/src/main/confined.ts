@@ -4,6 +4,7 @@ import { dirname, join, relative, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { confinePath, reachesAny } from './paths';
 import { appDirs, autorunPaths, fileOpsProfile, hasSeatbelt } from './sandbox';
+import { toolEnv } from './shellenv';
 
 // File reads, writes and listings the agent asks for. A path is checked against
 // the allowed folders first (paths.ts), but a folder could be swapped for a link
@@ -168,6 +169,7 @@ export async function readConfined(path: string, roots: string[], dataDir: strin
 /** Create or replace a file already checked to be inside `roots` (parent folders included). */
 export async function writeConfined(path: string, content: Buffer, roots: string[], dataDir: string): Promise<void> {
   refusePrivate(path, dataDir);
+  await toolEnv(); // the folders on the user's PATH (protected below) as their shell has them, not the start-up guess
   refuseAutorun(path, roots);
   if (hasSeatbelt()) {
     await helper(['/bin/sh', '-c', '/bin/mkdir -p -- "$(/usr/bin/dirname -- "$1")" && /bin/cat > "$1"', 'sh', path], roots, dataDir, content, 0);

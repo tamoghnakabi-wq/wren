@@ -7,6 +7,7 @@ import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
+import { engineProgram } from '../engines/program';
 import { closeBrowser, stopAllJobs } from './host';
 import { engineLoginScript } from './login';
 import { createPairing, type PairAnswer, type PairStart } from './pairing';
@@ -617,8 +618,14 @@ function registerIpc() {
     const r = await chatgpt.signOut();
     void runner.tick();
     pushStatus();
-    if (!r.cleared) new Notification({ title: 'Signed out of ChatGPT, but its sign-in is still stored', body: 'Wren won’t use it, and removes it as soon as it can write to its data folder.' }).show();
-    else if (!r.revoked) new Notification({ title: 'Signed out of ChatGPT on this computer', body: 'Remote revocation wasn’t confirmed. You can also disconnect Wren in ChatGPT Settings → Apps.' }).show();
+    // Everything that went wrong is said, not just the first (W-185).
+    const remote = 'Remote revocation wasn’t confirmed. You can also disconnect Wren in ChatGPT Settings → Apps.';
+    let note: { title: string; body: string } | null = null;
+    if (!r.cleared && r.recorded) note = { title: 'Signed out of ChatGPT, but its sign-in is still stored', body: `Wren won’t use it, also after a restart, and removes it as soon as it can write to its data folder.${r.revoked ? '' : ` ${remote}`}` };
+    else if (!r.cleared) note = { title: 'Signed out of ChatGPT in this session only', body: `Wren couldn’t remove its stored sign-in or record the sign-out, so after Wren restarts it may be used again.${r.revoked ? '' : ' Remote revocation wasn’t confirmed either.'} Disconnect Wren in ChatGPT Settings → Apps, and check that Wren’s data folder can be written.` };
+    else if (!r.revoked) note = { title: 'Signed out of ChatGPT on this computer', body: remote };
+    if (note && Notification.isSupported()) new Notification(note).show();
+    return r;
   });
   handle('openEngineLogin', (engine) => openEngineLogin(engine === 'grok-build' ? 'grok-build' : 'claude-code'));
   handle('checkUpdate', () => updater.check());
@@ -651,11 +658,24 @@ function registerIpc() {
   });
 }
 
-function openEngineLogin(engine: 'claude-code' | 'grok-build') {
-  const cmd = engine === 'claude-code' ? 'claude' : 'grok login';
+/**
+ * Sign in to an engine's CLI in a terminal, outside any sandbox: only the program a run would start, checked
+ * the same way first and started by its full path (W-183). Returns why not, if it won't.
+ */
+async function openEngineLogin(engine: 'claude-code' | 'grok-build'): Promise<{ error?: string }> {
+  const name = engine === 'claude-code' ? 'Claude Code' : 'Grok Build';
+  const refuse = (error: string) => {
+    if (Notification.isSupported()) new Notification({ title: `Couldn’t sign in to ${name}`, body: error }).show();
+    return { error };
+  };
+  const found = await engineProgram(engine, loadPolicy().folders);
+  if (!found) return refuse(`${name} isn’t installed on this computer.`);
+  if ('untrusted' in found) return refuse(`Wren won’t start ${name}: ${found.untrusted}. Install it with its own installer.`);
+  // cmd reads these characters itself, even inside a path (Windows only).
+  if (process.platform === 'win32' && /["%^&|<>()!]/.test(found.program)) return refuse(`Wren can’t start ${found.program} in a terminal safely. Run it yourself to sign in.`);
   if (process.platform === 'darwin') {
     // In Wren's data folder, out of agents' reach (W-172); removed after a while (or at a start after that).
-    const { file, dir } = engineLoginScript(dataDir(), engine);
+    const { file, dir } = engineLoginScript(dataDir(), engine, found.program);
     void shell
       .openPath(file)
       .then((err) => err, (e: Error) => e.message)
@@ -670,8 +690,9 @@ function openEngineLogin(engine: 'claude-code' | 'grok-build') {
       }
     }, 10 * 60_000).unref();
   } else if (process.platform === 'win32') {
-    spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', cmd], { detached: true, stdio: 'ignore' }).unref();
+    spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', found.program, ...(engine === 'grok-build' ? ['login'] : [])], { detached: true, stdio: 'ignore' }).unref();
   }
+  return {};
 }
 
 // ------------------------------------------------------------------ lifecycle

@@ -5,8 +5,9 @@ import type { LoopOutcome } from '@wren/core';
 import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
-import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt, untrustedProgram } from '../main/sandbox';
-import { appPaths, claudeSupportsRestricted, decide, findCli, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
+import { appPaths, claudeSupportsRestricted, decide, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { engineProgram } from './program';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
 // computer, signed in by the user through Anthropic's login. Wren never sees
@@ -143,10 +144,10 @@ function resultText(content: unknown): string {
 }
 
 export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => boolean, approveScript: string): Promise<LoopOutcome> {
-  const cli = findCli('claude');
-  if (!cli) return { kind: 'failed', error: 'Claude Code isn’t installed on this computer. Install it (code.claude.com), run `claude` once and sign in with your Claude account, then try again.', code: 'engine_missing', steps: 0 };
-  const changed = untrustedProgram(cli, allowedRoots(run.folders), dataDir());
-  if (changed) return { kind: 'failed', error: `Wren won't start Claude Code from where it is installed: ${changed}, and Claude Code runs outside the sandbox. Install it with its own installer (code.claude.com), or don't allow agents that folder.`, code: 'engine_untrusted', steps: 0 };
+  const found = await engineProgram('claude-code', run.folders);
+  if (!found) return { kind: 'failed', error: 'Claude Code isn’t installed on this computer. Install it (code.claude.com), run `claude` once and sign in with your Claude account, then try again.', code: 'engine_missing', steps: 0 };
+  if ('untrusted' in found) return { kind: 'failed', error: `Wren won't start Claude Code: ${found.untrusted}. Claude Code runs outside the sandbox, so Wren starts only the program its own installer put in place (code.claude.com), where no agent can change it.`, code: 'engine_untrusted', steps: 0 };
+  const cli = found.program; // the file just checked, never the name looked up again
   if (!claudeSupportsRestricted(cli)) return { kind: 'failed', error: 'This version of Claude Code is too old for Wren. Update it (run `claude update` in Terminal), then try again.', code: 'engine_outdated', steps: 0 };
 
   const writer = new TimelineWriter(run.store, 'claude-code', run.model === 'default' ? 'Claude Code' : run.model);

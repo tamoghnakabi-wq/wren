@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { clearSecret, installId, readJson, readSecret, writeJson, writeSecret } from './config';
+import { clearSecret, installId, readJson, readSecret, secretDigest, writeJson, writeSecret } from './config';
 
 // "Sign in with ChatGPT" for open-source, locally hosted apps, following
 // developers.openai.com/siwc/token-sharing-open-source:
@@ -71,20 +71,76 @@ function savedClient(): { client_id?: string; email?: string; id_token?: string 
 }
 
 const b64url = (b: Buffer) => b.toString('base64url');
-/** Marks a sign-out whose stored sign-in couldn't be removed, so a restart doesn't bring it back (W-185). */
+/**
+ * Marks a sign-out whose stored sign-in couldn't be removed, so a restart doesn't bring it back (W-185). `of` is
+ * the sha256 of the stored bytes it signed out, so a sign-in saved later isn't taken for that one if the marker
+ * couldn't be removed; 0.1.31 wrote none, which covers whatever is stored.
+ */
 const SIGNED_OUT = 'chatgpt-signed-out.json';
-/** Signed out here, but the stored sign-in is still on disk: it is never used, and removed when possible. */
-let clearFailed = false;
-const load = () => {
-  if (clearFailed || readJson<{ at?: string } | null>(SIGNED_OUT, null)) {
-    if (!clearSecret(SECRET)) return null;
-    clearFailed = false;
-    try {
-      writeJson(SIGNED_OUT, null);
-    } catch {
-      /* the sign-in itself is gone, which is what counts */
+interface SignedOut {
+  at?: string;
+  of?: string;
+}
+/** Signed out here, but the stored sign-in (`of`, if it could be read) is still on disk: nothing stored is used, and it is removed when possible. */
+let clearFailed: { of?: string } | null = null;
+
+const readMarker = () => readJson<SignedOut | null>(SIGNED_OUT, null);
+/** Whether marker `m` signs out the stored sign-in with this digest (undefined: unknown). */
+const covers = (m: SignedOut | null, digest: string | undefined) => !!m && (!m.of || m.of === digest);
+/** The stored sign-in's digest: null when none is stored, undefined when it can't be read. */
+function storedDigest(): string | null | undefined {
+  try {
+    return secretDigest(SECRET);
+  } catch {
+    return undefined;
+  }
+}
+/** Writes the marker (synced to disk); true once the one on disk covers that sign-in. */
+function recordSignOut(of: string | undefined): boolean {
+  try {
+    writeJson(SIGNED_OUT, { at: new Date().toISOString(), of }, { durable: true });
+  } catch {
+    /* checked below */
+  }
+  return covers(readMarker(), of);
+}
+/** Removes the marker (synced, so it can't outlast what made it stale); true once there is none. */
+function dropMarker(): boolean {
+  if (!readMarker()) return true;
+  try {
+    writeJson(SIGNED_OUT, null, { durable: true });
+  } catch {
+    /* checked below */
+  }
+  return !readMarker();
+}
+
+const load = (): Registration | null => {
+  if (clearFailed) {
+    // Signed out in this run: nothing stored is used, whatever the marker says. Removed at the first chance,
+    // and recorded now if that failed at sign-out.
+    if (clearSecret(SECRET)) {
+      clearFailed = null;
+      dropMarker();
+    } else if (!covers(readMarker(), clearFailed.of)) {
+      recordSignOut(clearFailed.of);
     }
     return null;
+  }
+  const marker = readMarker();
+  if (marker) {
+    const stored = storedDigest();
+    if (stored === undefined) return null; // can't tell which sign-in is stored, so none is used
+    if (stored === null) {
+      dropMarker(); // nothing stored: the marker is left over
+      return null;
+    }
+    if (covers(marker, stored)) {
+      // The sign-in that was signed out: never used, removed at the first chance.
+      if (clearSecret(SECRET)) dropMarker();
+      return null;
+    }
+    dropMarker(); // saved after that sign-out, so a newer sign-in: the marker is left over
   }
   return readSecret<Registration>(SECRET);
 };
@@ -208,11 +264,12 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
     if (authGeneration !== startGeneration) throw new Error('Sign-in was cancelled.');
     authGeneration++;
     writeSecret(SECRET, reg);
-    clearFailed = false;
-    try {
-      writeJson(SIGNED_OUT, null);
-    } catch {
-      /* only matters after a sign-out whose clean-up failed */
+    clearFailed = null;
+    // A sign-out marker that can't be removed names the sign-in it was for, so it doesn't sign out this one.
+    // One from 0.1.31 names none and would remove this one at the next read: then it can't be kept (W-185).
+    if (!dropMarker() && covers(readMarker(), storedDigest() ?? undefined)) {
+      clearSecret(SECRET);
+      throw new Error('Wren couldn’t keep this sign-in: a file in its data folder can’t be changed. Check that the folder can be written, then sign in again.');
     }
     // Kept for the next sign-in's hints; the id token goes in encrypted storage only.
     writeJson('chatgpt-client.json', { client_id: clientId, email: reg.email });
@@ -277,20 +334,19 @@ export async function accessToken(): Promise<string> {
   return promise;
 }
 
-export async function signOut(): Promise<{ revoked: boolean; cleared: boolean }> {
+export async function signOut(): Promise<{ revoked: boolean; cleared: boolean; recorded: boolean }> {
   // Local sign-out takes effect at once: tokens are gone before any network wait, refreshes and
   // sign-ins already under way can no longer save, and an open sign-in is closed. If the stored
-  // sign-in can't be removed, it is still never used again, here or after a restart (W-185).
+  // sign-in can't be removed, it is still never used again in this run, and a marker naming it keeps it
+  // unused after a restart; `recorded` says whether that holds (cleared, or the marker is on disk) (W-185).
   const r = load();
   authGeneration++;
   const cleared = clearSecret(SECRET);
+  let recorded = cleared;
   if (!cleared) {
-    clearFailed = true;
-    try {
-      writeJson(SIGNED_OUT, { at: new Date().toISOString() });
-    } catch {
-      /* this run still won't use it */
-    }
+    const of = storedDigest() ?? undefined; // can't be read: the marker then covers whatever is stored
+    clearFailed = { of };
+    recorded = recordSignOut(of);
   }
   cancelPending('Signed out.');
   let revoked = false;
@@ -310,7 +366,7 @@ export async function signOut(): Promise<{ revoked: boolean; cleared: boolean }>
     }
   }
   // The client/account mapping and host id stay for a later sign-in.
-  return { revoked, cleared };
+  return { revoked, cleared, recorded };
 }
 
 export async function models(): Promise<{ id: string; name: string }[]> {

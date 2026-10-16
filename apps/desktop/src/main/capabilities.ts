@@ -1,9 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { findCli, engineEnv } from '../engines/common';
-import { dataDir } from './config';
-import { allowedRoots } from './paths';
-import { untrustedProgram } from './sandbox';
+import { engineEnv } from '../engines/common';
+import { engineProgram } from '../engines/program';
 import * as chatgpt from './chatgpt';
 import type { Policy } from './config';
 
@@ -20,22 +18,20 @@ export interface Capabilities {
 
 const versionCache = new Map<string, { at: number; v?: string }>();
 /**
- * Whether the CLI is installed, and its version. Asking for the version runs it, outside any sandbox, so
- * not from a place agents could have changed (W-183): such a CLI is reported, and never run.
+ * Whether the CLI is installed, and its version. Asking for the version runs it, outside any sandbox, so only
+ * the program a run would start, checked first (W-183, W-187): one Wren won't start is reported, never run.
  */
-function cliVersion(name: 'claude' | 'grok', folders: string[]): { installed: boolean; version?: string; untrusted?: string } {
-  const cli = findCli(name);
-  const untrusted = cli ? untrustedProgram(cli, allowedRoots(folders), dataDir()) : null;
-  if (cli && untrusted) return { installed: true, untrusted };
-  const cached = versionCache.get(name);
-  if (cached && Date.now() - cached.at < 10 * 60_000) return { installed: !!cached.v, version: cached.v };
-  let v: string | undefined;
-  if (cli) {
-    const r = spawnSync(cli, name === 'claude' ? ['--version'] : ['version'], { encoding: 'utf8', timeout: 8000, env: engineEnv(name === 'claude' ? 'claude-code' : 'grok-build') });
-    v = (r.stdout || '').trim().split(/\s+/)[name === 'claude' ? 0 : 1] || 'installed';
-  }
-  versionCache.set(name, { at: Date.now(), v });
-  return { installed: !!v, version: v };
+async function cliVersion(engine: 'claude-code' | 'grok-build', folders: string[]): Promise<{ installed: boolean; version?: string; untrusted?: string }> {
+  const found = await engineProgram(engine, folders);
+  if (!found) return { installed: false };
+  if ('untrusted' in found) return { installed: true, untrusted: found.untrusted };
+  const cached = versionCache.get(found.program);
+  if (cached && Date.now() - cached.at < 10 * 60_000) return { installed: true, version: cached.v };
+  const claude = engine === 'claude-code';
+  const r = spawnSync(found.program, claude ? ['--version'] : ['version'], { encoding: 'utf8', timeout: 8000, env: engineEnv(engine) });
+  const v = (r.stdout || '').trim().split(/\s+/)[claude ? 0 : 1] || 'installed';
+  versionCache.set(found.program, { at: Date.now(), v });
+  return { installed: true, version: v };
 }
 
 function browserName(): string | undefined {
@@ -69,8 +65,8 @@ export async function detect(policy: Policy): Promise<Capabilities> {
   const browser = browserName();
   return {
     chatgpt: { ...st, models: st.signedIn ? chatgptModels.list : [] },
-    claudeCode: cliVersion('claude', policy.folders),
-    grokBuild: cliVersion('grok', policy.folders),
+    claudeCode: await cliVersion('claude-code', policy.folders),
+    grokBuild: await cliVersion('grok-build', policy.folders),
     local,
     browser: { available: !!browser, name: browser },
   };

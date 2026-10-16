@@ -17,3 +17,4 @@ playwright-report/
 .vercel
 apps/desktop/app/
 apps/desktop/release/
+apps/desktop/test/.tmp-*

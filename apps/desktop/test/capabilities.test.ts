@@ -15,7 +15,8 @@ vi.mock('node:child_process', async (orig) => {
   const real = await orig<typeof import('node:child_process')>();
   return { ...real, spawnSync: (cmd: string, ...rest: unknown[]) => (ran.push(cmd), (real.spawnSync as (...a: unknown[]) => unknown)(cmd, ...rest)) };
 });
-vi.mock('../src/engines/common', () => ({ findCli: () => planted, engineEnv: () => ({}) }));
+vi.mock('../src/engines/common', () => ({ findClis: () => [planted], engineEnv: () => ({}) }));
+vi.mock('../src/main/shellenv', async (orig) => ({ ...(await orig<typeof import('../src/main/shellenv')>()), toolEnv: async () => ({}) }));
 vi.mock('../src/main/chatgpt', () => ({ status: () => ({ signedIn: false }) }));
 process.env.WREN_DATA_DIR = join(dir, 'data');
 const { detect } = await import('../src/main/capabilities');
@@ -24,7 +25,7 @@ describe("reporting this computer's engines (W-183)", () => {
   it("never runs an engine program agents could have changed, even just to ask its version", async () => {
     const caps = await detect({ folders: [join(dir, 'project')], localModelUrl: 'http://127.0.0.1:9/v1' } as never);
     expect(caps.claudeCode).toMatchObject({ installed: true });
-    expect(caps.claudeCode.untrusted).toMatch(/may change/);
+    expect(caps.claudeCode.untrusted).toMatch(/isn't where Claude Code's own installer puts it/);
     expect(caps.claudeCode.version).toBeUndefined();
     expect(ran).not.toContain(planted);
   });

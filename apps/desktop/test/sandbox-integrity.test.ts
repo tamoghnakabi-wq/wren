@@ -57,10 +57,11 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('the engine sign-in script
     const project = join(root, 'project');
     const data = join(root, 'data');
     mkdirSync(project, { recursive: true });
-    const { file, dir } = engineLoginScript(data, 'claude-code');
+    const prog = '/Users/someone/.local/share/claude/versions/2.1.300';
+    const { file, dir } = engineLoginScript(data, 'claude-code', prog);
     expect(dir.startsWith(join(data, 'login') + '/')).toBe(true);
     expect(statSync(file).mode & 0o777).toBe(0o700);
-    expect(readFileSync(file, 'utf8')).toMatch(/\nclaude\n$/);
+    expect(readFileSync(file, 'utf8')).toMatch(/\n'\/Users\/someone\/\.local\/share\/claude\/versions\/2\.1\.300'\n$/);
     const command = seatbeltProfile([project], data);
     for (const evil of [`echo 'touch pwned' >> '${file}'`, `mv '${dir}' '${dir}.x'`, `ln -sf /tmp/x '${file}'`]) {
       expect(sb(command, evil).status, evil).not.toBe(0);
@@ -68,9 +69,9 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('the engine sign-in script
     sb(command, `rm -rf '${dir}'`); // rm -f says nothing about what it may not even look at
     expect(existsSync(file)).toBe(true);
     expect(sb(command, `cat '${file}'`).stdout).toBe(''); // not even readable
-    expect(readFileSync(file, 'utf8')).toMatch(/\nclaude\n$/);
+    expect(readFileSync(file, 'utf8')).toMatch(/\n'\/Users\/someone\/\.local\/share\/claude\/versions\/2\.1\.300'\n$/);
     // A second script gets its own new folder.
-    expect(engineLoginScript(data, 'claude-code').dir).not.toBe(dir);
+    expect(engineLoginScript(data, 'claude-code', prog).dir).not.toBe(dir);
     // Agents can write the temp folder, which is why the script no longer goes there.
     const temp = join(realpathSync(tmpdir()), `wren-claude-code-login-${process.pid}.command`);
     expect(sb(command, `echo x > '${temp}'`).status).toBe(0);
@@ -173,17 +174,6 @@ describe('programs Wren starts outside the sandbox (W-178)', () => {
     // A program in an allowed folder (an npm global prefix under an allowed home) could be changed.
     expect(can(`${home}/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js`, [home])).toBe(true);
     expect(can('/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js', [home])).toBe(false);
-  });
-
-  it('refuses a program whose file is shared with another (a hard link into a package store)', async () => {
-    const { untrustedProgram } = await import('../src/main/sandbox');
-    const { linkSync } = await import('node:fs');
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'wren-prog-')));
-    writeFileSync(join(root, 'tool'), '#!/bin/sh\n');
-    linkSync(join(root, 'tool'), join(root, 'store-copy'));
-    // (In the temp folder it is agent-writable anyway; outside it, the shared file alone is enough.)
-    expect(untrustedProgram(join(root, 'tool'), [], join(root, 'data'))).toMatch(/may change|shares its contents/);
-    expect(untrustedProgram(join(root, 'missing'), [], join(root, 'data'))).toMatch(/can't be resolved/);
   });
 });
 

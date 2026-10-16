@@ -43,18 +43,20 @@ export interface EngineRun {
   saveResumeId: (id: string) => Promise<void>;
 }
 
-/** Locate an engine CLI the user installed themselves. */
-export function findCli(name: 'claude' | 'grok'): string | null {
+/**
+ * Every copy of an engine CLI the user installed themselves, in the order they'd be looked up: the usual
+ * install places, then the user's PATH as read from their login shell once (no shell is run for this, W-183).
+ * Which one Wren may start is decided by `engineProgram` (engines/program.ts).
+ */
+export function findClis(name: 'claude' | 'grok'): string[] {
   const home = homedir();
   const candidates =
     process.platform === 'win32'
       ? [join(home, '.local', 'bin', `${name}.exe`), join(home, `.${name}`, 'bin', `${name}.exe`), join(home, 'AppData', 'Roaming', 'npm', `${name}.cmd`)]
       : [join(home, '.local', 'bin', name), join(home, `.${name}`, 'bin', name), '/opt/homebrew/bin/' + name, '/usr/local/bin/' + name, join(home, '.npm-global', 'bin', name)];
-  for (const c of candidates) if (existsSync(c)) return c;
-  // Then the user's PATH, as read from their login shell once (no shell is run for this, W-183).
   const exts = process.platform === 'win32' ? ['.exe', '.cmd'] : [''];
-  for (const d of userPathDirs()) for (const x of exts) if (existsSync(join(d, name + x))) return join(d, name + x);
-  return null;
+  for (const d of userPathDirs()) for (const x of exts) candidates.push(join(d, name + x));
+  return [...new Set(candidates)].filter((c) => existsSync(c));
 }
 
 /**

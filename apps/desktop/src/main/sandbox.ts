@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
@@ -63,7 +63,8 @@ export const AUTORUN = [
   'Library/LaunchAgents',
   '.claude/settings.json', '.claude/settings.local.json', '.claude/CLAUDE.md', '.claude/hooks', '.claude/commands', '.claude/agents', '.claude/plugins', '.claude/skills', '.claude/output-styles', '.claude.json',
   // The engine programs Wren itself starts (Claude Code outside any sandbox): not even by their own file tools (W-182).
-  '.local/share/claude', '.claude/local', '.grok/bin', '.grok/downloads',
+  // ~/.local/bin is where Claude Code's installer puts its command (on Windows, the program itself, W-187).
+  '.local/share/claude', '.claude/local', '.grok/bin', '.grok/downloads', '.local/bin',
   ...(process.platform === 'win32' ? ['AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup', 'Documents/WindowsPowerShell', 'Documents/PowerShell', '.config/powershell'] : []),
 ];
 /**
@@ -211,20 +212,68 @@ export function agentCanWrite(p: string, roots: string[], dataDir: string, home 
 }
 
 /**
- * Why Wren won't start this engine program, if it won't: agents could have changed it (it, or something
- * hard-linked to it such as a pnpm store file, is somewhere they may write). Claude Code runs outside any
- * sandbox, so a rewritten program would run with the user's full access (W-178).
+ * Where each engine's own installer puts its program: one native file that is the whole program, in a folder
+ * no agent may write (AUTORUN). Elsewhere (an npm or version-manager install, a wrapper or shim) the file Wren
+ * can check isn't all that runs: the interpreter, modules or runtime it loads can be anywhere, also where
+ * agents may write (W-187). Homebrew's casks live outside the home folder, so `agentCanWrite` decides those.
  */
-export function untrustedProgram(path: string, roots: string[], dataDir: string): string | null {
+const ENGINE_INSTALLS: Record<Engine, { home: string[]; system: string[] }> = {
+  'claude-code': {
+    home: ['.local/share/claude/versions', ...(process.platform === 'win32' ? ['.local/bin'] : [])],
+    system: ['/opt/homebrew/Caskroom/claude-code', '/usr/local/Caskroom/claude-code'],
+  },
+  'grok-build': { home: ['.grok/downloads', '.grok/bin'], system: [] },
+};
+const ENGINE_NAMES: Record<Engine, string> = { 'claude-code': 'Claude Code', 'grok-build': 'Grok Build' };
+
+/** A native program for this platform (Mach-O, PE or ELF), not a script that has an interpreter run it. */
+export function nativeProgram(real: string, platform = process.platform): boolean {
+  const b = Buffer.alloc(4);
+  let fd: number | undefined;
+  try {
+    fd = openSync(real, 'r');
+    if (readSync(fd, b, 0, 4, 0) < 4) return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  if (platform === 'win32') return b[0] === 0x4d && b[1] === 0x5a; // MZ
+  if (platform === 'darwin') return [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xcafebabf, 0xbebafeca].includes(b.readUInt32BE(0));
+  return b.readUInt32BE(0) === 0x7f454c46; // ELF
+}
+
+/**
+ * Whether Wren may start this engine program outside a sandbox (Claude Code runs outside any, and a
+ * rewritten program would run with the user's full access), and if so its real file, which is what every
+ * caller then starts: the version and --help probes, a run and sign-in (W-183). It must be a native program
+ * where the engine's own installer puts it (W-187), in no folder an agent may write, and not hard-linked to
+ * another file such as a package store's (W-178).
+ */
+export function checkEngineProgram(engine: Engine, path: string, roots: string[], dataDir: string, home = homedir()): { program: string } | { why: string } {
   let real: string;
   try {
-    real = realpathSync(path);
+    real = realpathSync.native(path); // on macOS and Windows, the name as stored (case included)
   } catch {
-    return `${path} can't be resolved`;
+    return { why: `${path} can't be resolved` };
   }
-  if (agentCanWrite(real, roots, dataDir)) return `${real} is in a folder agents on this computer may change`;
-  if (statSync(real).nlink > 1) return `${real} shares its contents with another file (a package store agents may change)`;
-  return null;
+  // Exact names on macOS: on a case-sensitive volume another case would be another, unprotected folder.
+  const same = (x: string) => (process.platform === 'win32' ? x.toLowerCase() : x);
+  const { home: inHome, system } = ENGINE_INSTALLS[engine];
+  const installs = [...inHome.map((p) => join(home, p)), ...system].map((p) => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      return p;
+    }
+  });
+  if (!installs.some((d) => same(real).startsWith(same(d.endsWith(sep) ? d : d + sep)))) return { why: `${real} isn't where ${ENGINE_NAMES[engine]}'s own installer puts it, so Wren can't tell what else it runs (an npm or version-manager install loads code from other places)` };
+  if (agentCanWrite(real, roots, dataDir, home)) return { why: `${real} is in a folder agents on this computer may change` };
+  const st = statSync(real);
+  if (!st.isFile()) return { why: `${real} isn't a program file` };
+  if (st.nlink > 1) return { why: `${real} shares its contents with another file (a package store agents may change)` };
+  if (!nativeProgram(real)) return { why: `${real} is a script, not the program itself` };
+  return { program: real };
 }
 
 /**
