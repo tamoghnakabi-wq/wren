@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-20: the re-audit #28 fixes (W-188 remainder, W-191…W-193) are desktop **0.1.35** plus a web deploy, not yet committed or released; production runs desktop 0.1.34 (`b80232b`; the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Update this line when 0.1.35 ships. Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-eight Codex security audits (W-1…W-193) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-20: `main` is in sync with `origin/main`; the last code commit is `b4b36d3` (re-audit #28 fixes: W-188 remainder, W-191…W-193), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.35** (released; the signed update feed serves it on all three platforms). Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-eight Codex security audits (W-1…W-193) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -296,7 +296,7 @@ How each part works:
 | Re-audit #25 (of 0.1.31) | W-187 (+W-183, W-185 remainders) | `c0e887a`, 0.1.32 | See below; no migration |
 | Re-audit #26 (of 0.1.32) | none new (W-185 remainder) | `d13df74`, 0.1.33 | See below; no migration |
 | Re-audit #27 (of 0.1.33) | W-188…W-190 | `b80232b`, 0.1.34 + web | See below; no migration |
-| Re-audit #28 (of 0.1.34) | W-191…W-193 (+W-188 remainder) | (this commit), 0.1.35 + web | See below; no migration |
+| Re-audit #28 (of 0.1.34) | W-191…W-193 (+W-188 remainder) | `b4b36d3`, 0.1.35 + web | See below; no migration |
 
 Round 28 in brief (desktop 0.1.35 and the web app; Codex report ~/studioproject/wren-audits/wren-re-audit-0.1.34-2026-10-20.md, of `0413880`; W-189 and the original W-190 confirmed closed; a fresh pass over the cloud computer and browser daemon, schedules and cron, files, pairing and the model proxy; W-191 and W-192 were fixed by two subagents in parallel):
 - **W-188 remainder** (High) two repository security endpoints still rated high (Actions OIDC customization, runner registration tokens): repository writes are now an allowlist of ordinary ones (`GITHUB_REPO_WRITES`), so any other repository write, including ones GitHub adds later, is critical; `/repositories/:id` is critical too (see "GitHub" under Approvals and risk).
