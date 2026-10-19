@@ -26,7 +26,16 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   },
 }));
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({ StreamableHTTPClientTransport: class {} }));
-vi.mock('@wren/core/net', () => ({ assertPublicUrl: async (u: string) => new URL(u), guardedFetch: fetch, fetchReadable: async () => ({ output: '', status: 200 }) }));
+// The address lookup can be held too (W-193).
+const net = { hold: false, release: () => {} };
+vi.mock('@wren/core/net', () => ({
+  assertPublicUrl: async (u: string) => {
+    if (net.hold) await new Promise<void>((r) => (net.release = r));
+    return new URL(u);
+  },
+  guardedFetch: fetch,
+  fetchReadable: async () => ({ output: '', status: 200 }),
+}));
 
 // What the cloud host and the device route need besides the SDK. The database answers the cloud's
 // lease check, the device route's run (as it is now) and the connection.
@@ -101,7 +110,47 @@ beforeEach(() => {
   run = { id: RUN, session_id: 's', agent_id: 'a', user_id: 'user-1', agent_name: 'A', model: { source: 'openai' }, lease_id: LEASE, status: 'running', cancel_requested: false };
   queries.length = 0;
 });
-afterEach(() => sdk.release()); // nothing is left waiting on a connect
+afterEach(() => {
+  sdk.release(); // nothing is left waiting on a connect
+  net.hold = false;
+  net.release();
+});
+
+describe('every wait before an MCP call gives way to Stop and the time limit (W-193)', () => {
+  const SLOW = { output: "The connected tool's server didn't answer in time, so the tool was not called.", isError: true };
+  const never = () => new Promise<boolean>(() => {});
+
+  it('a task check that never answers, before connecting or before the call, ends at the time limit', async () => {
+    expect(await callMcp(URL_, undefined, 'send_email', {}, { stillWanted: never, timeoutMs: 20 })).toEqual(SLOW);
+    sdk.hold = false;
+    let asked = 0;
+    const second = () => (++asked === 1 ? true : never());
+    expect(await callMcp(URL_, undefined, 'send_email', {}, { stillWanted: second, timeoutMs: 20 })).toEqual(SLOW);
+    expect(sdk.calls).toHaveLength(0);
+    expect(sdk.closed).toBe(2); // both clients closed when the call gave up
+  });
+
+  it('a Stop during a task check that never answers ends the call at once', async () => {
+    const stop = new AbortController();
+    const done = callMcp(URL_, undefined, 'send_email', {}, { signal: stop.signal, stillWanted: never });
+    await new Promise((r) => setTimeout(r, 5));
+    stop.abort();
+    expect(await done).toEqual(STOPPED);
+    expect(sdk.calls).toHaveLength(0);
+  });
+
+  it('an address lookup that stalls ends at the time limit or on Stop', async () => {
+    net.hold = true;
+    expect(await callMcp(URL_, undefined, 'send_email', {}, { timeoutMs: 20 })).toEqual(SLOW);
+    const stop = new AbortController();
+    const done = callMcp(URL_, undefined, 'send_email', {}, { signal: stop.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    stop.abort();
+    expect(await done).toEqual(STOPPED);
+    expect(sdk.connects).toHaveLength(0);
+    expect(sdk.calls).toHaveLength(0);
+  });
+});
 
 describe('an MCP call after a Stop (W-190)', () => {
   it('is not sent when the task is stopped while connecting, and the client is closed', async () => {

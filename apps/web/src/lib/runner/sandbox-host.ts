@@ -5,10 +5,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { BROWSER_DAEMON_TS } from '@wren/core/browser/daemon-source';
 import { fetchReadable } from '@wren/core/net';
-import { assessGithub } from '@wren/core';
+import { assessGithub, MAX_TOOL_OUTPUT } from '@wren/core';
 import { guessMime, saveArtifact } from '../blob';
 import { callMcp, type McpToolInfo } from '../mcp';
 import { env } from '../env';
+import { MB, readCapped, type CappedRead } from './capped-read';
 
 // Tool host for cloud runs. The agent's computer is a persistent Vercel
 // Sandbox (one per agent); the model loop and every credential stay in our
@@ -22,6 +23,16 @@ import { env } from '../env';
 
 export const WORKSPACE = '/vercel/sandbox';
 const JOB_DIR = '$HOME/.wren/jobs';
+
+// The most of a file the file tools take into this function (W-191), counted while it streams in.
+// read_file as on the desktop; edit_file decodes and searches the whole text, so less; share_file
+// what a desktop may upload.
+const READ_MAX = 8 * MB;
+const EDIT_MAX = 5 * MB;
+const SHARE_MAX = 50 * MB;
+/** Characters of one line read_file shows, and of its whole answer (room left for its notes). */
+const LINE_MAX = 2000;
+const READ_OUTPUT_MAX = MAX_TOOL_OUTPUT - 1000;
 
 /** Changes whenever the daemon code does, so a stale daemon in a persistent VM gets replaced. */
 const DAEMON_VERSION = createHash('sha256').update(BROWSER_DAEMON_TS).digest('hex').slice(0, 16);
@@ -280,7 +291,7 @@ export class SandboxHost implements ToolHost {
       case 'computer.shell_status':
         return this.jobStatus(s('job_id'), Math.min(Number(args.wait_sec) || 0, 600), ctx);
       case 'computer.read_file':
-        return this.readFile(s('path'), Number(args.offset) || 1, Number(args.limit) || 400);
+        return this.readFile(s('path'), Number(args.offset) || 1, Number(args.limit) || 400, ctx);
       case 'computer.write_file': {
         const sb = await this.computer();
         const path = this.abs(s('path'));
@@ -291,9 +302,10 @@ export class SandboxHost implements ToolHost {
       case 'computer.edit_file': {
         const sb = await this.computer();
         const path = this.abs(s('path'));
-        const buf = await sb.readFileToBuffer({ path });
-        if (!buf) return { output: `File not found: ${path}`, isError: true };
-        const text = buf.toString('utf8');
+        // Bounded before anything is decoded.
+        const r = await readCapped(sb, path, EDIT_MAX, readLimits(ctx));
+        if (r.status !== 'ok') return notRead(r.status, path, `${path} is larger than ${EDIT_MAX / MB} MB, too big for edit_file. Change it with the shell instead (sed, or a short script).`);
+        const text = r.data.toString('utf8');
         const count = text.split(s('old_text')).length - 1;
         if (!s('old_text') || count === 0) return { output: 'old_text was not found in the file.', isError: true };
         if (count > 1) return { output: `old_text appears ${count} times; include more context so it is unique.`, isError: true };
@@ -309,11 +321,11 @@ export class SandboxHost implements ToolHost {
       case 'computer.share_file': {
         const sb = await this.computer();
         const path = this.abs(s('path'));
-        const buf = await sb.readFileToBuffer({ path });
-        if (!buf) return { output: `File not found: ${path}`, isError: true };
-        if (buf.byteLength > 200 * 1024 * 1024) return { output: 'File is larger than 200 MB.', isError: true };
+        // The limit holds while the file streams in, so a bigger one is never held whole.
+        const r = await readCapped(sb, path, SHARE_MAX, readLimits(ctx));
+        if (r.status !== 'ok') return notRead(r.status, path, `${path} is larger than ${SHARE_MAX / MB} MB, the most a shared file can be. Compress it or share a smaller part.`);
         const name = s('name') || path.split('/').pop() || 'file';
-        const a = await saveArtifact({ userId: this.o.userId, agentId: this.o.agentId, sessionId: this.o.sessionId, runId: this.o.runId, name, mime: guessMime(name), data: buf, source: 'cloud', leaseId: this.o.leaseId });
+        const a = await saveArtifact({ userId: this.o.userId, agentId: this.o.agentId, sessionId: this.o.sessionId, runId: this.o.runId, name, mime: guessMime(name), data: r.data, source: 'cloud', leaseId: this.o.leaseId });
         return { output: `Shared "${a.name}" (${a.size} bytes) with the user.`, artifacts: [{ id: a.id, name: a.name }] };
       }
     }
@@ -406,17 +418,37 @@ export class SandboxHost implements ToolHost {
     }
   }
 
-  private async readFile(path: string, offset: number, limit: number): Promise<ToolResult> {
+  private async readFile(path: string, offset: number, limit: number, ctx: ToolContext): Promise<ToolResult> {
     const sb = await this.computer();
     const p = this.abs(path);
-    const buf = await sb.readFileToBuffer({ path: p });
-    if (!buf) return { output: `File not found: ${p}`, isError: true };
+    const r = await readCapped(sb, p, READ_MAX, readLimits(ctx));
+    if (r.status !== 'ok') {
+      return notRead(r.status, p, `${p} is larger than ${READ_MAX / MB} MB, so it wasn't read. Read part of it with the shell instead, e.g. sed -n '1,200p' ${shq(p)}, head -c 20000 ${shq(p)} or grep -n 'text' ${shq(p)}.`);
+    }
+    const buf = r.data;
     if (buf.includes(0)) return { output: `${p} looks like a binary file (${buf.byteLength} bytes). Use the shell to inspect it.`, isError: true };
     const lines = buf.toString('utf8').split('\n');
     const start = Math.max(1, offset);
     const slice = lines.slice(start - 1, start - 1 + Math.min(limit, 2000));
-    const more = start - 1 + slice.length < lines.length ? `\n[lines ${start}-${start + slice.length - 1} of ${lines.length}; read more with offset]` : '';
-    return { output: slice.map((l, i) => `${String(start + i).padStart(5)}  ${l}`).join('\n') + more };
+    // Each line and the whole answer are bounded: a minified file can be one line of megabytes.
+    const rows: string[] = [];
+    let size = 0;
+    let firstCut = 0;
+    for (const [i, l] of slice.entries()) {
+      let shown = l;
+      if (l.length > LINE_MAX) {
+        const end = isHighSurrogate(l.charCodeAt(LINE_MAX - 1)) ? LINE_MAX - 1 : LINE_MAX;
+        shown = `${l.slice(0, end)} … [${l.length - end} more characters]`;
+      }
+      const row = `${String(start + i).padStart(5)}  ${shown}`;
+      if (rows.length && size + row.length + 1 > READ_OUTPUT_MAX) break;
+      rows.push(row);
+      size += row.length + 1;
+      if (shown !== l) firstCut ||= start + i;
+    }
+    const more = start - 1 + rows.length < lines.length ? `\n[lines ${start}-${start + rows.length - 1} of ${lines.length}; read more with offset]` : '';
+    const cut = firstCut ? `\n[lines longer than ${LINE_MAX} characters are cut; see the rest with the shell, e.g. sed -n '${firstCut}p' ${shq(p)} | cut -c ${LINE_MAX + 1}-${LINE_MAX * 3}]` : '';
+    return { output: rows.join('\n') + more + cut };
   }
 
   // ------------------------------------------------------------ browser
@@ -520,6 +552,32 @@ export class SandboxHost implements ToolHost {
 
 function shq(s: string) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * How long a file read may take: until the tick's deadline; one that starts just before it still
+ * gets 30 s, which the function's time leaves room for. A Stop's signal ends it at once.
+ */
+function readLimits(ctx: ToolContext) {
+  return { signal: ctx.signal, timeoutMs: Math.max(ctx.deadline - Date.now(), 30_000) };
+}
+
+/** The answer for a file read that didn't get the file; `tooLarge` says what to do instead. */
+function notRead(status: Exclude<CappedRead['status'], 'ok'>, path: string, tooLarge: string): ToolResult {
+  switch (status) {
+    case 'missing':
+      return { output: `File not found: ${path}`, isError: true };
+    case 'too_large':
+      return { output: tooLarge, isError: true };
+    case 'stopped':
+      return { output: `The task was stopped while reading ${path}.`, isError: true };
+    case 'timed_out':
+      return { output: `Reading ${path} took too long, so it was stopped. Try again, or read part of it with the shell.`, isError: true };
+  }
+}
+
+function isHighSurrogate(c: number) {
+  return c >= 0xd800 && c <= 0xdbff;
 }
 
 function tail(s: string, n = 6000) {

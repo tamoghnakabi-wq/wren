@@ -27,7 +27,7 @@ export async function saveArtifact(a: ArtifactInput): Promise<{ id: string; name
   const id = randomUUID();
   const name = safeName(a.name);
   const path = `u/${a.userId}/${id}/${name}`;
-  await put(path, Buffer.from(a.data), { access: 'private', contentType: a.mime, addRandomSuffix: false, allowOverwrite: false });
+  await put(path, Buffer.isBuffer(a.data) ? a.data : Buffer.from(a.data), { access: 'private', contentType: a.mime, addRandomSuffix: false, allowOverwrite: false });
   const size = a.data.byteLength;
   const sql = db();
   // A run's file is recorded only if the worker still holds the run (share-locked, so a takeover

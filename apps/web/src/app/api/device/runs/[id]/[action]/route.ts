@@ -179,7 +179,8 @@ export const POST = route<Ctx>(async (req, ctx) => {
         requireLease(now, lease);
         return (now.status === 'queued' || now.status === 'running') && !now.cancel_requested;
       };
-      return json(await callMcp(c.config.url, secret?.secret, tool.name, b.args, { signal: req.signal, stillWanted }));
+      // Bounded inside the function's 300 s, so a stalled server or check ends with an answer (W-193).
+      return json(await callMcp(c.config.url, secret?.secret, tool.name, b.args, { signal: req.signal, stillWanted, timeoutMs: 240_000 }));
     }
     case 'github': {
       const b = z.object({ method: z.enum(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']), path: z.string().max(500), body: z.unknown().optional() }).parse(raw);

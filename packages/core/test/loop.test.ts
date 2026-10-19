@@ -115,6 +115,23 @@ describe('agent loop', () => {
     expect(turns[1]).toMatchObject({ kind: 'assistant', calls: [{ name: 'list_files', output: 'ok computer.list_files' }] });
   });
 
+  it('asks before GitHub repository administration Wren has no list entry for, even when autonomous (W-188)', async () => {
+    const calls = [
+      { method: 'PUT', path: '/repos/audit/private-repo/actions/oidc/customization/sub', body: { use_default: false, include_claim_keys: ['repo', 'context'] } },
+      { method: 'POST', path: '/repos/audit/private-repo/actions/runners/registration-token', body: {} },
+    ];
+    for (const runtime of ['cloud', 'desktop'] as const)
+      for (const args of calls) {
+        const store = new MemStore();
+        await store.userSays('set up CI');
+        const model = new ScriptModel([{ calls: [{ name: 'github.request', args }] }, { text: 'Done.' }]);
+        const host = Object.assign(new FakeHost(), { runtime });
+        const out = await base(store, model, host as ToolHost, { autonomy: 'autonomous', tools: toolCatalog({ runtime, tools: { ...DEFAULT_TOOLS, github: true }, githubConnected: true }) });
+        expect(out.kind, `${runtime} ${args.path}`).toBe('waiting_approval');
+        expect(host.ran, `${runtime} ${args.path}`).toEqual([]);
+      }
+  });
+
   it('asks before a GitHub change that would make a private repository public, even when autonomous (W-188)', async () => {
     for (const runtime of ['cloud', 'desktop'] as const) {
       const store = new MemStore();

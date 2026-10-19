@@ -344,6 +344,12 @@ describe('browser + other tools', () => {
     expect(gh('POST', '/graphql', { query: 'mutation { updateRepository(input: {repositoryId: "x", visibility: PUBLIC}) { clientMutationId } }' })).toBe('critical');
     expect(gh('POST', '/graphql', { query: 'query A { viewer { login } } MUTATION B { x }' })).toBe('critical');
     expect(gh('POST', '/graphql', {})).toBe('critical');
+    // Any other repository write is administration, including ones not listed anywhere (OIDC, runners, …).
+    for (const [m, p] of [['PUT', '/repos/a/b/actions/oidc/customization/sub'], ['POST', '/repos/a/b/actions/runners/registration-token'], ['POST', '/repos/a/b/actions/runs/1/approve'], ['POST', '/repos/a/b/actions/runs/1/pending_deployments'], ['PUT', '/repos/a/b/topics'], ['POST', '/repos/a/b/autolinks'], ['POST', '/repos/a/b/some-endpoint-added-later'], ['PATCH', '/repositories/123']])
+      expect(gh(m, p, {}), `${m} ${p}`).toBe('critical');
+    // CI that already exists may still be run, re-run or cancelled as an ordinary write.
+    for (const p of ['/repos/a/b/actions/workflows/ci.yml/dispatches', '/repos/a/b/actions/runs/1/rerun', '/repos/a/b/actions/runs/1/cancel', '/repos/a/b/actions/jobs/2/rerun', '/repos/a/b/releases', '/repos/a/b/labels', '/repos/a/b/git/refs', '/repos/a/b/pulls/3/reviews'])
+      expect(gh('POST', p, {}), p).toBe('high');
     // A method Wren doesn't know is refused outright.
     expect(assessCall('github.request', { method: 'TRACE', path: '/repos/a/b' }, 'cloud').blocked).toMatch(/GET, POST, PATCH, PUT or DELETE/);
   });

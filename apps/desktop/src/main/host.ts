@@ -150,9 +150,10 @@ export class LocalHost implements ToolHost {
         if (!existsSync(p)) return { output: `File not found: ${p}`, isError: true };
         let data: Buffer;
         try {
-          data = await this.read(p, 200 * 1024 * 1024);
+          // The server takes files up to 50 MB (device artifacts), so nothing larger is read in (W-191).
+          data = await this.read(p, 50 * 1024 * 1024);
         } catch (e) {
-          if (e instanceof TooLarge) return { output: 'File is larger than 200 MB.', isError: true };
+          if (e instanceof TooLarge) return { output: `${p} is larger than 50 MB, the most a shared file can be. Compress it or share a smaller part.`, isError: true };
           throw e;
         }
         const a = await this.upload(data, s('name') || p.split(sep).pop() || 'file', 'file');

@@ -283,8 +283,10 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
           if (error) throw new Error(mfaError(error));
           return data.totp.filter((f) => f.status === 'verified').map((f) => f.id);
         },
-        // The session is aal2 by then, and the step-up from a moment ago covers this.
-        emailOff: () => api('/api/mfa/email', { method: 'DELETE' }).then(() => {}),
+        // The session is aal2 by then, and the step-up from a moment ago covers this. If that ran out,
+        // it fails instead of asking again (api's `retried`): each step has a deadline (W-192), and
+        // the report then says email codes are still on, to turn off below.
+        emailOff: () => api('/api/mfa/email', { method: 'DELETE' }, true).then(() => {}),
         emailOn: async () => {
           const now = await mfaInfo();
           if (!now) throw new Error('Couldn’t read two-step sign-in settings.');
@@ -345,6 +347,7 @@ function EnrollDialog({ info, existing, onClose, onDone }: { info: MfaInfo; exis
         setError(r.error);
         setCode('');
       } else if (r.status === 'done') onDone(r.codes);
+      else if (r.status === 'timeout') onDone(null); // told the user; the settings are read again
     } finally {
       setBusy(false);
     }

@@ -687,11 +687,16 @@ export function assessFileWrite(path: string, runtime: Runtime, existing: boolea
   return { risk: existing ? 'medium' : 'medium', reason: existing ? 'overwrites a file on your computer' : 'creates a file on your computer' };
 }
 
-/** Repository sub-resources that change who can reach the code, how it is protected, or where it is published. */
-const GITHUB_REPO_GUARDED =
-  /^\/repos\/[^/]+\/[^/]+\/(collaborators|invitations|teams|keys|hooks|secrets|actions\/(secrets|permissions|variables)|dependabot|codespaces|environments|deployments|transfer|forks|generate|pages|rulesets|tags\/protection|branches\/[^/]+\/protection|vulnerability-alerts|automated-security-fixes|private-vulnerability-reporting|code-scanning|secret-scanning|properties|interaction-limits)(\/|$)/;
+/**
+ * The ordinary things an agent writes in a repository: issues, pull requests, comments, files, git data, labels,
+ * milestones, releases, statuses and checks, merges, dispatches, and re-running or cancelling CI. Any other
+ * repository write is administration (access, security, Actions settings and runners, OIDC, environments,
+ * publishing, settings…) and rates critical, including endpoints GitHub adds later (W-188).
+ */
+const GITHUB_REPO_WRITES =
+  /^\/repos\/[^/]+\/[^/]+\/(issues|pulls|comments|commits|contents|git|labels|milestones|releases|statuses|check-runs|check-suites|merges|merge-upstream|dispatches|notifications|subscription)(\/|$)|^\/repos\/[^/]+\/[^/]+\/actions\/(workflows\/[^/]+\/dispatches|runs\/[^/]+\/(rerun|rerun-failed-jobs|cancel|force-cancel)|jobs\/[^/]+\/rerun)$/;
 /** Account-wide settings: organisations, teams, the user's own keys and emails, apps and enterprises. */
-const GITHUB_ACCOUNT_GUARDED = /^\/(orgs|teams|enterprises|admin|authorizations|applications|app|installation)(\/|$)|^\/user(\/(emails|keys|gpg_keys|ssh_signing_keys|memberships|repository_invitations|installations|blocks|interaction-limits|social_accounts|codespaces\/secrets)(\/|$)|$)/;
+const GITHUB_ACCOUNT_GUARDED = /^\/(orgs|teams|enterprises|admin|authorizations|applications|app|installation|repositories)(\/|$)|^\/user(\/(emails|keys|gpg_keys|ssh_signing_keys|memberships|repository_invitations|installations|blocks|interaction-limits|social_accounts|codespaces\/secrets)(\/|$)|$)/;
 /** Workflow files run with the repository's Actions secrets, so writing one is like reading them. */
 const GITHUB_WORKFLOWS = /^\/repos\/[^/]+\/[^/]+\/contents\/\.github\/(workflows|actions)(\/|$)/;
 
@@ -712,8 +717,9 @@ function githubPath(path: string): string | null {
 /**
  * GitHub calls by what they change. Only the method and path are known for most of the API, so whole
  * endpoints are rated by the most they can do: repository settings (`PATCH /repos/o/r`: visibility, security
- * features, archiving) and the access, security and publishing endpoints are critical, so even an autonomous
- * agent asks (W-188). GraphQL is read-only only when the document has no mutation in it.
+ * features, archiving), every repository write that isn't an ordinary one (`GITHUB_REPO_WRITES`) and
+ * account-wide settings are critical, so even an autonomous agent asks (W-188). GraphQL is read-only only when
+ * the document has no mutation in it.
  */
 export function assessGithub(method: string, path: string, body?: unknown): Assessment {
   const m = method.toUpperCase();
@@ -729,8 +735,9 @@ export function assessGithub(method: string, path: string, body?: unknown): Asse
   }
   if (m === 'DELETE') return { risk: 'critical', reason: 'deletes data on GitHub' };
   if (/^\/repos\/[^/]+\/[^/]+$/.test(p)) return { risk: 'critical', reason: 'changes repository settings (visibility, security or access)' };
-  if (GITHUB_REPO_GUARDED.test(p) || GITHUB_ACCOUNT_GUARDED.test(p)) return { risk: 'critical', reason: 'changes repository or account security, access or publishing' };
   if (GITHUB_WORKFLOWS.test(p)) return { risk: 'critical', reason: 'changes a GitHub Actions workflow, which runs with the repository’s secrets' };
+  if (/^\/repos\//.test(p) && !GITHUB_REPO_WRITES.test(p)) return { risk: 'critical', reason: 'changes how the repository is run or protected (access, security, Actions, publishing or settings)' };
+  if (GITHUB_ACCOUNT_GUARDED.test(p)) return { risk: 'critical', reason: 'changes account or organisation security, access or settings' };
   if (/\/pulls\/\d+\/merge$|\/merges?$/.test(p)) return { risk: 'high', reason: 'merges a pull request' };
   return { risk: 'high', reason: 'writes to GitHub' };
 }

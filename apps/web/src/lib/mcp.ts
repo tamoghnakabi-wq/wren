@@ -77,10 +77,30 @@ export async function callMcp(url: string, token: string | undefined, tool: stri
   // A signal of this call's own: the SDK adds a listener per request and never removes it.
   const signal = sources.length ? AbortSignal.any(sources) : undefined;
   const timedOut = () => !!timer?.aborted && !opts.signal?.aborted;
-  const unwanted = async () => !!signal?.aborted || (opts.stillWanted ? !(await opts.stillWanted()) : false) || !!signal?.aborted;
   const notCalled = () => ({ output: timedOut() ? SLOW : STOPPED, isError: true });
+  // Every wait before the call gives way to Stop and the time limit too (W-193): the address lookup and the
+  // task's own checks (a database read) may stall like a slow server. A late answer then changes nothing.
+  const unwanted = async () => {
+    if (signal?.aborted) return true;
+    if (opts.stillWanted) {
+      try {
+        if (!(await untilAborted(Promise.resolve().then(opts.stillWanted), signal))) return true;
+      } catch (e) {
+        if (signal?.aborted) return true;
+        throw e;
+      }
+    }
+    return !!signal?.aborted;
+  };
 
-  const { client, transport } = await open(url, token);
+  let opened: Awaited<ReturnType<typeof open>>;
+  try {
+    opened = await untilAborted(open(url, token), signal);
+  } catch (e) {
+    if (signal?.aborted) return notCalled();
+    throw e;
+  }
+  const { client, transport } = opened;
   try {
     if (await unwanted()) return notCalled();
     try {
@@ -108,7 +128,8 @@ export async function callMcp(url: string, token: string | undefined, tool: stri
 
 /**
  * `p`, or a rejection as soon as `signal` aborts: connecting also sends a notification and starts the
- * transport, which take no signal. Whatever `p` was still doing ends when the client is closed.
+ * transport, which take no signal, and the lookups and checks before it take none either. Whatever `p` was
+ * still doing is left to finish on its own (a connection ends when the client is closed); its result is unused.
  */
 function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
