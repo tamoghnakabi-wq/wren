@@ -20,6 +20,8 @@ const MODEL_BUDGET_MS = 185_000;
 const MAX_CRASHES = 3;
 /** A "computers stopping" mark older than this is from a stop that crashed: ignore it. */
 const STOP_MARK_TTL_SECONDS = 180;
+/** How often a tick looks for a Stop or a lost lease while the loop runs. */
+const WATCH_MS = 3_000;
 
 export async function runTick(runId: string): Promise<string> {
   const sql = db();
@@ -104,6 +106,7 @@ export async function runTick(runId: string): Promise<string> {
   };
 
   let outcome: LoopOutcome;
+  const watch = watchRun(store, runId, lease);
   try {
     const access = await resolveCloudModel({ id: run.user_id, email: profile?.email ?? '' }, modelRef, loadImage);
     if (access.note && run.step === 0) await store.append<StatusData>('status', { text: access.note, level: 'info' }, 'done');
@@ -125,11 +128,12 @@ export async function runTick(runId: string): Promise<string> {
       step: run.step,
       maxSteps: run.max_steps,
       modelRetries: Number(run.retry_count) || 0,
+      signal: watch.signal,
       log: (m, e) => console.log(`[run ${runId.slice(0, 8)}] ${m}`, e ?? ''),
     });
   } catch (e) {
     const err = e as Error & { status?: number; code?: string };
-    if (e instanceof LeaseLostError) return 'lease-lost';
+    if (e instanceof LeaseLostError || watch.reason() === 'lease_lost') return 'lease-lost';
     if (err.status && err.status < 500) {
       outcome = { kind: 'failed', error: err.message, code: err.code, steps: run.step };
     } else {
@@ -142,7 +146,16 @@ export async function runTick(runId: string): Promise<string> {
         return 'crashed';
       }
     }
+  } finally {
+    watch.stop();
   }
+
+  // Another worker holds the run now (or it was ended): this tick reports nothing, whatever the loop made of
+  // the abort. Its writes are fenced by the lease anyway, so it can't have closed that worker's calls.
+  if (watch.reason() === 'lease_lost') return 'lease-lost';
+  // The Stop ended what was under way through the signal: a model call it cut short comes back as a failure,
+  // a retry as a hand-off. The run ends cancelled (finishRun closes whatever is still open).
+  if (watch.reason() === 'stopped' && outcome.kind !== 'completed' && outcome.kind !== 'cancelled') outcome = { kind: 'cancelled', steps: outcome.steps };
 
   if (outcome.kind === 'yield') {
     // A clean hand-off proves ticks finish in time, so earlier timeouts no longer count, unless
@@ -163,6 +176,38 @@ export async function runTick(runId: string): Promise<string> {
   const finished = await finishRun(runId, outcome, lease);
   if (finished === 'ended') await stopComputersIfIdle(agent.id, host);
   return outcome.kind;
+}
+
+/**
+ * The loop's signal for a cloud tick (W-191): it aborts once the run's Stop is recorded, or once this tick
+ * no longer holds the run's lease, so what is waiting on it (a file read, an MCP call, a model call) ends
+ * within a few seconds instead of at its own time limit. `reason()` says which. Only a lease another worker
+ * took over, or that was cleared, counts as lost: while the run still carries this tick's lease (even past
+ * its time) the store's writes go through, and an abort would have the loop close the calls as cancelled.
+ * A look that fails is tried again at the next one.
+ */
+function watchRun(store: DbRunStore, runId: string, lease: string) {
+  const abort = new AbortController();
+  let why: 'stopped' | 'lease_lost' | undefined;
+  let looking = false;
+  const timer = setInterval(async () => {
+    if (looking || why) return;
+    looking = true;
+    try {
+      const held = await db()`select 1 from public.runs where id = ${runId} and lease_id = ${lease}`;
+      if (!held.length) why = 'lease_lost';
+      else if ((await store.control()).cancel) why = 'stopped';
+      if (why) {
+        clearInterval(timer);
+        abort.abort();
+      }
+    } catch {
+      // the next look tries again
+    } finally {
+      looking = false;
+    }
+  }, WATCH_MS);
+  return { signal: abort.signal, reason: () => why, stop: () => clearInterval(timer) };
 }
 
 /**

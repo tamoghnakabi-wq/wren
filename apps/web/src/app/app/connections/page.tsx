@@ -17,7 +17,7 @@ const KEY_HELP: Record<Provider, { title: string; url?: string; placeholder: str
   anthropic: { title: 'Anthropic API key', url: 'https://platform.claude.com/settings/keys', placeholder: 'sk-ant-…', help: 'Billed by Anthropic per token. Works in the cloud and on your computer.' },
   xai: { title: 'xAI API key', url: 'https://console.x.ai', placeholder: 'xai-…', help: 'Billed by xAI per token. Works in the cloud and on your computer.' },
   gateway: { title: 'Vercel AI Gateway key', url: 'https://vercel.com/docs/ai-gateway', placeholder: 'vck_…', help: 'One key for models from many providers, billed by Vercel.' },
-  github: { title: 'GitHub token', url: 'https://github.com/settings/personal-access-tokens/new', placeholder: 'github_pat_…', help: 'Use a fine-grained token limited to the repositories agents may touch. Pushes, merges and other writes always ask for approval.' },
+  github: { title: 'GitHub token', url: 'https://github.com/settings/personal-access-tokens/new', placeholder: 'github_pat_…', help: 'Use a fine-grained token limited to the repositories agents may touch. Ordinary writes (issues, pull requests, files, merges) ask first unless the agent is autonomous; repository settings, access and security changes always ask.' },
   mcp: { title: 'MCP server', placeholder: 'Optional bearer token', help: 'Connect any remote MCP server (Streamable HTTP) to give agents its tools. Its tools ask first unless the agent is autonomous, whatever the server says about them. With a token, the address must start with https://.' },
 };
 

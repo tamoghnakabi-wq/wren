@@ -9,7 +9,14 @@ import { assessGithub, MAX_TOOL_OUTPUT } from '@wren/core';
 import { guessMime, saveArtifact } from '../blob';
 import { callMcp, type McpToolInfo } from '../mcp';
 import { env } from '../env';
-import { MB, readCapped, type CappedRead } from './capped-read';
+import { commandOutput, MB, readCapped, type CappedRead } from './capped-read';
+
+/**
+ * How Wren runs its own commands in the agent's computer: without login or startup files, which are the agent's
+ * to write and could print anything into this function (W-191). The agent's own commands (run.sh) still get a
+ * login shell. What Wren reads back is also capped (`commandOutput`), as the agent can change any program there.
+ */
+const WREN_SH = ['--noprofile', '--norc', '-c'];
 
 // Tool host for cloud runs. The agent's computer is a persistent Vercel
 // Sandbox (one per agent); the model loop and every credential stay in our
@@ -57,12 +64,21 @@ setsid -w bash -c 'echo $$ > "$0"; exec bash -lc "$1"' "$dir/$id.sid" "$cmd" > "
 echo $? > "$dir/$id.exit"
 `;
 
+/**
+ * Shell function `jobnum <file>`: prints the number a job file holds, or nothing if it doesn't hold one.
+ * The agent can write these files, and whatever a command prints is collected whole by the SDK (W-191),
+ * so at most 32 bytes are read, only from a regular file (not a pipe or a device), and only digits count.
+ */
+const JOB_NUM = `jobnum() { local v; [ -f "$1" ] || return 0; v=$(head -c 32 -- "$1" 2>/dev/null)
+  case "$v" in ''|*[!0-9]*) return 0 ;; esac; [ \${#v} -le 10 ] && printf '%s' "$v"; return 0; }`;
+
 /** Shell function `stopjob <id>`: ends a job's whole session, politely first. */
-const STOP_JOB = `stopjob() { d="$HOME/.wren/jobs"; s=$(cat "$d/$1.sid" 2>/dev/null); p=$(cat "$d/$1.pid" 2>/dev/null)
+const STOP_JOB = `${JOB_NUM}
+stopjob() { d="$HOME/.wren/jobs"; s=$(jobnum "$d/$1.sid"); p=$(jobnum "$d/$1.pid")
   [ -n "$s" ] && { kill -TERM -- -"$s"; pkill -TERM -s "$s"; } 2>/dev/null; [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
   sleep 1; [ -n "$s" ] && { kill -KILL -- -"$s"; pkill -KILL -s "$s"; } 2>/dev/null; true; }
-jobalive() { d="$HOME/.wren/jobs"; s=$(cat "$d/$1.sid" 2>/dev/null)
-  { [ -n "$s" ] && pgrep -s "$s" >/dev/null; } || { [ ! -f "$d/$1.exit" ] && p=$(cat "$d/$1.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; }`;
+jobalive() { d="$HOME/.wren/jobs"; s=$(jobnum "$d/$1.sid")
+  { [ -n "$s" ] && pgrep -s "$s" >/dev/null; } || { [ ! -f "$d/$1.exit" ] && p=$(jobnum "$d/$1.pid") && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; }`;
 
 /** Stops every job of run $1 and exits 0 only once none of their processes is left. */
 const STOP_RUN_JOBS = `${STOP_JOB}
@@ -185,7 +201,7 @@ export class SandboxHost implements ToolHost {
     try {
       const sb = await Sandbox.get({ name: SandboxHost.sandboxName(agentId), resume: false });
       if (sb.status === 'running') {
-        const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', STOP_RUN_JOBS, 'stop', runId] });
+        const r = await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, STOP_RUN_JOBS, 'stop', runId] });
         if (r.exitCode !== 0) return false;
       }
     } catch (e) {
@@ -215,9 +231,9 @@ export class SandboxHost implements ToolHost {
     const setup = await this.sandbox.runCommand({
       cmd: 'bash',
       // Older versions ran the browser in this VM: stop it and drop its profile (cookies) for good.
-      args: ['-lc', `pkill -f "node [b]rowser.ts" 2>/dev/null; rm -rf "$HOME/.wren/profile" "$HOME/.wren/browser.ts" "$HOME/.wren/browser.version"; mkdir -p ${WORKSPACE} "$HOME/.wren/jobs" && cat > "$HOME/.wren/run.sh" <<'WREN_EOF'\n${RUN_SH}WREN_EOF\nchmod +x "$HOME/.wren/run.sh" && echo "$HOME"`],
+      args: [...WREN_SH, `pkill -f "node [b]rowser.ts" 2>/dev/null; rm -rf "$HOME/.wren/profile" "$HOME/.wren/browser.ts" "$HOME/.wren/browser.version"; mkdir -p ${WORKSPACE} "$HOME/.wren/jobs" && cat > "$HOME/.wren/run.sh" <<'WREN_EOF'\n${RUN_SH}WREN_EOF\nchmod +x "$HOME/.wren/run.sh" && echo "$HOME"`],
     });
-    this.home = (await setup.stdout()).trim().split('\n').pop() || this.home;
+    this.home = (await commandOutput(setup, 4096)).stdout.trim().split('\n').pop() || this.home;
     this.ready = true;
     return this.sandbox;
   }
@@ -281,11 +297,12 @@ export class SandboxHost implements ToolHost {
     const s = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : '');
     switch (name) {
       case 'web.fetch': {
-        const r = await fetchReadable(s('url'), { guard: true, maxChars: Number(args.max_chars) || 40000 });
+        // Stop ends it at any step, the address lookup included (W-196).
+        const r = await fetchReadable(s('url'), { guard: true, maxChars: Number(args.max_chars) || 40000, signal: ctx.signal });
         return { output: r.output, isError: r.status >= 400 };
       }
       case 'github.request':
-        return this.github(s('method') || 'GET', s('path'), args.body);
+        return this.github(s('method') || 'GET', s('path'), args.body, ctx);
       case 'computer.shell':
         return this.shell(s('command'), s('cwd'), Number(args.timeout_sec) || 120, !!args.background, ctx, resume);
       case 'computer.shell_status':
@@ -315,8 +332,9 @@ export class SandboxHost implements ToolHost {
       case 'computer.list_files': {
         const sb = await this.computer();
         const depth = Math.max(1, Math.min(3, Number(args.depth) || 1));
-        const r = await sb.runCommand({ cmd: 'bash', args: ['-lc', `find ${shq(this.abs(s('path') || WORKSPACE))} -maxdepth ${depth} -not -path '*/node_modules/*' -not -path '*/.git/*' -printf '%y %s %p\\n' 2>&1 | head -500`] });
-        return { output: (await r.stdout()) || '(empty)' };
+        const r = await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, `find ${shq(this.abs(s('path') || WORKSPACE))} -maxdepth ${depth} -not -path '*/node_modules/*' -not -path '*/.git/*' -printf '%y %s %p\\n' 2>&1 | head -500`] });
+        const listed = await commandOutput(r, 256 * 1024);
+        return { output: (listed.stdout || '(empty)') + (listed.truncated ? '\n[the listing was cut short; list a smaller folder]' : '') };
       }
       case 'computer.share_file': {
         const sb = await this.computer();
@@ -336,16 +354,21 @@ export class SandboxHost implements ToolHost {
       const tool = server?.tools.find((x) => x.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) === name.slice(ns.length + 1));
       if (!server || !tool) return { output: 'That connected tool is no longer available.', isError: true };
       // Connecting can take a while: a Stop, or this tick losing the run, meanwhile means the tool isn't
-      // called (W-190). The lease is checked as the store does after a write that matched nothing.
-      const stillWanted = async () => {
-        if (await ctx.isCancelled?.()) return false;
-        if (!this.o.leaseId) return true;
-        return (await db()`select 1 from public.runs where id = ${this.o.runId} and lease_id = ${this.o.leaseId}`).length > 0;
-      };
+      // called (W-190).
       // Over by the tick's deadline; one that starts just before it still gets 30 s, which the function's time leaves room for.
-      return callMcp(server.url, server.token, tool.name, args, { signal: ctx.signal, stillWanted, timeoutMs: Math.max(ctx.deadline - Date.now(), 30_000) });
+      return callMcp(server.url, server.token, tool.name, args, { signal: ctx.signal, stillWanted: () => this.stillWanted(ctx), timeoutMs: Math.max(ctx.deadline - Date.now(), 30_000) });
     }
     return { output: `Tool ${name} is not available on the cloud computer.`, isError: true };
+  }
+
+  /**
+   * Whether the run still wants this tick to act: not stopped, and still this tick's. The lease is checked
+   * as the store does after a write that matched nothing.
+   */
+  private async stillWanted(ctx: ToolContext) {
+    if (ctx.signal?.aborted || (await ctx.isCancelled?.())) return false;
+    if (!this.o.leaseId) return true;
+    return (await db()`select 1 from public.runs where id = ${this.o.runId} and lease_id = ${this.o.leaseId}`).length > 0;
   }
 
   // ------------------------------------------------------------ shell
@@ -359,7 +382,7 @@ export class SandboxHost implements ToolHost {
       id = randomUUID().slice(0, 8);
       // No credentials go into the VM: GitHub access is only through the github.request tool,
       // which is risk-assessed and runs here.
-      await sb.runCommand({ cmd: 'bash', args: ['-lc', `setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`] });
+      await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, `setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`] });
       if (background) return { output: `Started background job ${id}. Check it with computer.shell_status.`, meta: { job: id } };
       await ctx.checkpoint({ kind: 'job', handle: id, startedAt: started });
     }
@@ -387,19 +410,21 @@ export class SandboxHost implements ToolHost {
 
   private async stopJob(id: string) {
     const sb = await this.computer();
-    await sb.runCommand({ cmd: 'bash', args: ['-lc', `${STOP_JOB}\nstopjob ${shq(id)}`] });
+    await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, `${STOP_JOB}\nstopjob ${shq(id)}`] });
   }
 
   private async readJob(id: string): Promise<{ exit: number | null; log: string; alive: boolean }> {
     const sb = await this.computer();
+    // Everything printed comes into this function, and the files are the agent's to write: the exit code and
+    // pid are read as short numbers only, the log as its last 60 KB (W-191).
     const r = await sb.runCommand({
       cmd: 'bash',
-      args: ['-lc', `d=${JOB_DIR}; e=$(cat $d/${id}.exit 2>/dev/null); p=$(cat $d/${id}.pid 2>/dev/null); a=0; [ -n "$p" ] && kill -0 $p 2>/dev/null && a=1; echo "$e|$a"; tail -c 60000 $d/${id}.log 2>/dev/null`],
+      args: [...WREN_SH, `${JOB_NUM}\nd=${JOB_DIR}; e=$(jobnum "$d/${id}.exit"); p=$(jobnum "$d/${id}.pid"); a=0; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && a=1; echo "$e|$a"; [ -f "$d/${id}.log" ] && tail -c 60000 -- "$d/${id}.log" 2>/dev/null`],
     });
-    const out = await r.stdout();
+    const out = (await commandOutput(r, 64 * 1024)).stdout;
     const nl = out.indexOf('\n');
     const [exit, alive] = (nl >= 0 ? out.slice(0, nl) : out).split('|');
-    return { exit: exit === '' || exit === undefined ? null : Number(exit), alive: alive === '1', log: nl >= 0 ? out.slice(nl + 1) : '' };
+    return { exit: /^\d+$/.test(exit ?? '') ? Number(exit) : null, alive: alive === '1', log: nl >= 0 ? out.slice(nl + 1) : '' };
   }
 
   private async jobStatus(id: string, waitSec: number, ctx: ToolContext): Promise<ToolResult> {
@@ -530,16 +555,27 @@ export class SandboxHost implements ToolHost {
 
   // ------------------------------------------------------------ github
 
-  private async github(method: string, path: string, body: unknown): Promise<ToolResult> {
+  private async github(method: string, path: string, body: unknown, ctx: ToolContext): Promise<ToolResult> {
     if (!this.o.githubToken) return { output: 'GitHub is not connected. Ask the user to connect it in Connections.', isError: true };
     if (!path.startsWith('/') || path.includes('://')) return { output: 'Path must start with / (e.g. /user/repos).', isError: true };
     assessGithub(method, path); // risk is enforced by the loop; this just validates shape
-    const res = await fetch(`https://api.github.com${path}`, {
-      method,
-      headers: { authorization: `Bearer ${this.o.githubToken}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': 'wren-agent' },
-      body: method === 'GET' || body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await res.text();
+    // A Stop can come after the approval (or while this tick lost the run): look again right before sending,
+    // and let the Stop's signal end a request under way (W-194).
+    if (!(await this.stillWanted(ctx))) return { output: 'The GitHub request was not sent because the task was stopped.', isError: true };
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(`https://api.github.com${path}`, {
+        method,
+        headers: { authorization: `Bearer ${this.o.githubToken}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': 'wren-agent' },
+        body: method === 'GET' || body === undefined ? undefined : JSON.stringify(body),
+        signal: ctx.signal,
+      });
+      text = await res.text();
+    } catch (e) {
+      if (ctx.signal?.aborted) return { output: 'The task was stopped while the GitHub request was under way; GitHub may or may not have carried it out.', isError: true };
+      throw e;
+    }
     let out = text;
     try {
       out = JSON.stringify(JSON.parse(text), null, 1);

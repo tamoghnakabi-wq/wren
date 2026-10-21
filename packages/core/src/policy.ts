@@ -688,13 +688,51 @@ export function assessFileWrite(path: string, runtime: Runtime, existing: boolea
 }
 
 /**
- * The ordinary things an agent writes in a repository: issues, pull requests, comments, files, git data, labels,
- * milestones, releases, statuses and checks, merges, dispatches, and re-running or cancelling CI. Any other
- * repository write is administration (access, security, Actions settings and runners, OIDC, environments,
- * publishing, settings…) and rates critical, including endpoints GitHub adds later (W-188).
+ * The ordinary things an agent writes in a repository, each by its method and whole endpoint (round 29): issues,
+ * pull requests and reviews, comments, files, git data, labels, milestones, releases, statuses and checks, merges,
+ * dispatches, and running, re-running or cancelling existing workflows. Anything else, even below one of these
+ * (`check-suites/preferences`, a review's dismissal), is administration and rates critical, including endpoints
+ * GitHub adds later (W-188).
  */
-const GITHUB_REPO_WRITES =
-  /^\/repos\/[^/]+\/[^/]+\/(issues|pulls|comments|commits|contents|git|labels|milestones|releases|statuses|check-runs|check-suites|merges|merge-upstream|dispatches|notifications|subscription)(\/|$)|^\/repos\/[^/]+\/[^/]+\/actions\/(workflows\/[^/]+\/dispatches|runs\/[^/]+\/(rerun|rerun-failed-jobs|cancel|force-cancel)|jobs\/[^/]+\/rerun)$/;
+const GITHUB_REPO_WRITES: [string, RegExp][] = (
+  [
+    ['POST', 'issues'],
+    ['PATCH', 'issues/\\d+'],
+    ['PUT', 'issues/\\d+/lock'],
+    ['POST', 'issues/\\d+/(comments|labels|assignees|reactions)'],
+    ['PUT', 'issues/\\d+/labels'],
+    ['PATCH', 'issues/comments/\\d+'],
+    ['POST', 'issues/comments/\\d+/reactions'],
+    ['POST', 'pulls'],
+    ['PATCH', 'pulls/\\d+'],
+    ['PUT', 'pulls/\\d+/(merge|update-branch)'],
+    ['POST', 'pulls/\\d+/(reviews|comments|requested_reviewers)'],
+    ['PUT', 'pulls/\\d+/reviews/\\d+'],
+    ['POST', 'pulls/\\d+/reviews/\\d+/events'],
+    ['POST', 'pulls/\\d+/comments/\\d+/replies'],
+    ['PATCH', 'pulls/comments/\\d+'],
+    ['POST', 'pulls/comments/\\d+/reactions'],
+    ['PATCH', 'comments/\\d+'],
+    ['POST', 'comments/\\d+/reactions'],
+    ['POST', 'commits/[^/]+/comments'],
+    ['PUT', 'contents/.+'],
+    ['POST', 'git/(blobs|trees|commits|refs|tags)'],
+    ['PATCH', 'git/refs/.+'],
+    ['POST', '(labels|milestones|releases)'],
+    ['PATCH', '(labels/[^/]+|milestones/\\d+|releases/\\d+|releases/assets/\\d+)'],
+    ['POST', 'releases/generate-notes'],
+    ['POST', 'statuses/[^/]+'],
+    ['POST', '(check-runs|check-suites)'],
+    ['PATCH', 'check-runs/\\d+'],
+    ['POST', '(check-runs|check-suites)/\\d+/rerequest'],
+    ['POST', '(merges|merge-upstream|dispatches)'],
+    ['PUT', '(notifications|subscription)'],
+    ['POST', 'actions/workflows/[^/]+/dispatches'],
+    ['POST', 'actions/runs/\\d+/(rerun|rerun-failed-jobs|cancel|force-cancel)'],
+    ['POST', 'actions/jobs/\\d+/rerun'],
+  ] as const
+).map(([m, p]) => [m, new RegExp(`^/repos/[^/]+/[^/]+/${p}$`)]);
+const ordinaryRepoWrite = (method: string, path: string) => GITHUB_REPO_WRITES.some(([m, re]) => m === method && re.test(path));
 /** Account-wide settings: organisations, teams, the user's own keys and emails, apps and enterprises. */
 const GITHUB_ACCOUNT_GUARDED = /^\/(orgs|teams|enterprises|admin|authorizations|applications|app|installation|repositories)(\/|$)|^\/user(\/(emails|keys|gpg_keys|ssh_signing_keys|memberships|repository_invitations|installations|blocks|interaction-limits|social_accounts|codespaces\/secrets)(\/|$)|$)/;
 /** Workflow files run with the repository's Actions secrets, so writing one is like reading them. */
@@ -717,7 +755,7 @@ function githubPath(path: string): string | null {
 /**
  * GitHub calls by what they change. Only the method and path are known for most of the API, so whole
  * endpoints are rated by the most they can do: repository settings (`PATCH /repos/o/r`: visibility, security
- * features, archiving), every repository write that isn't an ordinary one (`GITHUB_REPO_WRITES`) and
+ * features, archiving), every repository write that isn't an ordinary one by method and endpoint (`GITHUB_REPO_WRITES`) and
  * account-wide settings are critical, so even an autonomous agent asks (W-188). GraphQL is read-only only when
  * the document has no mutation in it.
  */
@@ -736,7 +774,7 @@ export function assessGithub(method: string, path: string, body?: unknown): Asse
   if (m === 'DELETE') return { risk: 'critical', reason: 'deletes data on GitHub' };
   if (/^\/repos\/[^/]+\/[^/]+$/.test(p)) return { risk: 'critical', reason: 'changes repository settings (visibility, security or access)' };
   if (GITHUB_WORKFLOWS.test(p)) return { risk: 'critical', reason: 'changes a GitHub Actions workflow, which runs with the repository’s secrets' };
-  if (/^\/repos\//.test(p) && !GITHUB_REPO_WRITES.test(p)) return { risk: 'critical', reason: 'changes how the repository is run or protected (access, security, Actions, publishing or settings)' };
+  if (/^\/repos\//.test(p) && !ordinaryRepoWrite(m, p)) return { risk: 'critical', reason: 'changes how the repository is run or protected (access, security, Actions, publishing or settings)' };
   if (GITHUB_ACCOUNT_GUARDED.test(p)) return { risk: 'critical', reason: 'changes account or organisation security, access or settings' };
   if (/\/pulls\/\d+\/merge$|\/merges?$/.test(p)) return { risk: 'high', reason: 'merges a pull request' };
   return { risk: 'high', reason: 'writes to GitHub' };

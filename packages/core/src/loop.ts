@@ -153,7 +153,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
         // Found already running with no resumable handle: the worker died mid-action. Re-running
         // anything that isn't a pure read could repeat a side effect (whatever its approval risk,
         // e.g. a low-risk append in the cloud), so report it and let the agent check.
-        if (ev.status === 'running' && !d.background && !isBuiltin(d.name) && !replaySafe(d, d.name === 'computer.shell' ? (await o.host.riskContext?.(d.name, d.args).catch(() => undefined))?.trustedProgram : undefined)) {
+        if (ev.status === 'running' && !d.background && !REPEATABLE_BUILTINS.has(d.name) && !replaySafe(d, d.name === 'computer.shell' ? (await o.host.riskContext?.(d.name, d.args).catch(() => undefined))?.trustedProgram : undefined)) {
           await finish(o, ev, d, {
             output: 'Wren was interrupted while this action was running, so it may or may not have completed. Check the current state before trying it again.',
             isError: true,
@@ -215,6 +215,10 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
         }
 
         const r = await execute(o, ev, d, log);
+        if (r === 'cancelled') {
+          await closeOpenCalls(o, 'cancelled');
+          return { kind: 'cancelled', steps };
+        }
         if (r === 'yield') return { kind: 'yield', steps };
         if (r === 'input') return { kind: 'waiting_input', question: String(d.args.question ?? ''), steps };
       }
@@ -315,6 +319,13 @@ function isBuiltin(name: string) {
   return name.startsWith('task.') || name.startsWith('memory.');
 }
 
+/**
+ * Built-ins that may simply run again after a crash: showing the plan, asking (it waits for the answer
+ * before notifying), forgetting a memory. A notification or a saved memory would be repeated, so those are
+ * reported as interrupted like any other action (W-195).
+ */
+const REPEATABLE_BUILTINS = new Set(['task.update_plan', 'task.ask_user', 'memory.forget']);
+
 async function finish(o: LoopOptions, ev: SessionEvent, d: ToolCallData, result: ToolResult) {
   const capped: ToolResult = { ...result, output: clipMiddle(result.output ?? '', MAX_TOOL_OUTPUT) };
   await o.store.update(ev.id, { status: result.isError ? 'error' : 'done', data: { ...d, endedAt: Date.now(), result: capped, background: undefined } });
@@ -330,11 +341,15 @@ async function closeOpenCalls(o: LoopOptions, status: 'cancelled') {
   }
 }
 
-async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (m: string, e?: unknown) => void): Promise<'done' | 'yield' | 'input'> {
+async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (m: string, e?: unknown) => void): Promise<'done' | 'yield' | 'input' | 'cancelled'> {
   const name = d.name;
   const startedAt = d.startedAt ?? Date.now();
   if (ev.status !== 'running') await o.store.update(ev.id, { status: 'running', data: { ...d, startedAt } });
   d.startedAt = startedAt;
+  // A Stop can come while the approval is read, the page is checked or this call is marked running: from
+  // here on nothing waits before the action starts, so look once more (W-194). A Stop after this point can
+  // still let it start; one the host is told about (signal, isCancelled) ends what it can.
+  if (o.signal?.aborted || (await o.store.control()).cancel) return 'cancelled';
 
   // Built-in task and memory tools run here, independent of the host.
   try {

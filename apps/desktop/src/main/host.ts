@@ -96,11 +96,13 @@ export class LocalHost implements ToolHost {
     const s = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : '');
     switch (name) {
       case 'web.fetch': {
-        const r = await fetchReadable(s('url'), { guard: true, maxChars: Number(args.max_chars) || 40000 });
+        // Stop ends it at any step, the address lookup included (W-196).
+        const r = await fetchReadable(s('url'), { guard: true, maxChars: Number(args.max_chars) || 40000, signal: ctx.signal });
         return { output: r.output, isError: r.status >= 400 };
       }
       case 'github.request':
-        return deviceJson<ToolResult>(`/api/device/runs/${this.runId}/github`, { method: s('method') || 'GET', path: s('path'), body: args.body }, { lease: this.lease });
+        // Stop (or a lost lease) aborts the request; the server reads the run again before it calls GitHub (W-194).
+        return deviceJson<ToolResult>(`/api/device/runs/${this.runId}/github`, { method: s('method') || 'GET', path: s('path'), body: args.body }, { lease: this.lease, signal: ctx.signal });
       case 'computer.shell':
         if (!this.policy.shell) return { output: 'Terminal access is turned off on this computer (Wren → Settings → This computer).', isError: true };
         return this.shell(s('command'), s('cwd'), Number(args.timeout_sec) || 120, !!args.background, ctx, resume);

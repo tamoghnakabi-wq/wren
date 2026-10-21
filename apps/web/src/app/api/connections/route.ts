@@ -45,12 +45,18 @@ export const POST = route(async (req) => {
     return json({ error: (e as Error).message, code: 'invalid_credentials' }, 400);
   }
 
+  // The connection and its secret are saved together or not at all (W-197): an active connection without its
+  // secret would show as working and fail every task. Encrypting comes first, so nothing is written if it fails.
+  const ciphertext = b.secret ? encryptSecret(b.secret, user.id) : null;
   const sql = db();
-  const [c] = await sql`
-    insert into public.connections (user_id, kind, provider, label, config, secret_hint, status, last_checked_at)
-    values (${user.id}, ${b.provider === 'github' || b.provider === 'mcp' ? 'service' : 'model'}, ${b.provider}, ${label}, ${sql.json(config as Json)},
-            ${b.secret ? hint(b.secret) : null}, 'active', now())
-    returning id, kind, provider, label, config, secret_hint, status, created_at`;
-  if (b.secret) await sql`insert into public.connection_secrets (connection_id, ciphertext) values (${c.id}, ${encryptSecret(b.secret, user.id)})`;
+  const c = await sql.begin(async (tx) => {
+    const [row] = await tx`
+      insert into public.connections (user_id, kind, provider, label, config, secret_hint, status, last_checked_at)
+      values (${user.id}, ${b.provider === 'github' || b.provider === 'mcp' ? 'service' : 'model'}, ${b.provider}, ${label}, ${tx.json(config as Json)},
+              ${b.secret ? hint(b.secret) : null}, 'active', now())
+      returning id, kind, provider, label, config, secret_hint, status, created_at`;
+    if (ciphertext) await tx`insert into public.connection_secrets (connection_id, ciphertext) values (${row.id}, ${ciphertext})`;
+    return row;
+  });
   return json(c, 201);
 });

@@ -82,3 +82,34 @@ function close(s: NodeJS.ReadableStream | null) {
   const r = s as Partial<Pick<Readable, 'destroy' | 'destroyed'>> | null;
   if (r && typeof r.destroy === 'function' && !r.destroyed) r.destroy();
 }
+
+/** The part of the SDK's finished command this needs: its output as a stream of log lines. */
+export interface CommandLogs {
+  logs(opts?: { signal?: AbortSignal }): AsyncIterable<{ stream: string; data: string }>;
+}
+
+/**
+ * A finished command's stdout, read through the SDK's log stream up to `maxBytes` of output (stdout and stderr
+ * both count, as both come in). `stdout()` would collect all of it into this function, and what a command
+ * prints in the agent's computer is the agent's to decide (W-191): past the limit the stream is closed and
+ * the rest is never fetched.
+ */
+export async function commandOutput(cmd: CommandLogs, maxBytes: number): Promise<{ stdout: string; truncated: boolean }> {
+  const stop = new AbortController();
+  let out = '';
+  let size = 0;
+  let truncated = false;
+  try {
+    for await (const line of cmd.logs({ signal: stop.signal })) {
+      size += Buffer.byteLength(line.data);
+      if (size > maxBytes) {
+        truncated = true;
+        break; // ends the iteration, which closes the stream
+      }
+      if (line.stream === 'stdout') out += line.data;
+    }
+  } finally {
+    stop.abort();
+  }
+  return { stdout: out, truncated };
+}

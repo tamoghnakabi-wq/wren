@@ -54,7 +54,7 @@ const box = {
     return Buffer.concat(chunks);
   },
   async runCommand() {
-    return { exitCode: 0, stdout: async () => '/vercel\n' };
+    return { exitCode: 0, stdout: async () => '/vercel\n', logs: async function* () { yield { stream: 'stdout', data: '/vercel\n' }; } };
   },
   async writeFiles(files: { path: string; content: Buffer }[]) {
     box.written.push(...files);

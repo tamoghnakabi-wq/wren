@@ -187,10 +187,18 @@ export const POST = route<Ctx>(async (req, ctx) => {
       const gh = await connectionSecret(run.user_id, 'github');
       if (!gh) return json({ output: 'GitHub is not connected. Ask the user to connect it in Connections.', isError: true });
       if (!b.path.startsWith('/')) return json({ output: 'Path must start with /', isError: true });
+      // Read the run again right before sending, as for MCP (W-194): it must still be this lease's (a lost
+      // lease answers 409), active and not stopped. The device's Stop aborts the request, and the call with it.
+      const now = await loadRun(device, runId);
+      requireLease(now, lease);
+      if ((now.status !== 'queued' && now.status !== 'running') || now.cancel_requested || req.signal.aborted) {
+        return json({ output: 'The GitHub request was not sent because the task was stopped.', isError: true });
+      }
       const res = await fetch(`https://api.github.com${b.path}`, {
         method: b.method,
         headers: { authorization: `Bearer ${gh.secret}`, accept: 'application/vnd.github+json', 'user-agent': 'wren-agent' },
         body: b.method === 'GET' || b.body === undefined ? undefined : JSON.stringify(b.body),
+        signal: req.signal,
       });
       const text = await res.text();
       return json({ output: `HTTP ${res.status}\n${text.slice(0, 40000)}`, isError: res.status >= 400 });

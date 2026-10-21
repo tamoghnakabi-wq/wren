@@ -336,8 +336,8 @@ describe('browser + other tools', () => {
     for (const p of ['/repos/a/b/rulesets', '/repos/a/b/environments/prod', '/repos/a/b/pages', '/repos/a/b/invitations/1', '/repos/a/b/forks', '/repos/a/b/generate', '/repos/a/b/vulnerability-alerts', '/repos/a/b/actions/permissions', '/repos/a/b/dependabot/secrets/X', '/repos/a/b/contents/.github/workflows/ci.yml', '/orgs/acme', '/orgs/acme/members/x', '/teams/1/repos/a/b', '/user', '/user/emails', '/user/gpg_keys'])
       expect(gh('PUT', p, {}), p).toBe('critical');
     // Ordinary writes stay high; reads stay low.
-    for (const p of ['/repos/a/b/issues', '/repos/a/b/pulls', '/repos/a/b/contents/src/app.ts', '/user/repos', '/repos/a/b/issues/1/comments'])
-      expect(gh('POST', p, {}), p).toBe('high');
+    for (const [m, p] of [['POST', '/repos/a/b/issues'], ['POST', '/repos/a/b/pulls'], ['PUT', '/repos/a/b/contents/src/app.ts'], ['POST', '/user/repos'], ['POST', '/repos/a/b/issues/1/comments']])
+      expect(gh(m, p, {}), `${m} ${p}`).toBe('high');
     expect(gh('GET', '/repos/a/b')).toBe('low');
     // GraphQL: reading is fine; anything with a mutation in it, or that isn't a plain query, is critical.
     expect(gh('POST', '/graphql', { query: '{ viewer { login } }' })).toBe('low');
@@ -350,6 +350,11 @@ describe('browser + other tools', () => {
     // CI that already exists may still be run, re-run or cancelled as an ordinary write.
     for (const p of ['/repos/a/b/actions/workflows/ci.yml/dispatches', '/repos/a/b/actions/runs/1/rerun', '/repos/a/b/actions/runs/1/cancel', '/repos/a/b/actions/jobs/2/rerun', '/repos/a/b/releases', '/repos/a/b/labels', '/repos/a/b/git/refs', '/repos/a/b/pulls/3/reviews'])
       expect(gh('POST', p, {}), p).toBe('high');
+    // Ordinary writes are matched by method and whole endpoint (round 29): nothing below one of them inherits it.
+    for (const [m, p] of [['PATCH', '/repos/a/b/check-suites/preferences'], ['PUT', '/repos/a/b/pulls/3/reviews/4/dismissals'], ['POST', '/repos/a/b/issues/1/anything-new'], ['POST', '/repos/a/b/contents/src/app.ts'], ['PATCH', '/repos/a/b/labels']])
+      expect(gh(m, p, {}), `${m} ${p}`).toBe('critical');
+    for (const [m, p] of [['PATCH', '/repos/a/b/issues/7'], ['PUT', '/repos/a/b/pulls/3/merge'], ['POST', '/repos/a/b/check-suites/9/rerequest'], ['PATCH', '/repos/a/b/git/refs/heads/feature'], ['POST', '/repos/a/b/statuses/abc123']])
+      expect(gh(m, p, {}), `${m} ${p}`).toBe('high');
     // A method Wren doesn't know is refused outright.
     expect(assessCall('github.request', { method: 'TRACE', path: '/repos/a/b' }, 'cloud').blocked).toMatch(/GET, POST, PATCH, PUT or DELETE/);
   });

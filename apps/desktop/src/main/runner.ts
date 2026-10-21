@@ -200,6 +200,8 @@ export class DeviceRunner {
     let outcome: LoopOutcome = { kind: 'failed', error: 'The run could not start on this computer.', steps: 0 };
     let lease = '';
     let keepalive: ReturnType<typeof setInterval> | undefined;
+    // The user pressed Stop (seen by the keepalive), as opposed to a lost lease or an unlink.
+    let userStopped = false;
     try {
       const c = await deviceJson<Claim>(`/api/device/runs/${runId}/claim`, {});
       if (!c.claimed) return;
@@ -211,7 +213,11 @@ export class DeviceRunner {
       keepalive = setInterval(() => {
         store
           .control()
-          .then((ctl) => ctl.cancel && abort.abort())
+          .then((ctl) => {
+            if (!ctl.cancel) return;
+            userStopped = true;
+            abort.abort();
+          })
           .catch((e: { status?: number; code?: string }) => (e?.status === 409 || (e?.status === 401 && e.code === 'device_revoked')) && abort.abort());
       }, 45_000);
       store.localOnlyApprovals = () => !loadPolicy().remoteApprovals;
@@ -230,6 +236,9 @@ export class DeviceRunner {
       if (keepalive) clearInterval(keepalive);
       const stopped = this.stopReasons.get(runId);
       if (stopped) outcome = { kind: 'failed', error: stopped, code: 'permissions_changed', steps: outcome.steps };
+      // Stop ends what was under way through the signal, and a model call cut short comes back as a failure (or
+      // a retry as a hand-off): the run ends cancelled, as the user asked, like a cloud run (round 29).
+      else if (userStopped && outcome.kind !== 'completed' && outcome.kind !== 'cancelled') outcome = { kind: 'cancelled', steps: outcome.steps };
       this.stopReasons.delete(runId);
       this.engineRuns.delete(runId);
       // A finished run's commands (background ones included) end with it.

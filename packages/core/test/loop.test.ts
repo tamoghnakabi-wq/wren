@@ -115,10 +115,79 @@ describe('agent loop', () => {
     expect(turns[1]).toMatchObject({ kind: 'assistant', calls: [{ name: 'list_files', output: 'ok computer.list_files' }] });
   });
 
+  it('starts no approved action once Stop came while the approval was read or the call marked running (W-194)', async () => {
+    // Stop recorded during one of the loop's own waits, after its checks at the top of the step.
+    class StopDuring extends MemStore {
+      constructor(public at: 'approval' | 'running') {
+        super();
+      }
+      async approvalState(id: string) {
+        const s = await super.approvalState(id);
+        if (this.at === 'approval') this.cancel = true;
+        return s;
+      }
+      async update(id: string, patch: { data?: unknown; status?: string }) {
+        await super.update(id, patch);
+        if (this.at === 'running' && patch.status === 'running') this.cancel = true;
+      }
+    }
+    for (const runtime of ['cloud', 'desktop'] as const)
+      for (const at of ['approval', 'running'] as const) {
+        const store = new StopDuring(at);
+        await store.userSays('make it public');
+        const model = new ScriptModel([{ calls: [{ name: 'github.request', args: { method: 'PATCH', path: '/repos/audit/r', body: { private: false } } }] }, { text: 'Done.' }]);
+        const host = Object.assign(new FakeHost(), { runtime });
+        const opts = { autonomy: 'autonomous' as const, tools: toolCatalog({ runtime, tools: { ...DEFAULT_TOOLS, github: true }, githubConnected: true }) };
+        const first = await base(store, model, host as ToolHost, opts);
+        expect(first.kind).toBe('waiting_approval');
+        store.approvals.set((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).approvalId!, 'approved');
+        const out = await base(store, model, host as ToolHost, { ...opts, step: first.steps });
+        expect(out.kind, `${runtime} ${at}`).toBe('cancelled');
+        expect(host.ran, `${runtime} ${at}`).toEqual([]);
+        expect(store.events_.find((e) => e.type === 'tool')!.status).toBe('cancelled');
+      }
+  });
+
+  it('reports a notification or a saved memory cut off by a crash as interrupted, not done twice (W-195)', async () => {
+    // The worker dies after the effect, before the call is recorded as done.
+    class DiesOnce extends MemStore {
+      dead = true;
+      async update(id: string, patch: { data?: unknown; status?: string }) {
+        const tool = this.events_.find((e) => e.id === id)?.type === 'tool';
+        if (this.dead && tool && (patch.status === 'done' || patch.status === 'error')) throw new Error('worker died');
+        return super.update(id, patch);
+      }
+    }
+    for (const call of [{ name: 'task.notify', args: { title: 'Build finished', body: 'ok' } }, { name: 'memory.remember', args: { fact: 'The user prefers pnpm.' } }]) {
+      const store = new DiesOnce();
+      await store.userSays('go');
+      const model = new ScriptModel([{ calls: [call] }, { text: 'Done.' }]);
+      const host = new FakeHost();
+      await base(store, model, host).catch(() => undefined); // the worker's run ends there, however it reports it
+      expect(store.events_.find((e) => e.type === 'tool')!.status, call.name).toBe('running');
+      store.dead = false; // started again
+      const out = await base(store, model, host);
+      expect(out.kind, call.name).toBe('completed');
+      expect(store.notes.filter((n) => n === 'Build finished').length + store.mem.size, call.name).toBe(1);
+      const tool = store.events_.find((e) => e.type === 'tool')!;
+      expect(tool.status, call.name).toBe('error');
+      expect(((tool.data as ToolCallData).result?.output ?? ''), call.name).toMatch(/interrupted/);
+    }
+    // Showing the plan again is harmless, so it still just runs.
+    const store = new DiesOnce();
+    await store.userSays('plan');
+    const model = new ScriptModel([{ calls: [{ name: 'task.update_plan', args: { items: [{ text: 'a', status: 'pending' }] } }] }, { text: 'Done.' }]);
+    await base(store, model, new FakeHost()).catch(() => undefined);
+    store.dead = false;
+    await base(store, model, new FakeHost());
+    expect(store.events_.find((e) => e.type === 'tool')!.status).toBe('done');
+  });
+
   it('asks before GitHub repository administration Wren has no list entry for, even when autonomous (W-188)', async () => {
     const calls = [
       { method: 'PUT', path: '/repos/audit/private-repo/actions/oidc/customization/sub', body: { use_default: false, include_claim_keys: ['repo', 'context'] } },
       { method: 'POST', path: '/repos/audit/private-repo/actions/runners/registration-token', body: {} },
+      { method: 'PATCH', path: '/repos/audit/r/check-suites/preferences', body: { auto_trigger_checks: [{ app_id: 4, setting: false }] } },
     ];
     for (const runtime of ['cloud', 'desktop'] as const)
       for (const args of calls) {

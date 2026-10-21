@@ -112,20 +112,27 @@ export interface FetchOptions {
   guard?: boolean; // apply the SSRF guard (cloud)
   userAgent?: string;
   timeoutMs?: number;
+  /** The task's Stop: ends the fetch wherever it is, as the time limit does. */
+  signal?: AbortSignal;
 }
 
 export async function fetchReadable(url: string, o: FetchOptions = {}): Promise<{ output: string; status: number; finalUrl: string; title?: string }> {
   const maxChars = Math.min(Math.max(o.maxChars ?? 40_000, 1000), 120_000);
   let current = url;
   let res: Response | undefined;
+  const ms = o.timeoutMs ?? 25_000;
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), o.timeoutMs ?? 25_000);
+  const timer = setTimeout(() => ctl.abort(new DOMException(`The page took longer than ${Math.ceil(ms / 1000)} s to load, so the fetch was stopped.`, 'TimeoutError')), ms);
+  // One signal for the time limit and the caller's Stop, for every step of the fetch.
+  const signal = o.signal ? AbortSignal.any([ctl.signal, o.signal]) : ctl.signal;
   try {
     for (let hop = 0; hop < 6; hop++) {
-      if (o.guard) await assertPublicUrl(current);
+      // The address check is a DNS lookup that takes no signal: a resolver that stalls must not hold
+      // the tool past its time limit or a Stop (W-196). The connection checks the address again.
+      if (o.guard) await untilAborted(() => assertPublicUrl(current), signal);
       res = await (o.guard ? guardedFetch : fetch)(current, {
         redirect: 'manual',
-        signal: ctl.signal,
+        signal,
         headers: {
           'user-agent': o.userAgent ?? 'Mozilla/5.0 (compatible; WrenAgent/0.1; +https://github.com/tamoghnakabi-wq/wren)',
           accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.5',
@@ -165,6 +172,16 @@ export async function fetchReadable(url: string, o: FetchOptions = {}): Promise<
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** What `start` gives, or the signal's reason as soon as it aborts (what an aborted fetch throws); nothing starts once it has. */
+function untilAborted<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    start().then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 async function readLimited(res: Response, limit: number): Promise<Uint8Array> {
