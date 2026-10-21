@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-22: the re-audit #29 fixes (W-188/W-191 remainders, W-194…W-198) are desktop **0.1.36** plus a web deploy, not yet committed or released; production runs desktop 0.1.35 (`b4b36d3`; the latest migration is `wren_0014_external_cleanups`, repo 0012; this round has none). Update this line when 0.1.36 ships. Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-nine Codex security audits (W-1…W-198) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-22: `main` is in sync with `origin/main`; the last code commit is `377b916` (re-audit #29 fixes: W-188/W-191 remainders, W-194…W-198), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.36** (released; the signed update feed serves it on all three platforms). Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-nine Codex security audits (W-1…W-198) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -301,7 +301,7 @@ How each part works:
 | Re-audit #26 (of 0.1.32) | none new (W-185 remainder) | `d13df74`, 0.1.33 | See below; no migration |
 | Re-audit #27 (of 0.1.33) | W-188…W-190 | `b80232b`, 0.1.34 + web | See below; no migration |
 | Re-audit #28 (of 0.1.34) | W-191…W-193 (+W-188 remainder) | `b4b36d3`, 0.1.35 + web | See below; no migration |
-| Re-audit #29 (of 0.1.35) | W-194…W-198 (+W-188, W-191 remainders) | (this commit), 0.1.36 + web | See below; no migration |
+| Re-audit #29 (of 0.1.35) | W-194…W-198 (+W-188, W-191 remainders) | `377b916`, 0.1.36 + web | See below; no migration |
 
 Round 29 in brief (desktop 0.1.36 and the web app; Codex report ~/studioproject/wren-audits/wren-re-audit-0.1.35-2026-10-21.md, of `62453cc`; W-192 and W-193 confirmed closed; a fresh pass over the loop, web.fetch, the updater and release signing, connections and the Windows code; the cloud/desktop/net half was done by a subagent in parallel):
 - **W-188 remainder** (High) `PATCH …/check-suites/preferences` matched the ordinary `check-suites` prefix: ordinary repository writes are now matched by method and whole endpoint, so nothing below one inherits it (a review's dismissal is critical too).
