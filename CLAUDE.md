@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-10-22: `main` is in sync with `origin/main`; the last code commit is `377b916` (re-audit #29 fixes: W-188/W-191 remainders, W-194…W-198), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.36** (released; the signed update feed serves it on all three platforms). Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-nine Codex security audits (W-1…W-198) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-10-28: `main` is in sync with `origin/main`; the last code commit is the dependency security update (Next.js 16.4.3, Electron 44.9.3, zod 4.6.7, undici 7.30.1/6.29.1, vite 8.3.5 and MCP SDK dependencies; `npm audit` clean; see "Dependencies" under Conventions and traps), after the re-audit #29 fixes (`377b916`: W-188/W-191 remainders, W-194…W-198), live in production (the latest migration is `wren_0014_external_cleanups`, repo 0012). The desktop app is at **0.1.37** (released; the signed update feed serves it on all three platforms). Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The twenty-nine Codex security audits (W-1…W-198) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -22,13 +22,13 @@ packages/core     @wren/core: agent runtime shared by cloud and desktop
   src/prompt.ts, transcript.ts, text.ts, semver.ts, types.ts
   scripts/gen-daemon.mjs   regenerates daemon-source.ts from controller.ts
   test/               vitest: policy, loop, browser (real Chrome, opt-in), responses, chat, net, semver
-apps/web          @wren/web: Next.js 16.3.8 (Turbopack), React 19, on Vercel
+apps/web          @wren/web: Next.js 16.4.3 (Turbopack), React 19, on Vercel
   src/app/            site (/, /download, /legal, /login, /signup), app (/app/...), API routes (/api/...)
   src/lib/runs.ts     startTask, continueActiveRun, finishRun, cleanUpCloudRun, decideApproval, cancelRun, kickRun/kickTick
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.36: Electron 44
+apps/desktop      wren-desktop 0.1.37: Electron 44 (44.9.3)
   src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
@@ -302,6 +302,7 @@ How each part works:
 | Re-audit #27 (of 0.1.33) | W-188…W-190 | `b80232b`, 0.1.34 + web | See below; no migration |
 | Re-audit #28 (of 0.1.34) | W-191…W-193 (+W-188 remainder) | `b4b36d3`, 0.1.35 + web | See below; no migration |
 | Re-audit #29 (of 0.1.35) | W-194…W-198 (+W-188, W-191 remainders) | `377b916`, 0.1.36 + web | See below; no migration |
+| (dependencies, 2026-10-28) | Dependabot + `npm audit`: Next.js, Electron, zod, undici, vite, MCP SDK deps | 0.1.37 + web | No code changes; see "Dependencies" under Conventions and traps |
 
 Round 29 in brief (desktop 0.1.36 and the web app; Codex report ~/studioproject/wren-audits/wren-re-audit-0.1.35-2026-10-21.md, of `62453cc`; W-192 and W-193 confirmed closed; a fresh pass over the loop, web.fetch, the updater and release signing, connections and the Windows code; the cloud/desktop/net half was done by a subagent in parallel):
 - **W-188 remainder** (High) `PATCH …/check-suites/preferences` matched the ordinary `check-suites` prefix: ordinary repository writes are now matched by method and whole endpoint, so nothing below one inherits it (a review's dismissal is critical too).
@@ -673,5 +674,6 @@ All of them follow one pattern: log in with supabase-js as the owner test accoun
 - **React.** Calling `desktop()` during render causes hydration mismatches; use `useDesktop()`.
 - **Realtime.** Call `setAuth` before subscribing.
 - **Playwright.** `page.evaluate`/`handle.evaluate` with a *string* doesn't receive handles; fetch the function as a handle first (see `describeElement`). `page.setContent` keeps the same `document`.
+- **Dependencies.** Check with `npm audit` (Dependabot only re-scans weekly and showed just the dev-only vite alerts while Next.js had a critical one). Take the newest patch of the affected package, not a broad `npm audit fix`: on 2026-10-28 that also bumped `@vercel/blob`/`functions`/`oidc` (one a day old) for nothing, so they were put back. Root `package.json` has `overrides: {"@vercel/cli-config": {"zod": "^4.6.7"}}`: `@vercel/oidc`'s config reader pins zod 4.1.11 exactly (still in cli-config 0.3.4); drop the override once it moves past 4.6.6. npm doesn't apply a new override to a copy already in the lockfile: delete that nested entry (`node_modules/@vercel/cli-config/node_modules/zod`) from `package-lock.json` and `node_modules`, then `npm install`. `npm ls` then marks that zod "invalid" and exits 1; harmless (`npm ci` installs it, electron-builder ignores `npm list`'s exit 1, and the desktop app doesn't ship cli-config). After an Electron bump run `node node_modules/electron/install.js` if `node_modules/electron/dist` is missing.
 - **Process checks.** `pgrep -f "x"` matches its own probe command; use `ps -eo pid,args | grep -E "[0-9] x$"` or the `[x]` trick.
 - **Approval.** Before deploying, releasing, or anything else outward-facing or irreversible, confirm with the user unless they've asked for it in the current task.
