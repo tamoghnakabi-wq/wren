@@ -71,9 +71,11 @@ describe.skipIf(process.platform === 'win32')('closing the agent browser', () =>
   it('doesn\'t stop a program the browser\'s old process id now belongs to', async () => {
     // A process that isn't Wren's child stands for an id handed to another program after the browser went.
     const sh = spawn('/bin/sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    // Listen for the exit first: Node can report it before the output arrives (a CI run hung here).
+    const exited = new Promise((r) => sh.once('exit', r));
     const other = await new Promise<number>((r) => sh.stdout!.once('data', (d) => r(Number(String(d).trim()))));
     cleanup.push(other);
-    await new Promise((r) => sh.once('exit', r));
+    await exited;
     adoptBrowser({ controller: {} as never, close: async () => Promise.reject(new Error('gone')), proc: external(other, 0) });
     expect(await closeBrowser()).toBe(true); // its own browser is gone
     expect(alive(other)).toBe(true);
