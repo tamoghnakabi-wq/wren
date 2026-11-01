@@ -273,14 +273,28 @@ export class Updater {
     return info;
   }
 
+  /** The check asking the server right now, if one is. */
+  private asking?: Promise<UpdateState>;
+
   /**
    * Look for a newer release and, if there is one, start downloading it. Returns as soon as that's
    * decided; the download carries on in the background and reports progress through `onChange`.
+   * Asked again while a check is still waiting for the server, it returns that check's answer, not
+   * the state from before it (someone who chose Check for Updates is told what the server said).
    */
-  async check(): Promise<UpdateState> {
-    if (this.busy) return this.state;
-    if (process.platform !== 'darwin' && process.platform !== 'win32') return this.state;
+  check(): Promise<UpdateState> {
+    if (this.asking) return this.asking;
+    if (this.busy) return Promise.resolve(this.state);
+    if (process.platform !== 'darwin' && process.platform !== 'win32') return Promise.resolve(this.state);
     this.busy = true;
+    const asking = this.ask().finally(() => {
+      if (this.asking === asking) this.asking = undefined;
+    });
+    this.asking = asking;
+    return asking;
+  }
+
+  private async ask(): Promise<UpdateState> {
     let downloading = false;
     try {
       const info = await this.latest(app.getVersion());
@@ -443,11 +457,12 @@ export class Updater {
   /**
    * Quit and install the downloaded update, then relaunch. `stopAgents` resolves true once every
    * agent run, engine and command is confirmed stopped; `resumeAgents` undoes it if the install
-   * doesn't go ahead.
+   * doesn't go ahead. Says how it went: `started` (the installer runs and Wren is quitting),
+   * `failed` (the reason is in `state.error`) or `busy` (nothing to install, or already installing).
    */
-  async install(stopAgents: () => Promise<boolean>, resumeAgents: () => void) {
+  async install(stopAgents: () => Promise<boolean>, resumeAgents: () => void): Promise<'started' | 'failed' | 'busy'> {
     const file = this.state.file;
-    if (!file || !existsSync(file) || this.installing) return;
+    if (!file || !existsSync(file) || this.installing) return 'busy';
     this.installing = true;
     let handedOff = false;
     try {
@@ -457,7 +472,7 @@ export class Updater {
       if (!(await stopAgents().catch(() => false))) {
         this.state = { ...this.state, error: 'Some agent processes could not be confirmed stopped, so the update was not installed. Try again in a moment.' };
         this.onChange();
-        return;
+        return 'failed';
       }
       // The file sat on disk since download: install from a private copy that is verified as it's made.
       const copy = this.state.sha256 && this.state.size ? await verifiedCopy(file, this.state.sha256, this.state.size).catch(() => null) : null;
@@ -465,9 +480,10 @@ export class Updater {
         rmSync(file, { force: true });
         this.state = { available: false, error: 'The downloaded update changed on disk and was discarded. It will be downloaded again.' };
         this.onChange();
-        return;
+        return 'failed';
       }
       handedOff = await this.launchInstaller(copy);
+      return handedOff ? 'started' : 'failed';
     } finally {
       this.installing = false;
       if (!handedOff) resumeAgents();
@@ -489,7 +505,11 @@ export class Updater {
     } else {
       // macOS: <bundle>/Contents/MacOS/Wren -> swap the .app after this process exits.
       const bundle = resolve(dirname(process.execPath), '..', '..');
-      if (!bundle.endsWith('.app')) return false;
+      if (!bundle.endsWith('.app')) {
+        this.state = { ...this.state, error: 'Wren isn’t running from its app bundle, so it can’t update itself.' };
+        this.onChange();
+        return false;
+      }
       // Script, archive copy and staging all live in the private folder; the script checks the
       // archive once more right before extracting it, after this process has exited. Any failure
       // puts the old app back, reopens it and leaves the reason for the next start.

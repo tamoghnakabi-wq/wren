@@ -4,6 +4,7 @@ import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:f
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
+import { menuTemplate, updateMenuItem, updatePrompts, type Prompt } from './appmenu';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, readPolicy, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
@@ -250,6 +251,15 @@ const runner = new DeviceRunner(
   (sessionId) => showWindow(`/app/s/${sessionId}`),
 );
 const updater = new Updater(() => pushStatus());
+// Check for Updates… in the menu bar and the tray: each choice gets an answer in a dialog.
+const updates = updatePrompts({
+  version: app.getVersion(),
+  check: () => updater.check(),
+  state: () => updater.state,
+  install: () => installUpdate(),
+  running: () => runner.state.running,
+  show: askUser,
+});
 
 const primary = process.argv.includes('--selftest') || app.requestSingleInstanceLock();
 if (!primary) {
@@ -293,6 +303,17 @@ function status() {
 function pushStatus() {
   if (win && !win.isDestroyed()) win.webContents.send('wren:status', status());
   updateTray();
+  updateAppMenu();
+  updates.changed(updater.state);
+}
+
+/** A dialog in front: on Wren's window when it's showing, otherwise on its own (Wren may be in the tray). */
+async function askUser(p: Prompt): Promise<number> {
+  // Always the answer to something the user chose (from the menu bar or the tray), so Wren comes forward.
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  const opts: Electron.MessageBoxOptions = { type: p.type, title: 'Wren', message: p.message, detail: p.detail, buttons: p.buttons, defaultId: 0, cancelId: p.buttons.length - 1 };
+  const r = win && !win.isDestroyed() && win.isVisible() ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  return r.response;
 }
 
 // ------------------------------------------------------------------ window
@@ -381,6 +402,28 @@ function offlinePage(desc: string, url: string) {
   return `<!doctype html><title>Wren</title><body style="font-family:system-ui;background:#121110;color:#f3f1ee;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:420px"><h2 style="font-weight:600">Can’t reach Wren</h2><p style="color:#b3ada6">${desc}. Check your connection — agents already running on this computer keep going.</p><button onclick="location.href='${url.replace(/'/g, '')}'" style="margin-top:12px;padding:10px 18px;border-radius:12px;border:0;background:#f3f1ee;color:#121110;font-weight:600">Try again</button></div></body>`;
 }
 
+/** Settings… (⌘, / Ctrl+,): Wren's window on its Settings page, reloaded only if it's elsewhere. */
+function openSettings() {
+  const now = win && !win.isDestroyed() ? win.webContents.getURL() : '';
+  const there = URL.canParse(now) && new URL(now).origin === APP_ORIGIN && new URL(now).pathname === '/app/settings';
+  showWindow(there ? undefined : '/app/settings');
+}
+
+// ------------------------------------------------------------------ menu bar
+
+let appMenuKey = '';
+
+/** The menu bar, rebuilt when its update item changes (not on every download progress report). */
+function updateAppMenu() {
+  if (!app.isReady()) return;
+  const key = JSON.stringify(updateMenuItem(updater.state));
+  if (key === appMenuKey) return;
+  appMenuKey = key;
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(menuTemplate({ platform: process.platform, appName: app.name, update: updater.state, onUpdate: () => void updates.choose(), onSettings: () => openSettings() })),
+  );
+}
+
 // ------------------------------------------------------------------ tray
 
 function trayIcon() {
@@ -396,7 +439,7 @@ function updateTray() {
   const s = status();
   const u = updater.state;
   const lines = [s.linked ? (s.connected ? `Connected as ${s.account?.email ?? 'you'}` : 'Connecting…') : 'Not linked yet', s.runningRuns ? `${s.runningRuns} task${s.runningRuns > 1 ? 's' : ''} running here` : 'No tasks running here'];
-  const updateLabel = u.ready ? `Restart to update to ${u.version}` : u.downloading ? `Downloading update ${u.version}…` : 'Check for updates';
+  const updateLabel = u.ready ? `Restart to update to ${u.version}` : u.downloading ? `Downloading update ${u.version}…` : 'Check for updates…';
   // Status is pushed every second while an update downloads; rebuild the menu only when it changes.
   const key = JSON.stringify([lines, updateLabel]);
   if (key === trayKey) return;
@@ -407,7 +450,7 @@ function updateTray() {
       ...lines.map((l) => ({ label: l, enabled: false })),
       { type: 'separator' },
       { label: 'Open Wren', click: () => showWindow() },
-      { label: updateLabel, enabled: !u.downloading, click: () => (updater.state.ready ? installUpdate() : void updater.check()) },
+      { label: updateLabel, enabled: !u.downloading, click: () => void updates.choose() },
       { type: 'separator' },
       { label: 'Stop all tasks on this computer', enabled: s.runningRuns > 0, click: () => runner.abortAll() },
       { label: 'Quit Wren', click: () => quit() },
@@ -771,6 +814,7 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
   // A check without a page (Wren's service worker, for notifications) answers by the asking origin alone.
   wren.setPermissionCheckHandler((wc, permission, origin) => allowed(permission, wc ? wc.getURL() : origin, origin));
   registerIpc();
+  updateAppMenu();
   // The login shell's PATH, read once now: its folders are among what agents may not change.
   void import('./shellenv').then((m) => m.toolEnv()).catch(() => {});
   createWindow();

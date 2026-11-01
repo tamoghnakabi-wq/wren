@@ -21,6 +21,10 @@ const h = vi.hoisted(() => ({
   probeFails: false,
   /** Publishing the installer's pid in the marker fails (disk error), after the installer started. */
   markerFails: false,
+  /** While set, the update server holds its answer until this settles. */
+  apiGate: null as null | Promise<void>,
+  /** Requests to the update server. */
+  checks: 0,
 }));
 
 vi.mock('electron', () => ({
@@ -28,6 +32,8 @@ vi.mock('electron', () => ({
   safeStorage: {},
   net: {
     fetch: async (url: string, init: RequestInit = {}) => {
+      if (url.includes('/api/updates')) h.checks++;
+      if (url.includes('/api/updates') && h.apiGate) await h.apiGate;
       if (url.includes('/api/updates')) return h.api !== 200 ? new Response(null, { status: h.api }) : h.info ? Response.json(h.info) : new Response(null, { status: 204 });
       const range = /^bytes=(\d+)-$/.exec(new Headers(init.headers).get('range') ?? '')?.[1];
       const from = range === undefined ? undefined : Number(range);
@@ -134,6 +140,8 @@ beforeEach(() => {
   h.launched = [];
   h.probeFails = false;
   h.markerFails = false;
+  h.apiGate = null;
+  h.checks = 0;
   changes = 0;
   u = new Updater(() => changes++);
 });
@@ -242,6 +250,19 @@ describe('Updater download', () => {
     expect(u.state.ready).toBe(true);
   });
 
+  it('a check while another is still asking the server gets that answer, not the state from before it', async () => {
+    let answer!: () => void;
+    h.apiGate = new Promise<void>((r) => (answer = r));
+    const scheduled = u.check(); // Wren's own check
+    const chosen = u.check(); // Check for Updates… chosen meanwhile
+    answer();
+    expect(await chosen).toMatchObject({ available: true, version: '0.1.9', downloading: true });
+    expect(await scheduled).toBe(await chosen);
+    expect(h.checks).toBe(1);
+    await done();
+    expect(u.state.ready).toBe(true);
+  });
+
   it('reports a failed check without claiming an update', async () => {
     h.api = 503;
     const s = await u.check();
@@ -266,7 +287,7 @@ describe('Updater install handoff (W-83)', () => {
     h.launch = 'error';
     let resumed = 0;
     vi.useRealTimers();
-    await u.install(async () => true, () => resumed++);
+    expect(await u.install(async () => true, () => resumed++)).toBe('failed');
     expect(h.launched).toHaveLength(1);
     expect(h.quits).toBe(0);
     expect(resumed).toBe(1);
@@ -278,13 +299,24 @@ describe('Updater install handoff (W-83)', () => {
     ready();
     let resumed = 0;
     vi.useRealTimers();
-    await u.install(async () => true, () => resumed++);
+    expect(await u.install(async () => true, () => resumed++)).toBe('started');
     expect(h.quits).toBe(1);
     expect(resumed).toBe(0);
     // Which process installs, so a Wren opened again meanwhile can tell (W-96).
     const pending = JSON.parse(readFileSync(join(dir, 'update-pending.json'), 'utf8'));
     expect(pending).toMatchObject({ version: '0.1.9', pid: 4242 });
     expect(pending.installer).toContain(join(dir, 'install-'));
+  });
+
+  it('says it failed (and why) when agents won\'t stop, and that there was nothing to do without a download', async () => {
+    vi.useRealTimers();
+    let resumed = 0;
+    expect(await u.install(async () => true, () => resumed++)).toBe('busy'); // nothing downloaded
+    ready();
+    expect(await u.install(async () => false, () => resumed++)).toBe('failed');
+    expect(u.state.error).toMatch(/could not be confirmed stopped/);
+    expect(resumed).toBe(1);
+    expect(h.launched).toEqual([]);
   });
 
   it('still hands off (and settles) when the installer\'s pid can\'t be written to the marker (W-105)', async () => {

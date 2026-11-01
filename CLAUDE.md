@@ -2,7 +2,7 @@
 
 Wren is a personal AI agent platform (Dots / Grok-Bot style). Agents do real work on their own cloud computer (a Vercel Sandbox VM) or on the user's Mac/PC (desktop app). The user starts tasks from any device, watches each step live, approves sensitive actions and gets the results.
 
-State as of 2026-11-02: `main` is in sync with `origin/main`; the last code commit is `43267ea`, the re-audit #30 fixes (W-199…W-201, plus the W-191 and W-194 remainders), live in production (the latest migration is `wren_0015_push_sessions`, repo 0013). The desktop app is at **0.1.38** (released; the signed update feed serves it on all three platforms). Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The thirty Codex security audits (W-1…W-201) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). No feature work is in progress.
+State as of 2026-11-02: `main` is in sync with `origin/main`; the last code commit is `43267ea`, the re-audit #30 fixes (W-199…W-201, plus the W-191 and W-194 remainders), live in production (the latest migration is `wren_0015_push_sessions`, repo 0013). The desktop app is at **0.1.38** (released; the signed update feed serves it on all three platforms). In the working tree, not committed: desktop **0.1.39**, a menu bar with Check for Updates… and Settings… (see Updater). Codex reports now go to `~/studioproject/wren-audits/` (the temp folder is cleared on restart, which lost the earlier ones). Wren credits are switched off for every account (`70afa23`, see Models). The thirty Codex security audits (W-1…W-201) are all fixed or, for W-156, documented in Known limitations; see "Audit history" (W-79 is a documented Windows residual). The 0.1.39 menu bar is the only feature work in progress.
 
 `README.md` is the public overview. `docs/ARCHITECTURE.md` describes the overall design, but parts of it predate later audits; where it disagrees with this file, trust this file and the code (see "Known limitations").
 
@@ -28,8 +28,9 @@ apps/web          @wren/web: Next.js 16.4.3 (Turbopack), React 19, on Vercel
   src/lib/runner/     tick.ts (cloud tick), sandbox-host.ts (Vercel Sandbox tool host), store.ts (lease-fenced store)
   src/lib/client/     browser-side helpers: live.ts (useLive), layout.ts (collapsible panes), desktop.ts, api.ts, supabase.ts
   src/components/     ui.tsx (shared UI kit), app/* (shell, timeline, composer, approval-card, ...), agent-character.tsx
-apps/desktop      wren-desktop 0.1.38: Electron 44 (44.9.3)
-  src/main/index.ts   app entry (tray, window, IPC, pairing, update install, --selftest)
+apps/desktop      wren-desktop 0.1.39: Electron 44 (44.9.3)
+  src/main/index.ts   app entry (tray, menu bar, window, IPC, pairing, update install, --selftest)
+  src/main/appmenu.ts menu bar template (Check for Updates…, Settings…) and the update prompts
   src/main/runner.ts  DeviceRunner: heartbeat, realtime wake, claims and runs work (up to 3 at once)
   src/main/host.ts    LocalHost tool host (shell jobs, files, browser, screen), job registry
   src/main/sandbox.ts macOS Seatbelt profiles (shell, file helpers, engines)
@@ -134,7 +135,9 @@ qa/                   empty
 - **Updater.** It reads `/api/updates` (GitHub releases, revalidated every 300 s) and checks the manifest's ed25519 signature against the public key built into the app. It downloads to `<dataDir>/updates`.
   - All requests use Electron `net.fetch` (Chromium's stack: system proxy, OS certificate store) with `cache: 'no-store'`, not Node's fetch. A Windows user's updater sat on "Downloading…" forever; Settings showed "Downloading" for any available-but-not-ready state, which hid the real error (fixed in the web app for all versions, and in the desktop updater for 0.1.9+).
   - Bytes go to `<file>.<sha256[0:12]>.part` and resume with `Range` after a drop, a stall (no data for 2 min) or a restart. A finished but uninstalled download is reused. Failures retry after 5, then 15, then 60 minutes.
-  - `check()` returns as soon as a download starts. State carries `received`/`total`/`retryAt`, and Settings shows progress, the error and the retry time. Builds ≤0.1.8 send none of these; the web row copes with both.
+  - `check()` returns as soon as a download starts. State carries `received`/`total`/`retryAt`, and Settings shows progress, the error and the retry time. Builds ≤0.1.8 send none of these; the web row copes with both. A `check()` made while another is still waiting for the server returns that check's answer (`asking`), not the state from before it (0.1.39; before, a user's check during the startup or 4-hourly one answered "up to date").
+  - **Menu bar** (0.1.39, `main/appmenu.ts`; Wren used Electron's default menu before). macOS: the Wren menu has About, **Check for Updates…**, **Settings…** (⌘,), then Services/Hide/Quit; File, Edit, View and Window are Electron's roles as before. Windows: Settings… (Ctrl+,) in File, Check for Updates… and About in Help. No update item on Linux. The update item reads `Downloading Update X…` (disabled) while downloading and `Restart to Update to X` once ready; the menu is rebuilt only when that label changes. Settings… shows the window on `/app/settings` (a full `loadURL`, like notification clicks; not reloaded when already there).
+  - `updatePrompts` (shared by the menu bar and the tray's update item): every choice gets a native dialog (up to date with the version; couldn't check, with the retry time; "Downloading Wren X", then once that download ends "ready to install" with Restart Now/Later, naming how many running tasks a restart stops, or the download error, once). A download Wren found on its own stays quiet. Restart to Update installs at once (like the tray and the web's "Restart & update"); `install()` returns `started`/`failed`/`busy` and a failure is shown with its reason. Dialogs go on the window when it is visible, else app-modal, after `app.focus({steal: true})` on macOS (each is the answer to something the user chose). Tests: `test/app-menu.test.ts`, plus updater tests for the shared answer and the install result. Checked in a dev copy (own data folder): the menu items, the up-to-date answer from the live feed, Settings… going to `/app/settings`, Quit.
   - Install order:
     1. `runner.suspend()`
     2. close the browser (`closeBrowser()`: Playwright first, then the browser's own process group/tree, see below)
@@ -546,7 +549,7 @@ Other shipped work:
 ```bash
 npm install
 npm run typecheck                      # core + web + desktop
-npm test                               # core 82 (+10 real-Chrome skipped), desktop 160 (+1 real-Chrome skipped), web 117
+npm test                               # core 82 (+10 real-Chrome skipped), desktop 176 (+1 real-Chrome skipped), web 117
 node qa/mfa-e2e.mjs                    # MFA bypass checks against the local stack (83; needs `npm run dev`; pauses the local mail container briefly)
 node qa/mfa-ui.mjs                     # MFA in the real UI, headless Chrome (28)
 npm test -w apps/desktop               # updater (mocked net.fetch/spawn, fake timers), trust, jobs, proctree
