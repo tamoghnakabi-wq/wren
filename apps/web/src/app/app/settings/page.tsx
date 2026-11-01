@@ -51,6 +51,12 @@ function Row({ title, body, children }: { title: string; body?: React.ReactNode;
   );
 }
 
+const NO_ZONES: string[] = [];
+let knownZones: string[] | undefined;
+/** Read once (the same array every time, as useSyncExternalStore needs). */
+const zonesHere = () => (knownZones ??= typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : NO_ZONES);
+const zoneHere = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 function Profile() {
   const { profile, email } = useApp();
   const toast = useToast();
@@ -64,8 +70,12 @@ function Profile() {
     setName(profile?.display_name ?? '');
     setTz(profile?.timezone ?? 'UTC');
   }
-  const zones = [...new Set([tz, 'UTC', ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [])])];
-  const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // This browser's time zone and the zones it knows, read only once the page is live. The server's
+  // differ (UTC on Vercel, Node's own list), and a page that renders differently there makes React
+  // build it again from scratch, which also cleared the theme from <html> (Settings turned light).
+  const known = useSyncExternalStore(noSubscribe, zonesHere, () => NO_ZONES);
+  const local = useSyncExternalStore(noSubscribe, zoneHere, () => null);
+  const zones = [...new Set([tz, 'UTC', ...known])];
   const save = async (body: object) => {
     try {
       await api('/api/account/settings', { body });
@@ -99,7 +109,7 @@ function Profile() {
                 </option>
               ))}
             </Select>
-            {local !== tz && (
+            {local && local !== tz && (
               <Button variant="secondary" onClick={() => (setTz(local), save({ timezone: local }))}>
                 Use {local}
               </Button>
