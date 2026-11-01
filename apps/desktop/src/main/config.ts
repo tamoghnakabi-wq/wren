@@ -2,7 +2,7 @@ import { app, safeStorage } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 
 // Local state for the desktop app. Secrets (device token, ChatGPT tokens) are
 // encrypted with the OS keychain via safeStorage and written owner-only.
@@ -191,20 +191,64 @@ function defaultFolder(): string {
   return workspace;
 }
 
-/** Read on every agent action, so changes in Settings apply to runs already under way. */
-export function loadPolicy(): Policy {
-  const saved = readJson<Partial<Policy>>('policy.json', {});
-  return {
+const DEFAULT_MODEL_URL = 'http://127.0.0.1:1234/v1';
+const SWITCHES = ['shell', 'browser', 'screen', 'remoteApprovals', 'launchAtLogin'] as const;
+
+/**
+ * `saved`: read from policy.json. `new`: there is none yet (first start), so the first-install defaults.
+ * `unreadable`: there is one, but it couldn't be read or isn't a policy, so agents get nothing (W-201).
+ */
+export type PolicyState = 'saved' | 'new' | 'unreadable';
+
+/** A saved policy, as far as its keys go. An older file may lack newer keys; unknown keys don't matter. */
+function isSavedPolicy(v: unknown): v is Partial<Policy> {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  const has = (k: string) => Object.hasOwn(o, k);
+  if (SWITCHES.some((k) => has(k) && typeof o[k] !== 'boolean')) return false;
+  if (has('localModelUrl') && typeof o.localModelUrl !== 'string') return false;
+  return !has('folders') || (Array.isArray(o.folders) && o.folders.every((f) => typeof f === 'string' && isAbsolute(f)));
+}
+
+/**
+ * The policy and where it came from. Only a missing file means a first start: a saved policy that can't be
+ * read or makes no sense allows nothing, so it can't turn into the permissive first-install one, and turning
+ * a permission on again asks natively (W-201). Saving any change replaces the bad file.
+ */
+export function readPolicy(): { policy: Policy; state: PolicyState } {
+  const unreadable: { policy: Policy; state: PolicyState } = {
+    policy: { folders: [], shell: false, browser: false, screen: false, remoteApprovals: false, localModelUrl: DEFAULT_MODEL_URL, launchAtLogin: false },
+    state: 'unreadable',
+  };
+  let saved: unknown = {};
+  let state: PolicyState = 'new';
+  try {
+    const text = readText('policy.json'); // null only when there is no file
+    if (text !== null) {
+      saved = JSON.parse(text);
+      state = 'saved';
+    }
+  } catch {
+    return unreadable;
+  }
+  if (!isSavedPolicy(saved)) return unreadable;
+  const policy: Policy = {
     shell: true,
     browser: true,
     screen: false,
     remoteApprovals: true,
-    localModelUrl: 'http://127.0.0.1:1234/v1',
+    localModelUrl: DEFAULT_MODEL_URL,
     launchAtLogin: false,
     ...saved,
     // Only a policy that never listed folders starts with ~/Wren; an empty list means none.
-    folders: Array.isArray(saved.folders) ? saved.folders : [defaultFolder()],
+    folders: saved.folders ?? [defaultFolder()],
   };
+  return { policy, state };
+}
+
+/** Read on every agent action, so changes in Settings apply to runs already under way. */
+export function loadPolicy(): Policy {
+  return readPolicy().policy;
 }
 
 /** True when `next` takes away something `prev` allowed. */

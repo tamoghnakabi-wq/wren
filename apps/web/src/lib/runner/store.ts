@@ -1,7 +1,7 @@
 import type { ApprovalRequest, ApprovalState, ModelUsage, RunStore, SessionEvent } from '@wren/core';
 import { HttpError } from '../auth';
 import { db, type Json } from '../db';
-import { notifyUser } from '../notify';
+import { notifyUser, sendPush } from '../notify';
 
 // RunStore backed by Postgres. Every write bumps the session's last_event_at
 // so lists sort by activity; Realtime pushes the rows to open browsers.
@@ -106,26 +106,30 @@ export class DbRunStore implements RunStore {
 
   async createApproval(req: ApprovalRequest, opts: { localOnly?: boolean } = {}): Promise<string> {
     const sql = db();
-    // Only for one of this run's own events, and only while holding the lease.
+    const title = `${this.r.agentName} needs your approval`;
+    const body = `${req.title}${req.reason ? ` — ${req.reason}` : ''}`;
+    const page = `/app/s/${this.r.sessionId}`;
+    // Only for one of this run's own events, and only while holding the lease. The approval and its
+    // in-app notification go in together, in one statement, so a worker that lost the lease adds
+    // neither (W-200); the push follows only for a saved one.
     const [row] = await sql`
-      insert into public.approvals (user_id, agent_id, session_id, run_id, event_id, tool, title, detail, risk)
-      select ${this.r.userId}::uuid, ${this.r.agentId}::uuid, ${this.r.sessionId}::uuid, ${this.r.runId}::uuid, ${req.eventId}::uuid, ${req.tool}, ${req.title.slice(0, 300)},
-             ${sql.json({ args: req.args as Json, reason: req.reason ?? null, ...(opts.localOnly ? { localOnly: true } : {}) })}, ${req.risk}
-      where exists (select 1 from public.events where id = ${req.eventId}::uuid and run_id = ${this.r.runId}::uuid) and ${this.holds(sql)}
-      returning id`;
+      with a as (
+        insert into public.approvals (user_id, agent_id, session_id, run_id, event_id, tool, title, detail, risk)
+        select ${this.r.userId}::uuid, ${this.r.agentId}::uuid, ${this.r.sessionId}::uuid, ${this.r.runId}::uuid, ${req.eventId}::uuid, ${req.tool}, ${req.title.slice(0, 300)},
+               ${sql.json({ args: req.args as Json, reason: req.reason ?? null, ...(opts.localOnly ? { localOnly: true } : {}) })}, ${req.risk}
+        where exists (select 1 from public.events where id = ${req.eventId}::uuid and run_id = ${this.r.runId}::uuid) and ${this.holds(sql)}
+        returning id),
+      n as (
+        insert into public.notifications (user_id, kind, title, body, url, session_id)
+        select ${this.r.userId}::uuid, 'approval', ${title.slice(0, 200)}, ${body.slice(0, 2000)}, ${page + '?approval='} || a.id::text, ${this.r.sessionId}::uuid from a)
+      select id from a`;
     if (!row) {
       await this.assertLease();
       throw new Error('Approval event does not belong to this run.');
     }
-    await notifyUser({
-      userId: this.r.userId,
-      kind: 'approval',
-      title: `${this.r.agentName} needs your approval`,
-      body: `${req.title}${req.reason ? ` — ${req.reason}` : ''}`,
-      url: `/app/s/${this.r.sessionId}?approval=${row.id}`,
-      sessionId: this.r.sessionId,
-      tag: `approval-${row.id}`,
-    });
+    await sendPush({ userId: this.r.userId, kind: 'approval', title, body, url: `${page}?approval=${row.id}`, sessionId: this.r.sessionId, tag: `approval-${row.id}` }).catch((e) =>
+      console.warn('push failed', e?.message),
+    );
     return row.id;
   }
 
@@ -155,8 +159,11 @@ export class DbRunStore implements RunStore {
     });
   }
 
+  /** Only from the worker holding the lease, checked in the statement that saves it (W-200). */
   async notify(title: string, body: string, kind: string): Promise<void> {
-    await notifyUser({ userId: this.r.userId, kind, title: `${this.r.agentName}: ${title}`, body, url: `/app/s/${this.r.sessionId}`, sessionId: this.r.sessionId });
+    const sql = db();
+    const saved = await notifyUser({ userId: this.r.userId, kind, title: `${this.r.agentName}: ${title}`, body, url: `/app/s/${this.r.sessionId}`, sessionId: this.r.sessionId }, this.holds(sql));
+    if (!saved) throw new LeaseLostError();
   }
 
   memory = {

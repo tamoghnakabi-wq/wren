@@ -24,16 +24,55 @@ export function pushState(): PushState {
   return Notification.permission as PushState;
 }
 
-export async function enablePush(): Promise<PushState> {
-  const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
-  const perm = await Notification.requestPermission();
-  if (perm !== 'granted') return perm as PushState;
-  const key = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-  if (!key) return 'unsupported';
-  await navigator.serviceWorker.ready;
-  const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) }));
-  await api('/api/push/subscribe', { body: sub.toJSON() });
-  return 'granted';
+/** A registration still on its way, which signing out waits for (it would add the subscription back). */
+let registering: Promise<unknown> | null = null;
+
+export function enablePush(): Promise<PushState> {
+  const run = (async (): Promise<PushState> => {
+    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return perm as PushState;
+    const key = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    if (!key) return 'unsupported';
+    await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) }));
+    await api('/api/push/subscribe', { body: sub.toJSON() });
+    return 'granted';
+  })();
+  registering = run.catch(() => {});
+  return run;
+}
+
+const within = (p: Promise<unknown> | null, ms: number) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
+
+/**
+ * Before this browser signs out (W-199): remove its subscription from the account, end it here (the
+ * push service then drops anything still on its way to it) and close the notifications it already
+ * shows, which may hold the account's task details. `local` skips the server, for pages with no
+ * sign-in to ask with. Never throws, and waits for the server at most a few seconds, so signing out
+ * isn't held up: the server pushes only to sign-ins that are still live anyway.
+ */
+export async function forgetPushHere(opts: { local?: boolean } = {}): Promise<void> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  try {
+    await within(registering, 5000);
+    const reg = await navigator.serviceWorker.getRegistration('/');
+    if (!reg) return;
+    const sub = await reg.pushManager?.getSubscription().catch(() => null);
+    if (sub) {
+      if (!opts.local) {
+        const removed = fetch('/api/push/subscribe', {
+          method: 'DELETE',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ endpoint: sub.endpoint }),
+          credentials: 'same-origin',
+        }).catch(() => {});
+        await within(removed, 5000);
+      }
+      await sub.unsubscribe().catch(() => {});
+    }
+    for (const n of await reg.getNotifications().catch(() => [] as Notification[])) n.close();
+  } catch {}
 }
 
 /** Gentle one-time banner offering notifications (not shown inside the desktop app). */

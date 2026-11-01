@@ -93,14 +93,21 @@ export interface CommandLogs {
  * both count, as both come in). `stdout()` would collect all of it into this function, and what a command
  * prints in the agent's computer is the agent's to decide (W-191): past the limit the stream is closed and
  * the rest is never fetched.
+ *
+ * `signal` (the task's Stop or lost lease, and a time limit) ends a stream that stalls: the read then fails, as
+ * what came so far may not be all of it, even when the stream doesn't notice its signal.
  */
-export async function commandOutput(cmd: CommandLogs, maxBytes: number): Promise<{ stdout: string; truncated: boolean }> {
+export async function commandOutput(cmd: CommandLogs, maxBytes: number, signal?: AbortSignal): Promise<{ stdout: string; truncated: boolean }> {
+  signal?.throwIfAborted();
+  // Our own signal closes the stream once we are done with it; the caller's closes it too.
   const stop = new AbortController();
+  const logs = cmd.logs({ signal: signal ? AbortSignal.any([signal, stop.signal]) : stop.signal });
   let out = '';
   let size = 0;
   let truncated = false;
-  try {
-    for await (const line of cmd.logs({ signal: stop.signal })) {
+  const reading = (async () => {
+    for await (const line of logs) {
+      if (signal?.aborted) return; // a stream that ignored its signal; the read already failed
       size += Buffer.byteLength(line.data);
       if (size > maxBytes) {
         truncated = true;
@@ -108,7 +115,22 @@ export async function commandOutput(cmd: CommandLogs, maxBytes: number): Promise
       }
       if (line.stream === 'stdout') out += line.data;
     }
+  })();
+  let onAbort = () => {};
+  try {
+    if (signal) {
+      const stopped = new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      await Promise.race([reading, stopped]);
+    } else {
+      await reading;
+    }
+    // A stream closed by the signal may end quietly instead of failing.
+    signal?.throwIfAborted();
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     stop.abort();
   }
   return { stdout: out, truncated };

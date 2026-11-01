@@ -14,7 +14,8 @@ import { commandOutput, MB, readCapped, type CappedRead } from './capped-read';
 /**
  * How Wren runs its own commands in the agent's computer: without login or startup files, which are the agent's
  * to write and could print anything into this function (W-191). The agent's own commands (run.sh) still get a
- * login shell. What Wren reads back is also capped (`commandOutput`), as the agent can change any program there.
+ * login shell. They run through `inComputer`, which reads back only a capped amount, as the agent can change
+ * any program there.
  */
 const WREN_SH = ['--noprofile', '--norc', '-c'];
 
@@ -40,6 +41,10 @@ const SHARE_MAX = 50 * MB;
 /** Characters of one line read_file shows, and of its whole answer (room left for its notes). */
 const LINE_MAX = 2000;
 const READ_OUTPUT_MAX = MAX_TOOL_OUTPUT - 1000;
+/** The longest one of Wren's own small commands may take during a tool, its output read included (W-191). */
+const COMMAND_MS = 30_000;
+/** The same for the computer's setup and for clean-up, which must still run after a Stop. */
+const CLEANUP_MS = 60_000;
 
 /** Changes whenever the daemon code does, so a stale daemon in a persistent VM gets replaced. */
 const DAEMON_VERSION = createHash('sha256').update(BROWSER_DAEMON_TS).digest('hex').slice(0, 16);
@@ -201,7 +206,7 @@ export class SandboxHost implements ToolHost {
     try {
       const sb = await Sandbox.get({ name: SandboxHost.sandboxName(agentId), resume: false });
       if (sb.status === 'running') {
-        const r = await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, STOP_RUN_JOBS, 'stop', runId] });
+        const r = await inComputer(sb, 'bash', [...WREN_SH, STOP_RUN_JOBS, 'stop', runId], { limitMs: CLEANUP_MS });
         if (r.exitCode !== 0) return false;
       }
     } catch (e) {
@@ -228,12 +233,14 @@ export class SandboxHost implements ToolHost {
     if (this.sandbox && this.ready) return this.sandbox;
     this.sandbox = await SandboxHost.vm(SandboxHost.sandboxName(this.o.agentId), this.o.agentId, 'computer');
     // Idempotent per session: helper scripts live in $HOME/.wren.
-    const setup = await this.sandbox.runCommand({
-      cmd: 'bash',
+    const setup = await inComputer(
+      this.sandbox,
+      'bash',
       // Older versions ran the browser in this VM: stop it and drop its profile (cookies) for good.
-      args: [...WREN_SH, `pkill -f "node [b]rowser.ts" 2>/dev/null; rm -rf "$HOME/.wren/profile" "$HOME/.wren/browser.ts" "$HOME/.wren/browser.version"; mkdir -p ${WORKSPACE} "$HOME/.wren/jobs" && cat > "$HOME/.wren/run.sh" <<'WREN_EOF'\n${RUN_SH}WREN_EOF\nchmod +x "$HOME/.wren/run.sh" && echo "$HOME"`],
-    });
-    this.home = (await commandOutput(setup, 4096)).stdout.trim().split('\n').pop() || this.home;
+      [...WREN_SH, `pkill -f "node [b]rowser.ts" 2>/dev/null; rm -rf "$HOME/.wren/profile" "$HOME/.wren/browser.ts" "$HOME/.wren/browser.version"; mkdir -p ${WORKSPACE} "$HOME/.wren/jobs" && cat > "$HOME/.wren/run.sh" <<'WREN_EOF'\n${RUN_SH}WREN_EOF\nchmod +x "$HOME/.wren/run.sh" && echo "$HOME"`],
+      { limitMs: CLEANUP_MS, read: 4096 },
+    );
+    this.home = setup.stdout.trim().split('\n').pop() || this.home;
     this.ready = true;
     return this.sandbox;
   }
@@ -280,7 +287,7 @@ export class SandboxHost implements ToolHost {
     }
     if (name === 'computer.write_file' && typeof args.path === 'string') {
       const sb = await this.computer();
-      const r = await sb.runCommand({ cmd: 'test', args: ['-e', this.abs(args.path)] });
+      const r = await inComputer(sb, 'test', ['-e', this.abs(args.path)], { limitMs: COMMAND_MS });
       return { fileExists: r.exitCode === 0 };
     }
     return {};
@@ -312,8 +319,8 @@ export class SandboxHost implements ToolHost {
       case 'computer.write_file': {
         const sb = await this.computer();
         const path = this.abs(s('path'));
-        await sb.runCommand({ cmd: 'mkdir', args: ['-p', path.replace(/\/[^/]*$/, '') || '/'] });
-        await sb.writeFiles([{ path, content: Buffer.from(s('content')) }]);
+        await inComputer(sb, 'mkdir', ['-p', path.replace(/\/[^/]*$/, '') || '/'], { limitMs: COMMAND_MS, signal: ctx.signal });
+        await sb.writeFiles([{ path, content: Buffer.from(s('content')) }], { signal: toolSignal(ctx) });
         return { output: `Wrote ${Buffer.byteLength(s('content'))} bytes to ${path}.` };
       }
       case 'computer.edit_file': {
@@ -326,14 +333,14 @@ export class SandboxHost implements ToolHost {
         const count = text.split(s('old_text')).length - 1;
         if (!s('old_text') || count === 0) return { output: 'old_text was not found in the file.', isError: true };
         if (count > 1) return { output: `old_text appears ${count} times; include more context so it is unique.`, isError: true };
-        await sb.writeFiles([{ path, content: Buffer.from(text.replace(s('old_text'), () => s('new_text'))) }]);
+        await sb.writeFiles([{ path, content: Buffer.from(text.replace(s('old_text'), () => s('new_text'))) }], { signal: toolSignal(ctx) });
         return { output: `Edited ${path}.` };
       }
       case 'computer.list_files': {
         const sb = await this.computer();
         const depth = Math.max(1, Math.min(3, Number(args.depth) || 1));
-        const r = await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, `find ${shq(this.abs(s('path') || WORKSPACE))} -maxdepth ${depth} -not -path '*/node_modules/*' -not -path '*/.git/*' -printf '%y %s %p\\n' 2>&1 | head -500`] });
-        const listed = await commandOutput(r, 256 * 1024);
+        const find = `find ${shq(this.abs(s('path') || WORKSPACE))} -maxdepth ${depth} -not -path '*/node_modules/*' -not -path '*/.git/*' -printf '%y %s %p\\n' 2>&1 | head -500`;
+        const listed = await inComputer(sb, 'bash', [...WREN_SH, find], { limitMs: COMMAND_MS, signal: ctx.signal, read: 256 * 1024 });
         return { output: (listed.stdout || '(empty)') + (listed.truncated ? '\n[the listing was cut short; list a smaller folder]' : '') };
       }
       case 'computer.share_file': {
@@ -382,14 +389,19 @@ export class SandboxHost implements ToolHost {
       id = randomUUID().slice(0, 8);
       // No credentials go into the VM: GitHub access is only through the github.request tool,
       // which is risk-assessed and runs here.
-      await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, `setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`] });
+      // The launcher returns at once; the job it starts must outlive it, so the VM isn't asked to end it at a limit.
+      const launch = `setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`;
+      await inComputer(sb, 'bash', [...WREN_SH, launch], { limitMs: COMMAND_MS, signal: ctx.signal, outlives: true });
       if (background) return { output: `Started background job ${id}. Check it with computer.shell_status.`, meta: { job: id } };
       await ctx.checkpoint({ kind: 'job', handle: id, startedAt: started });
     }
     const limit = Math.min(Math.max(timeoutSec, 5), 1800) * 1000;
     let checked = Date.now();
     for (;;) {
-      const st = await this.readJob(id);
+      // A Stop or a lost lease: stop waiting, and leave the job to the run's clean-up (which stops it after a
+      // Stop) or to the worker that holds the run now.
+      if (ctx.signal?.aborted) return { output: `The task was stopped while waiting for job ${id}.`, isError: true };
+      const st = await this.readJob(id, ctx);
       if (st.exit !== null) return { output: formatJob(st.exit, st.log), isError: st.exit !== 0 };
       if (Date.now() - started > limit) {
         await this.stopJob(id);
@@ -410,18 +422,15 @@ export class SandboxHost implements ToolHost {
 
   private async stopJob(id: string) {
     const sb = await this.computer();
-    await sb.runCommand({ cmd: 'bash', args: [...WREN_SH, `${STOP_JOB}\nstopjob ${shq(id)}`] });
+    await inComputer(sb, 'bash', [...WREN_SH, `${STOP_JOB}\nstopjob ${shq(id)}`], { limitMs: CLEANUP_MS });
   }
 
-  private async readJob(id: string): Promise<{ exit: number | null; log: string; alive: boolean }> {
+  private async readJob(id: string, ctx: ToolContext): Promise<{ exit: number | null; log: string; alive: boolean }> {
     const sb = await this.computer();
     // Everything printed comes into this function, and the files are the agent's to write: the exit code and
     // pid are read as short numbers only, the log as its last 60 KB (W-191).
-    const r = await sb.runCommand({
-      cmd: 'bash',
-      args: [...WREN_SH, `${JOB_NUM}\nd=${JOB_DIR}; e=$(jobnum "$d/${id}.exit"); p=$(jobnum "$d/${id}.pid"); a=0; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && a=1; echo "$e|$a"; [ -f "$d/${id}.log" ] && tail -c 60000 -- "$d/${id}.log" 2>/dev/null`],
-    });
-    const out = (await commandOutput(r, 64 * 1024)).stdout;
+    const script = `${JOB_NUM}\nd=${JOB_DIR}; e=$(jobnum "$d/${id}.exit"); p=$(jobnum "$d/${id}.pid"); a=0; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && a=1; echo "$e|$a"; [ -f "$d/${id}.log" ] && tail -c 60000 -- "$d/${id}.log" 2>/dev/null`;
+    const out = (await inComputer(sb, 'bash', [...WREN_SH, script], { limitMs: COMMAND_MS, signal: ctx.signal, read: 64 * 1024 })).stdout;
     const nl = out.indexOf('\n');
     const [exit, alive] = (nl >= 0 ? out.slice(0, nl) : out).split('|');
     return { exit: /^\d+$/.test(exit ?? '') ? Number(exit) : null, alive: alive === '1', log: nl >= 0 ? out.slice(nl + 1) : '' };
@@ -432,7 +441,8 @@ export class SandboxHost implements ToolHost {
     const until = Math.min(Date.now() + waitSec * 1000, ctx.deadline - 8000);
     let checked = Date.now();
     for (;;) {
-      const st = await this.readJob(id);
+      if (ctx.signal?.aborted) return { output: `The task was stopped while waiting for job ${id}.`, isError: true };
+      const st = await this.readJob(id, ctx);
       if (st.exit !== null) return { output: `Job ${id} finished.\n${formatJob(st.exit, st.log)}` };
       if (Date.now() >= until) return { output: `Job ${id} is ${st.alive ? 'still running' : 'not running (it may have been interrupted)'}.\n${tail(st.log)}` };
       if (Date.now() - checked > 5000) {
@@ -596,6 +606,44 @@ function shq(s: string) {
  */
 function readLimits(ctx: ToolContext) {
   return { signal: ctx.signal, timeoutMs: Math.max(ctx.deadline - Date.now(), 30_000) };
+}
+
+/** For uploads into the agent's computer during a tool (W-191): the task's Stop or lost lease, and COMMAND_MS. */
+function toolSignal(ctx: ToolContext) {
+  const timeout = AbortSignal.timeout(COMMAND_MS);
+  return ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
+}
+
+/**
+ * Runs one of Wren's own commands in the agent's computer (W-191). Always detached: a `runCommand` that waits
+ * for the command adds everything it prints to strings in this function (SDK 3.5.1, before any reader sees
+ * it), and the agent has sudo there, so it can make any program print without end, bash included. Output comes
+ * only through `commandOutput`, at most `read` bytes (a command past that is killed: it printed more than it
+ * ever should); `wait` brings just the exit code.
+ *
+ * Every command has a time limit: the VM kills it at `limitMs` (except a launcher whose children must outlive
+ * it, `outlives`), and this function stops waiting shortly after even when the VM doesn't answer. `signal` (the
+ * task's Stop or lost lease) ends the wait at once. Clean-up and setup pass none, so a Stop doesn't cut them off.
+ */
+async function inComputer(
+  sb: Sandbox,
+  cmd: string,
+  args: string[],
+  o: { limitMs: number; signal?: AbortSignal; read?: number; outlives?: boolean },
+): Promise<{ exitCode: number | null; stdout: string; truncated: boolean }> {
+  const deadline = AbortSignal.timeout(o.limitMs + 5000);
+  const signal = o.signal ? AbortSignal.any([o.signal, deadline]) : deadline;
+  const c = await sb.runCommand({ cmd, args, detached: true, signal, ...(o.outlives ? {} : { timeoutMs: o.limitMs }) });
+  const kill = () => void c.kill('SIGKILL').catch(() => {});
+  try {
+    const out = o.read ? await commandOutput(c, o.read, signal) : undefined;
+    if (out?.truncated) kill();
+    const done = await c.wait({ signal });
+    return { exitCode: done.exitCode, stdout: out?.stdout ?? '', truncated: out?.truncated ?? false };
+  } catch (e) {
+    kill();
+    throw e;
+  }
 }
 
 /** The answer for a file read that didn't get the file; `tooLarge` says what to do instead. */

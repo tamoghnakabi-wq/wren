@@ -11,7 +11,7 @@ import { useApp } from './provider';
 import { supabase } from '@/lib/client/supabase';
 import { isLiveDevice } from '@/lib/client/types';
 import { paneShortcut, togglePane, usePaneCollapsed } from '@/lib/client/layout';
-import { PushPrompt } from './push';
+import { forgetPushHere, PushPrompt } from './push';
 import { DesktopLinkBanner } from './desktop-link';
 import { ChatGPTWelcome } from './chatgpt-ui';
 
@@ -247,6 +247,7 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
           <span className="min-w-0 flex-1 truncate text-[13px] text-muted rail:sr-only">{email}</span>
           <button
             onClick={async () => {
+              await forgetPushHere();
               await supabase().auth.signOut();
               router.replace('/login');
               router.refresh();

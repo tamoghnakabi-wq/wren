@@ -70,6 +70,10 @@ export class DeviceRunner {
   private engineRuns = new Set<string>();
   /** Why a run was stopped by this app (not by the user), reported as its outcome. */
   private stopReasons = new Map<string, string>();
+  /** Each running task's look at Stop and its lease (its keepalive's), by run id, so a wake can run them at once. */
+  private checks = new Map<string, () => void>();
+  /** Runs the heartbeat found stopped by the user, so they end cancelled whatever the cut-short call reports. */
+  private userStops = new Set<string>();
   private ticking = false;
   private again = false;
   /** Set while an update is being installed: no new work is picked up. */
@@ -90,6 +94,7 @@ export class DeviceRunner {
       .channel(d.channel, { config: { broadcast: { self: false } } })
       .on('broadcast', { event: 'wake' }, () => {
         log('wake');
+        this.checkRuns();
         void this.tick();
       })
       .subscribe((status, err) => {
@@ -113,6 +118,14 @@ export class DeviceRunner {
 
   abortAll() {
     for (const c of this.active.values()) c.abort();
+  }
+
+  /**
+   * A wake may be a Stop (the server sends one with it): every running task looks now, rather than at its
+   * next keepalive up to 45 s later, so a long command or model call is cut short at once.
+   */
+  checkRuns() {
+    for (const check of this.checks.values()) check();
   }
 
   /**
@@ -172,7 +185,10 @@ export class DeviceRunner {
       if (hb.work.length) log(`work: ${hb.work.map((w) => `${w.id.slice(0, 8)}:${w.status}${w.leased ? ':leased' : ''}`).join(', ')}`);
       for (const w of hb.work) {
         const running = this.active.get(w.id);
-        if (running && w.cancel) running.abort();
+        if (running && w.cancel) {
+          this.userStops.add(w.id);
+          running.abort();
+        }
         if (!running && !w.cancel && !this.suspended && this.active.size < 3 && (w.status === 'queued' || !w.leased)) void this.execute(w.id, hb.settings);
       }
     } catch (e) {
@@ -210,7 +226,8 @@ export class DeviceRunner {
       const store = new RemoteStore(runId, lease);
       // Keep the lease while long actions run (shell commands, model calls) and
       // notice Stop/lease loss promptly; the loop also checks between actions.
-      keepalive = setInterval(() => {
+      // A wake runs the same check at once (checkRuns); the keepalive is the fallback.
+      const check = () => {
         store
           .control()
           .then((ctl) => {
@@ -219,7 +236,9 @@ export class DeviceRunner {
             abort.abort();
           })
           .catch((e: { status?: number; code?: string }) => (e?.status === 409 || (e?.status === 401 && e.code === 'device_revoked')) && abort.abort());
-      }, 45_000);
+      };
+      this.checks.set(runId, check);
+      keepalive = setInterval(check, 45_000);
       store.localOnlyApprovals = () => !loadPolicy().remoteApprovals;
       store.onApproval = (id, req) => this.approvalPrompt(id, req, c, abort.signal);
       const model = c.run.model;
@@ -234,12 +253,14 @@ export class DeviceRunner {
       outcome = { kind: 'failed', error: (e as Error).message, steps: 0 };
     } finally {
       if (keepalive) clearInterval(keepalive);
+      this.checks.delete(runId);
       const stopped = this.stopReasons.get(runId);
       if (stopped) outcome = { kind: 'failed', error: stopped, code: 'permissions_changed', steps: outcome.steps };
       // Stop ends what was under way through the signal, and a model call cut short comes back as a failure (or
       // a retry as a hand-off): the run ends cancelled, as the user asked, like a cloud run (round 29).
-      else if (userStopped && outcome.kind !== 'completed' && outcome.kind !== 'cancelled') outcome = { kind: 'cancelled', steps: outcome.steps };
+      else if ((userStopped || this.userStops.has(runId)) && outcome.kind !== 'completed' && outcome.kind !== 'cancelled') outcome = { kind: 'cancelled', steps: outcome.steps };
       this.stopReasons.delete(runId);
+      this.userStops.delete(runId);
       this.engineRuns.delete(runId);
       // A finished run's commands (background ones included) end with it.
       if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') {

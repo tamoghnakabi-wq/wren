@@ -1,9 +1,10 @@
+import type postgres from 'postgres';
 import webpush from 'web-push';
 import { db } from './db';
 import { env } from './env';
 
-// Notifications: an in-app row (shown live through Realtime), a Web Push to
-// every subscribed browser/phone, and a wake-up for the user's desktop apps.
+// Notifications: an in-app row (shown live through Realtime), a Web Push to every browser/phone
+// subscribed from a sign-in that is still live, and a wake-up for the user's desktop apps.
 
 let vapidReady = false;
 function vapid() {
@@ -23,12 +24,21 @@ export interface NotifyInput {
   tag?: string;
 }
 
-export async function notifyUser(n: NotifyInput): Promise<void> {
+/**
+ * Saves the in-app notification and pushes it. With `when` (a SQL condition, e.g. that a worker still
+ * holds its run's lease) the row goes in only if the condition holds in that same statement, and
+ * nothing is pushed otherwise (W-200). Returns whether it was saved.
+ */
+export async function notifyUser(n: NotifyInput, when?: postgres.Fragment): Promise<boolean> {
   const sql = db();
-  await sql`
+  const rows = await sql`
     insert into public.notifications (user_id, kind, title, body, url, session_id)
-    values (${n.userId}, ${n.kind}, ${n.title.slice(0, 200)}, ${(n.body ?? '').slice(0, 2000)}, ${n.url ?? null}, ${n.sessionId ?? null})`;
+    select ${n.userId}::uuid, ${n.kind}, ${n.title.slice(0, 200)}, ${(n.body ?? '').slice(0, 2000)}, ${n.url ?? null}, ${n.sessionId ?? null}::uuid
+    where ${when ?? sql`true`}
+    returning id`;
+  if (!rows.length) return false;
   await sendPush(n).catch((e) => console.warn('push failed', e?.message));
+  return true;
 }
 
 /** Only the browsers' own push services: the server makes requests to these URLs. */
@@ -46,7 +56,9 @@ export function isPushServiceEndpoint(endpoint: string): boolean {
 export async function sendPush(n: NotifyInput): Promise<number> {
   if (!vapid()) return 0;
   const sql = db();
-  const subs = await sql`select id, endpoint, p256dh, auth from public.push_subscriptions where user_id = ${n.userId}`;
+  // Only browsers whose own sign-in is still live and has finished two-step sign-in (W-199): one that
+  // signed out, or whose session ended or was revoked, gets nothing more (migration 0013).
+  const subs = await sql`select id, endpoint, p256dh, auth from public.wren_push_targets(${n.userId}::uuid)`;
   const payload = JSON.stringify({ title: n.title, body: n.body ?? '', url: n.url ?? '/app', tag: n.tag ?? n.kind });
   let sent = 0;
   await Promise.all(

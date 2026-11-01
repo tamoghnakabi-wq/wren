@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { BellRing, Check, ExternalLink, FolderPlus, Laptop, Moon, RefreshCw, Sun, SunMoon, X } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { enablePush, pushState, type PushState } from '@/components/app/push';
+import { enablePush, forgetPushHere, pushState, type PushState } from '@/components/app/push';
 import { useApp } from '@/components/app/provider';
 import { SecuritySettings } from '@/components/app/security-settings';
 import { Badge, Button, Card, cx, Input, Label, PageHeader, Select, Switch, useConfirm, useToast } from '@/components/ui';
@@ -434,6 +434,7 @@ function Account() {
           size="sm"
           variant="secondary"
           onClick={async () => {
+            await forgetPushHere();
             await supabase().auth.signOut();
             router.replace('/login');
             router.refresh();
@@ -459,6 +460,8 @@ function Account() {
             setDeleting(true);
             try {
               await api('/api/account/settings', { method: 'DELETE', body: { confirm: 'DELETE' } });
+              // The account's subscriptions went with it; end this browser's and close what it shows.
+              await forgetPushHere({ local: true });
               await supabase().auth.signOut();
               router.replace('/');
             } catch (e) {

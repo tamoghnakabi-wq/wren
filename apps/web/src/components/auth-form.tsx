@@ -3,10 +3,11 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Eye, EyeOff, MailCheck } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { mfaInfo } from '@/lib/client/mfa';
 import { safeNext } from '@/lib/next-path';
 import { supabase } from '@/lib/client/supabase';
+import { forgetPushHere } from './app/push';
 import { Logo } from './brand';
 import { Button, Input, Label } from './ui';
 
@@ -37,6 +38,12 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
   const [showPassword, setShowPassword] = useState(false);
   const sb = supabase();
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  // Nobody is signed in on this page (the proxy sends a signed-in browser to the app), so any push
+  // subscription here is left from a sign-in that ended without signing out here, e.g. one revoked
+  // elsewhere (W-199): end it and close what it shows. The app subscribes again after signing in.
+  useEffect(() => {
+    void forgetPushHere({ local: true });
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

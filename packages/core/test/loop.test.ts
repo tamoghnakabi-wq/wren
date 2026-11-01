@@ -148,6 +148,45 @@ describe('agent loop', () => {
       }
   });
 
+  it('starts no action once the signal aborted while the last Stop check was still reading the store (W-194)', async () => {
+    // The last look before the action: its read of the store is slow, the Stop (or a lost lease) aborts the
+    // signal meanwhile, and the read then answers with what it saw before, no Stop.
+    class SlowLastLook extends MemStore {
+      armed = false;
+      held?: () => void;
+      constructor(private readonly signal: AbortSignal) {
+        super();
+      }
+      async update(id: string, patch: { data?: unknown; status?: string }) {
+        await super.update(id, patch);
+        if (patch.status === 'running') this.armed = true; // the next read is the one right before the action
+      }
+      control() {
+        if (!this.armed) return super.control();
+        this.armed = false;
+        return new Promise<{ cancel: boolean; pause: boolean }>((resolve) => {
+          this.signal.addEventListener('abort', () => resolve({ cancel: false, pause: false }), { once: true });
+          this.held?.();
+        });
+      }
+    }
+    for (const runtime of ['cloud', 'desktop'] as const) {
+      const stop = new AbortController();
+      const store = new SlowLastLook(stop.signal);
+      const reading = new Promise<void>((r) => (store.held = r));
+      await store.userSays('write the notes');
+      const model = new ScriptModel([{ calls: [{ name: 'computer.write_file', args: { path: 'notes.txt', content: 'hi' } }] }, { text: 'Done.' }]);
+      const host = Object.assign(new FakeHost(), { runtime });
+      const opts = { autonomy: 'autonomous' as const, signal: stop.signal, tools: toolCatalog({ runtime, tools: DEFAULT_TOOLS, githubConnected: false }) };
+      const out = base(store, model, host as ToolHost, opts);
+      await reading;
+      stop.abort();
+      expect((await out).kind, runtime).toBe('cancelled');
+      expect(host.ran, runtime).toEqual([]);
+      expect(store.events_.find((e) => e.type === 'tool')!.status, runtime).toBe('cancelled');
+    }
+  });
+
   it('reports a notification or a saved memory cut off by a crash as interrupted, not done twice (W-195)', async () => {
     // The worker dies after the effect, before the call is recorded as done.
     class DiesOnce extends MemStore {

@@ -347,9 +347,12 @@ async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (
   if (ev.status !== 'running') await o.store.update(ev.id, { status: 'running', data: { ...d, startedAt } });
   d.startedAt = startedAt;
   // A Stop can come while the approval is read, the page is checked or this call is marked running: from
-  // here on nothing waits before the action starts, so look once more (W-194). A Stop after this point can
-  // still let it start; one the host is told about (signal, isCancelled) ends what it can.
-  if (o.signal?.aborted || (await o.store.control()).cancel) return 'cancelled';
+  // here on nothing waits before the action starts, so look once more (W-194). The store is read first and
+  // the signal after it: a Stop or lost lease that aborts the signal while this read is pending (and the read
+  // still answers no) must count too. A Stop after this point can still let it start; one the host is told
+  // about (signal, isCancelled) ends what it can.
+  const ctl = await o.store.control();
+  if (ctl.cancel || o.signal?.aborted) return 'cancelled';
 
   // Built-in task and memory tools run here, independent of the host.
   try {

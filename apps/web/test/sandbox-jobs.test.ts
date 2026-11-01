@@ -16,19 +16,21 @@ let home = '';
 const printed: number[] = [];
 
 const box = {
-  async runCommand(o: { cmd: string; args: string[] }) {
+  async runCommand(o: { cmd: string; args: string[]; detached?: boolean }) {
     const script = o.args[o.args.indexOf('-c') + 1] ?? o.args[1] ?? '';
+    // Never a command waited for: the SDK would collect all of its output first (W-191).
+    expect(o.detached).toBe(true);
     // Wren's own commands there read no login or startup files (W-191).
     expect(o.args.slice(0, 3)).toEqual(['--noprofile', '--norc', '-c']);
     // The host's one-time setup (it writes run.sh and stops an old browser) isn't run here.
-    if (script.includes('run.sh')) return { exitCode: 0, stdout: async () => `${home}\n`, logs: async function* () { yield { stream: 'stdout', data: `${home}\n` }; } };
+    if (script.includes('run.sh')) return { wait: async () => ({ exitCode: 0 }), kill: async () => {}, logs: async function* () { yield { stream: 'stdout', data: `${home}\n` }; } };
     const out = await new Promise<Buffer>((resolve) =>
       execFile('bash', ['-c', script], { env: { HOME: home, PATH: process.env.PATH ?? '/usr/bin:/bin', NODE_ENV: 'test' }, cwd: home, encoding: 'buffer', maxBuffer: 512 * MB, timeout: 5000 }, (_e, stdout) => resolve(stdout ?? Buffer.alloc(0))),
     );
     printed.push(out.byteLength);
     return {
-      exitCode: 0,
-      stdout: async () => out.toString('utf8'),
+      wait: async () => ({ exitCode: 0 }),
+      kill: async () => {},
       // As the SDK streams it: in pieces, so a reader can stop early.
       logs: async function* () {
         for (let i = 0; i < out.byteLength; i += 64 * 1024) yield { stream: 'stdout', data: out.subarray(i, i + 64 * 1024).toString('utf8') };

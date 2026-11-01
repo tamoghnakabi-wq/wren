@@ -5,7 +5,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
 import * as chatgpt from './chatgpt';
-import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, saveDevice, savePolicy, type Policy } from './config';
+import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, readPolicy, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
 import { engineProgram } from '../engines/program';
 import { closeBrowser, stopAllJobs } from './host';
@@ -712,6 +712,14 @@ function reportUnconfirmedQuit() {
   }
 }
 
+/** The saved permissions couldn't be read, so agents here get none until the user turns them on again (W-201): say so once. */
+function reportUnreadablePolicy() {
+  console.warn('[wren] policy.json could not be read; agents get no permissions until they are turned on again');
+  if (Notification.isSupported()) {
+    new Notification({ title: 'Wren couldn’t read this computer’s settings', body: 'Agents on this computer can’t use the terminal, the browser, the screen, remote approvals or any folders until you turn them on again in Settings.' }).show();
+  }
+}
+
 /** No installer from an earlier Wren is at work, or it finished within `ms`. */
 async function installerFinished(ms: number): Promise<boolean> {
   const end = Date.now() + ms;
@@ -774,7 +782,8 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
     // Development/test aid: print a pairing code to approve from a signed-in session.
     pairing.start().then((p) => console.log(`WREN_PAIR_CODE=${p.userCode}`), (e) => console.error('pairing failed', e));
   }
-  const policy = loadPolicy();
+  const { policy, state } = readPolicy();
+  if (state === 'unreadable') reportUnreadablePolicy();
   if (policy.launchAtLogin) app.setLoginItemSettings({ openAtLogin: true });
   try {
     updater.cleanup();

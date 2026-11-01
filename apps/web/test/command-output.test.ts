@@ -37,4 +37,45 @@ describe('reading a command’s output from the agent’s computer', () => {
     const r = await commandOutput(cmd, 4096);
     expect(r).toEqual({ stdout: 'x'.repeat(20), truncated: false });
   });
+
+  it("fails at once when the caller's signal aborts while the stream is held, and ends the stream (W-191)", async () => {
+    // A stream that sends one line and then nothing more: one that ignores its signal, and one that ends
+    // quietly when its signal aborts (either way the output read so far is not all of it).
+    for (const ends of ['never', 'quietly'] as const) {
+      let given: AbortSignal | undefined;
+      let sent = () => {};
+      const first = new Promise<void>((r) => (sent = r));
+      const cmd = {
+        logs: (opts?: { signal?: AbortSignal }) =>
+          (async function* () {
+            given = opts?.signal;
+            yield { stream: 'stdout', data: 'partial ' };
+            sent();
+            await new Promise<void>((r) => {
+              if (ends === 'quietly') given?.addEventListener('abort', () => r(), { once: true });
+            });
+          })(),
+      };
+      const stop = new AbortController();
+      const reading = commandOutput(cmd, 4096, stop.signal).then(
+        (r) => ({ resolved: r }),
+        (e: Error) => ({ rejected: e.name }),
+      );
+      await first;
+      stop.abort();
+      const r = await Promise.race([reading, new Promise((r) => setTimeout(() => r('still reading'), 1000))]);
+      expect(r, ends).toEqual({ rejected: 'AbortError' });
+      expect(given?.aborted, ends).toBe(true); // the SDK's request for the stream ends too
+    }
+    // Already stopped: the stream isn't asked for.
+    let asked = false;
+    const lazy = {
+      logs: () => {
+        asked = true;
+        return command(1, 1).logs();
+      },
+    };
+    await expect(commandOutput(lazy, 4096, AbortSignal.abort())).rejects.toThrow();
+    expect(asked).toBe(false);
+  });
 });
