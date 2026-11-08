@@ -21,6 +21,9 @@ import { approveScriptPath } from '../engines/claude-code';
 const DIST = __dirname;
 setApproveScript(approveScriptPath(DIST));
 
+/** The Electron version package.json pins, set by scripts/build.mjs. */
+declare const __WREN_ELECTRON__: string | undefined;
+
 // `Wren --selftest`: boot, check the packaged pieces, print JSON, exit (used by CI on each OS).
 if (process.argv.includes('--selftest')) {
   app.whenReady().then(async () => {
@@ -49,6 +52,10 @@ if (process.argv.includes('--selftest')) {
     const browser = process.argv.includes('--browser') ? await browserSelfTest().catch((e: Error) => ({ ok: false, error: e.message })) : undefined;
     const result = {
       version: app.getVersion(),
+      // The packaged Electron must be the one package.json pins (a stale pin in electron-builder.json
+      // once shipped an older one in every release).
+      electron: process.versions.electron,
+      electronExpected: typeof __WREN_ELECTRON__ === 'string' ? __WREN_ELECTRON__ : null,
       platform: process.platform,
       arch: process.arch,
       appUrl: APP_URL,
@@ -63,7 +70,7 @@ if (process.argv.includes('--selftest')) {
       ...(browser && { browser }),
     };
     process.stdout.write(JSON.stringify(result) + '\n');
-    app.exit(result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) && (!browser || browser.ok) ? 0 : 1);
+    app.exit(result.electron === result.electronExpected && result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) && (!browser || browser.ok) ? 0 : 1);
   });
 }
 /** Start the approval server like Claude Code would and ask it once; true when Wren's answer comes back. */

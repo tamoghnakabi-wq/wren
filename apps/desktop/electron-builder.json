@@ -2,7 +2,6 @@
   "appId": "app.wren.desktop",
   "productName": "Wren",
   "copyright": "Copyright © 2026 Tamoghna Kabi",
-  "electronVersion": "44.5.1",
   "directories": { "app": "app", "output": "release", "buildResources": "build" },
   "files": ["dist-electron/**", "build/**", "package.json", "node_modules/**"],
   "asar": true,
