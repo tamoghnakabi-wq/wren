@@ -5,6 +5,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { deviceJson, publicJson } from './api';
 import { menuTemplate, updateMenuItem, updatePrompts, type Prompt } from './appmenu';
+import { guardWindow } from './window-guard';
 import * as chatgpt from './chatgpt';
 import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, permissionsReduced, readPolicy, saveDevice, savePolicy, type Policy } from './config';
 import { stopAllEngines } from '../engines/common';
@@ -370,20 +371,11 @@ function createWindow(path = '/app') {
   win.once('ready-to-show', () => win?.show());
   void win.loadURL(`${APP_URL}${path}`);
 
-  // Only our own origin may load in the window; everything else opens in the browser.
-  win.webContents.on('will-navigate', (e, url) => {
-    if (new URL(url).origin !== APP_ORIGIN) {
-      e.preventDefault();
-      if (/^https?:/.test(url)) void shell.openExternal(url);
-    }
-  });
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
-    if (code === -3) return; // aborted navigation
-    void win?.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(offlinePage(desc, url))}`);
+  // Only our own origin may load in the window (also through a redirect); everything else opens in the browser.
+  guardWindow(win.webContents, {
+    origin: APP_ORIGIN,
+    openExternal: (url) => void shell.openExternal(url),
+    offline: (desc, url) => void win?.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(offlinePage(desc, url))}`),
   });
   win.on('close', (e) => {
     if (!quitting) {

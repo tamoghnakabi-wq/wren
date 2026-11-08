@@ -8,6 +8,13 @@ import { Card, formatTokens, PageHeader, Skeleton } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { sourceInfo } from '@/lib/client/sources';
+import { dayLabel, lastDays, USAGE_DAYS } from '@/lib/usage-days';
+
+/** What /api/usage answers: the days shown (the account's own calendar days) and the rows for them. */
+interface Usage {
+  days: string[];
+  rows: UsageRow[];
+}
 
 /** One day × agent × source × model, summed by /api/usage. */
 interface UsageRow {
@@ -34,36 +41,36 @@ const BILLED_BY: Record<string, string> = {
   test: 'Test model',
 };
 
-const fmtDay = (d: string) => new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const fmtDay = dayLabel;
 
 export default function UsagePage() {
   const { userId, agentById } = useApp();
   // The newest usage row (live) only tells us when to re-fetch the totals.
   const latest = useLive<{ id: string }>({ table: 'usage_records', select: 'id', eq: { user_id: userId }, order: { column: 'created_at' }, limit: 1, realtimeFilter: { column: 'user_id', value: userId } });
-  const [recent, setRecent] = useState<UsageRow[] | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const changeKey = latest.rows.map((r) => r.id).join();
   useEffect(() => {
     let live = true;
-    api<{ rows: UsageRow[] }>('/api/usage')
-      .then((r) => live && setRecent(r.rows))
-      .catch(() => live && setRecent((cur) => cur ?? []));
+    api<Usage>('/api/usage')
+      .then((r) => live && setUsage(r))
+      // Nothing to show, but the chart still has its days (this browser's own, as the server didn't say).
+      .catch(() => live && setUsage((cur) => cur ?? { days: lastDays(USAGE_DAYS), rows: [] }));
     return () => {
       live = false;
     };
   }, [changeKey]);
-  const rows = { loading: recent === null };
+  const recent = usage?.rows ?? null;
+  const rows = { loading: usage === null };
 
-  // "Today" as of when the page opened (read once, not on every render).
-  const [now] = useState(() => Date.now());
+  // The server's days: the account's calendar days, the last one its today.
   const byDay = useMemo(() => {
-    const m = new Map<string, number>();
-    for (let i = 29; i >= 0; i--) m.set(new Date(now - i * 86400_000).toISOString().slice(0, 10), 0);
-    for (const r of recent ?? []) {
+    const m = new Map<string, number>((usage?.days ?? []).map((d) => [d, 0]));
+    for (const r of usage?.rows ?? []) {
       const k = r.day;
       if (m.has(k)) m.set(k, m.get(k)! + r.input_tokens + r.output_tokens);
     }
     return [...m.entries()];
-  }, [recent, now]);
+  }, [usage]);
   const peak = byDay.reduce((p, d) => (d[1] > p[1] ? d : p), ['', 0] as [string, number]);
   const max = Math.max(1, ...byDay.map(([, v]) => v));
   const group = (key: (r: UsageRow) => string) => {
@@ -119,7 +126,7 @@ export default function UsagePage() {
             <div key={d} className="group relative flex-1">
               <div className="w-full rounded-t-[3px] bg-brand/80 transition group-hover:bg-brand" style={{ height: `${Math.max(v ? 3 : 1, (v / max) * 120)}px`, opacity: v ? 1 : 0.25 }} />
               <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 hidden -translate-x-1/2 rounded-md bg-primary px-2 py-1 text-[11px] whitespace-nowrap text-primary-fg group-hover:block">
-                {new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}: {formatTokens(v)}
+                {fmtDay(d)}: {formatTokens(v)}
               </span>
             </div>
           ))}

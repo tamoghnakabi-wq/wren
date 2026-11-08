@@ -10,14 +10,18 @@ on:
         type: boolean
         default: false
 
+# Read-only by default: the test and build jobs run third-party code from npm, which must not get a
+# token that can push to the repository or change releases. Only the publish job, which installs
+# nothing, can write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci
@@ -31,6 +35,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with: { persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci
@@ -64,6 +69,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with: { persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci
@@ -116,10 +122,13 @@ jobs:
 
   publish:
     needs: [mac, windows]
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { persist-credentials: false }
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
       - name: Sign update manifest
