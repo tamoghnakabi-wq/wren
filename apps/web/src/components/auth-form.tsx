@@ -34,6 +34,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(params.get('error'));
+  const notice = mode === 'login' && params.get('notice') === 'confirmed' ? 'Your email is confirmed. Sign in to continue.' : null;
   const [sent, setSent] = useState<'confirm' | 'reset' | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const sb = supabase();
@@ -54,7 +55,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
         const { data, error } = await sb.auth.signUp({
           email,
           password,
-          options: { data: { name: name.trim() }, emailRedirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}` },
+          options: { data: { name: name.trim() }, emailRedirectTo: `${origin}/auth/callback?signup=1&next=${encodeURIComponent(next)}` },
         });
         if (error) throw error;
         if (data.session) {
@@ -148,6 +149,11 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
           </p>
         )}
       </div>
+      {notice && !error && (
+        <p role="status" className="animate-in rounded-xl bg-success-soft px-3 py-2 text-[13px] text-success">
+          {notice}
+        </p>
+      )}
       {error && (
         <p id="auth-error" role="alert" className="animate-in rounded-xl bg-danger-soft px-3 py-2 text-[13px] text-danger">
           {error}
