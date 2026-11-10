@@ -66,7 +66,11 @@ describe('sending a file to Wren', () => {
     expect(seen[0].body).toEqual({ runId: run.runId, name: 'export.zip', size: data.length });
     expect(seen[1].body).toEqual({ runId: run.runId, id: 'big-1', name: 'export.zip', kind: 'file' });
     expect(put).toHaveBeenCalledTimes(1);
-    expect(put).toHaveBeenCalledWith('u/user/big-1/export.zip', data, { access: 'private', token: 'one-place-token' });
+    // The same buffer, checked by identity: comparing 4 MB byte by byte took seconds (and timed out in CI).
+    const [pathname, sent, options] = put.mock.calls[0] as unknown as [string, Buffer, object];
+    expect(pathname).toBe('u/user/big-1/export.zip');
+    expect(sent).toBe(data);
+    expect(options).toEqual({ access: 'private', token: 'one-place-token' });
   });
 
   it('nothing is sent to the store when Wren refuses the upload (a lost lease)', async () => {
