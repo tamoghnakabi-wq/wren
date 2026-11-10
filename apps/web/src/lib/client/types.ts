@@ -116,8 +116,9 @@ export interface Device {
 
 export interface DeviceCapabilities {
   chatgpt?: { signedIn: boolean; email?: string; planUsage?: boolean; models?: { id: string; name: string }[] };
-  claudeCode?: { installed: boolean; version?: string; loggedIn?: boolean };
-  grokBuild?: { installed: boolean; version?: string; loggedIn?: boolean };
+  /** `models`: what the CLI itself lists for the signed-in account (desktop app 0.1.43+). */
+  claudeCode?: { installed: boolean; version?: string; loggedIn?: boolean; models?: { id: string; name: string; description?: string }[] };
+  grokBuild?: { installed: boolean; version?: string; loggedIn?: boolean; models?: { id: string; name: string; description?: string }[] };
   local?: { baseUrl: string; reachable: boolean; models?: { id: string; name: string }[] };
   browser?: { available: boolean; name?: string };
 }

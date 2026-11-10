@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -28,6 +28,8 @@ export interface EngineRun {
   autonomy: Autonomy;
   instructions: string;
   model: string;
+  /** How hard the model thinks (the agent's Effort setting); unset leaves the CLI's own default. */
+  effort?: 'low' | 'medium' | 'high';
   prompt: string;
   /** Images the user attached to the messages in `prompt`. */
   images?: EngineImage[];
@@ -174,14 +176,42 @@ function shellPrefix(): string {
   return file;
 }
 
-let restrictedSupport: { cli: string; ok: boolean } | null = null;
+const helpTexts = new Map<string, string>();
+/** An engine CLI's help text (Grok's for agent mode), read once per program: which flags this version has. */
+function cliHelp(engine: Engine, cli: string): string {
+  // Keyed by the file the link points to: an update installs a new version and moves the link.
+  let key = cli;
+  try {
+    key = realpathSync(cli);
+  } catch {
+    /* keep the path */
+  }
+  let text = helpTexts.get(key);
+  if (text === undefined) {
+    const help = spawnSync(cli, engine === 'claude-code' ? ['--help'] : ['agent', '--help'], { encoding: 'utf8', env: engineEnv(engine), timeout: 20_000 });
+    text = `${help.stdout ?? ''}${help.stderr ?? ''}`;
+    helpTexts.set(key, text);
+  }
+  return text;
+}
+
+/** Whether this version of the CLI has a command-line flag (from its help text). */
+export function cliHasFlag(engine: Engine, cli: string, flag: string): boolean {
+  return new RegExp(`(^|\\s)${flag}\\b`, 'm').test(cliHelp(engine, cli));
+}
+
 /** Claude Code's --restricted mode (2.1.2xx+): no settings files, file tools confined to the working folders. */
 export function claudeSupportsRestricted(cli: string): boolean {
-  if (restrictedSupport?.cli !== cli) {
-    const help = spawnSync(cli, ['--help'], { encoding: 'utf8', env: engineEnv('claude-code'), timeout: 20_000 });
-    restrictedSupport = { cli, ok: /--restricted\b/.test(`${help.stdout}${help.stderr}`) };
-  }
-  return restrictedSupport.ok;
+  return cliHasFlag('claude-code', cli, '--restricted');
+}
+
+/**
+ * The flag that sets how hard the CLI's model thinks: Claude Code `--effort`, Grok Build `--reasoning-effort`
+ * (both take low, medium and high). Null for a version without it, which then keeps its own default.
+ */
+export function effortFlag(engine: Engine, cli: string): string | null {
+  const flag = engine === 'claude-code' ? '--effort' : '--reasoning-effort';
+  return cliHasFlag(engine, cli, flag) ? flag : null;
 }
 
 /**

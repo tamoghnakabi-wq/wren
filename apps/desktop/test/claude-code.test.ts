@@ -102,6 +102,7 @@ vi.mock('../src/engines/common', () => {
   return {
     TimelineWriter,
     claudeSupportsRestricted: () => true,
+    effortFlag: () => '--effort',
     decide: async () => ({ allow: true }),
     startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
     spawnClaude: async (_cli: string, args: string[]) => {
@@ -244,5 +245,16 @@ describe('Claude Code to-do list', () => {
       ],
     });
     expect(h.plans[0]).toEqual({ items: [{ id: '7', text: 'Earlier task', status: 'in_progress' }, { id: '1', text: 'Count lines', status: 'pending' }] });
+  });
+});
+
+describe('Claude Code model and effort', () => {
+  it("passes the agent's model and effort; the plan default passes neither", async () => {
+    await runClaudeCode(engineRun('hello', { runId: 'r-model', model: 'claude-fable-5-2', effort: 'medium' }), () => true, '/dev/null');
+    expect(h.args[h.args.indexOf('--model') + 1]).toBe('claude-fable-5-2');
+    expect(h.args[h.args.indexOf('--effort') + 1]).toBe('medium');
+    await runClaudeCode(engineRun('hello', { runId: 'r-default' }), () => true, '/dev/null');
+    expect(h.args).not.toContain('--model');
+    expect(h.args).not.toContain('--effort');
   });
 });

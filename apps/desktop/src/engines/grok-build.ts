@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import readline from 'node:readline';
 import type { LoopOutcome } from '@wren/core';
 import { dataDir } from '../main/config';
-import { decide, finishEngine, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { decide, effortFlag, finishEngine, spawnEngine, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 import { engineProgram } from './program';
 
 // Grok Build engine: drives xAI's official `grok` CLI through its documented
@@ -102,6 +102,8 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     writeFileSync(join(pluginDir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: hookCmd, timeout: 3600 }] }] } }));
     const args = ['--no-auto-update', 'agent'];
     if (run.model && run.model !== 'default') args.push('-m', run.model);
+    const effort = run.effort && effortFlag('grok-build', cli);
+    if (effort) args.push(effort, run.effort!);
     args.push('--always-approve', '--plugin-dir', pluginDir, 'stdio');
     proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token }, [pluginDir]);
   } catch (e) {

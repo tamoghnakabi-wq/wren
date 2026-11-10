@@ -57,7 +57,7 @@ const dir = mkdtempSync(join(tmpdir(), 'wren-grok-test-'));
 const agentPath = join(dir, 'fake-grok.cjs');
 writeFileSync(agentPath, AGENT);
 
-const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0, bridgesOpen: 0, spawnFails: false }));
+const h = vi.hoisted(() => ({ log: [] as string[], spawned: 0, bridgesOpen: 0, spawnFails: false, args: [] as string[], effortFlag: '--reasoning-effort' as string | null }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 // The CLI here is a stand-in script, not an installed program: which program Wren may start is tested on its own.
 vi.mock('../src/engines/program', () => ({ engineProgram: async () => ({ program: '/fake/grok' }) }));
@@ -90,9 +90,11 @@ vi.mock('../src/engines/common', () => {
     TimelineWriter,
     decide: async () => ({ allow: true }),
     startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
-    spawnEngine: async () => {
+    effortFlag: () => h.effortFlag,
+    spawnEngine: async (_engine: string, _cli: string, args: string[]) => {
       if (h.spawnFails) throw new Error('spawn failed');
       h.spawned++;
+      h.args = args;
       return spawn(process.execPath, [agentPath], { stdio: ['pipe', 'pipe', 'pipe'] });
     },
     stopEngine: async (p: { kill: () => void }) => p.kill(),
@@ -211,5 +213,28 @@ describe('Grok Build follow-ups', () => {
     expect(outcome).toMatchObject({ kind: 'completed' });
     expect(saved).toEqual(['s-new']);
     expect(h.log[0]).toBe('text:New reply.');
+  });
+});
+
+describe('Grok Build model and effort', () => {
+  it("passes the agent's model and effort to grok agent", async () => {
+    const { run: r } = run();
+    await runGrokBuild({ ...r, model: 'grok-4.7', effort: 'low' }, () => true, '/dev/null');
+    expect(h.args.slice(0, 6)).toEqual(['--no-auto-update', 'agent', '-m', 'grok-4.7', '--reasoning-effort', 'low']);
+    expect(h.args.at(-1)).toBe('stdio');
+  });
+
+  it("leaves both to Grok when they aren't set, or when this version has no effort flag", async () => {
+    const { run: r } = run();
+    await runGrokBuild(r, () => true, '/dev/null');
+    expect(h.args).not.toContain('-m');
+    expect(h.args).not.toContain('--reasoning-effort');
+    h.effortFlag = null;
+    try {
+      await runGrokBuild({ ...run().run, effort: 'high' }, () => true, '/dev/null');
+      expect(h.args).not.toContain('high');
+    } finally {
+      h.effortFlag = '--reasoning-effort';
+    }
   });
 });

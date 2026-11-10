@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
 import { GithubMark as Github } from '../brand';
-import { createContext, useContext, useId, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useId, useMemo, useState } from 'react';
 import type { Approval, EventRow, PlanItem } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { Markdown } from '../markdown';
@@ -169,11 +169,43 @@ export function Timeline({ events, agent, approvals, working, waitingFor, stoppe
       {showThinking && !waitingFor && (
         <div className="fade-in flex items-center gap-3 pl-1" role="status">
           {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={toolRunning ? 'working' : 'thinking'} seed={agent.name} />}
-          <span className="text-shimmer text-sm font-medium">{toolRunning ? 'Working…' : 'Thinking…'}</span>
+          <QuietFor key={last ? `${last.id}:${last.updated_at}` : 'start'} at={last?.updated_at ?? last?.created_at} thinking={!toolRunning} />
         </div>
       )}
     </div>
     </EndedRuns.Provider>
+  );
+}
+
+const elapsed = (s: number) =>
+  s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${Math.floor(s / 3600)}h ${String(Math.floor(s / 60) % 60).padStart(2, '0')}m`;
+
+/**
+ * "Thinking…" with how long it has been since the agent's last step. Some models think for minutes between
+ * steps without showing any of it (Grok Build at its default effort), which otherwise looks frozen.
+ */
+function QuietFor({ at, thinking }: { at?: string; thinking: boolean }) {
+  // The step's server time, or when this page saw it if that's earlier: a clock here running behind the
+  // server's would otherwise show nothing. After a reload the server time still counts the whole wait.
+  const [since] = useState(() => Math.min(Date.now(), Date.parse(at ?? '') || Date.now()));
+  const [now, setNow] = useState(since);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const secs = Math.max(0, Math.floor((now - since) / 1000));
+  return (
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <span className="flex items-baseline gap-2">
+        <span className="text-shimmer text-sm font-medium">{thinking ? 'Thinking…' : 'Working…'}</span>
+        {secs >= 10 && (
+          <span className="text-[12.5px] text-faint tabular-nums" aria-hidden>
+            {elapsed(secs)}
+          </span>
+        )}
+      </span>
+      {thinking && secs >= 90 && <span className="fade-in text-[12.5px] text-faint">Some models think for minutes between steps. A lower Effort in the agent’s settings makes it quicker.</span>}
+    </span>
   );
 }
 

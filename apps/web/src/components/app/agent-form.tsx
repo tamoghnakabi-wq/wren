@@ -5,7 +5,7 @@ import { Check, Cloud, Info, Laptop, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
-import { ENGINE_MODELS, SOURCES, sourceInfo } from '@/lib/client/sources';
+import { engineModels, SOURCES, sourceInfo, type ModelChoice } from '@/lib/client/sources';
 import type { Agent, Connection } from '@/lib/client/types';
 import { AGENT_COLORS } from '../agent-avatar';
 import { CHARACTER_KEYS, CHARACTERS, characterFor, MOOD_LABEL, type CharacterKey, type Mood } from '@/lib/characters';
@@ -221,6 +221,12 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   const chatgptModels = useMemo(() => devices.flatMap((d) => d.capabilities?.chatgpt?.models ?? []), [devices]);
   const localModels = useMemo(() => devices.flatMap((d) => d.capabilities?.local?.models ?? []), [devices]);
   const anyDevice = devices.length > 0;
+  const engine = source === 'claude-code' || source === 'grok-build';
+  // Claude Code and Grok Build: the models each computer's CLI lists for the user's account.
+  const engineList = useMemo(
+    () => (engine ? engineModels(source, devices.map((d) => (source === 'claude-code' ? d.capabilities?.claudeCode?.models : d.capabilities?.grokBuild?.models)), draft.model.model || undefined) : null),
+    [engine, source, devices, draft.model.model],
+  );
 
   const available = SOURCES.filter((s) => {
     if (s.id === 'test') return flags.testModel;
@@ -231,7 +237,7 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   // Engines and local servers list their models right here; other providers are asked.
   // An agent still set to Wren credits while they're off (lib/platform-credits.ts): say so, ask for another brain.
   const creditsOff = source === 'platform' && !flags.platform;
-  const known = !source || creditsOff ? [] : ENGINE_MODELS[source] ?? (source === 'local' ? localModels : null);
+  const known: ModelChoice[] | null = !source || creditsOff ? [] : engineList ?? (source === 'local' ? localModels : null);
   const knownNote = source === 'local' && !localModels.length ? 'No local models found. Start LM Studio or Ollama on your computer, then check Settings in the desktop app.' : null;
   const fetchKey = known ? null : JSON.stringify([source, draft.model.connectionId, connections.length, chatgptModels.length]);
   const [fetched, setFetched] = useState<{ key: string; models: { id: string; name: string }[]; note: string | null } | null>(null);
@@ -261,7 +267,8 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   }, [fetchKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const current = fetched?.key === fetchKey ? fetched : null;
-  const models = known ?? current?.models ?? [];
+  const models: ModelChoice[] = known ?? current?.models ?? [];
+  const chosen = models.find((m) => m.id === draft.model.model);
   const note = known ? knownNote : current?.note ?? null;
   const loading = !!fetchKey && !current;
 
@@ -355,16 +362,17 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
                 <option value="">Choose a model…</option>
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name === m.id ? m.id : `${m.name} (${m.id})`}
+                    {engine || m.name === m.id ? m.name : `${m.name} (${m.id})`}
                   </option>
                 ))}
               </Select>
             ) : (
               <Input id="agent-model" placeholder="Model id" value={draft.model.model} onChange={(e) => onChange({ ...draft, model: { ...draft.model, model: e.target.value } })} />
             )}
+            {chosen?.description && <p className="mt-1.5 text-[12.5px] text-muted">{chosen.description}</p>}
             {note && <p className="mt-1.5 text-[12.5px] text-warning">{note}</p>}
           </div>
-          {!ENGINE_MODELS[source] && source !== 'local' && source !== 'test' && (
+          {source !== 'local' && source !== 'test' && (
             <div>
               <Label htmlFor="agent-effort">Effort</Label>
               <Select id="agent-effort" value={draft.model.effort ?? ''} onChange={(e) => onChange({ ...draft, model: { ...draft.model, effort: (e.target.value || undefined) as AgentDraft['model']['effort'] } })}>

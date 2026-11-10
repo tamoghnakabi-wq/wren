@@ -6,7 +6,7 @@ import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
-import { appPaths, claudeSupportsRestricted, decide, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { appPaths, claudeSupportsRestricted, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 import { engineProgram } from './program';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
@@ -206,6 +206,8 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       `You are working for the user through Wren as the agent "${run.agentName}". ${run.instructions}`.slice(0, 20000),
     ];
     if (run.model && run.model !== 'default') args.push('--model', run.model);
+    const effort = run.effort && effortFlag('claude-code', cli);
+    if (effort) args.push(effort, run.effort!);
     for (const f of run.folders.slice(1)) args.push('--add-dir', f);
     if (run.resumeId) args.push('--resume', run.resumeId);
 

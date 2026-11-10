@@ -70,15 +70,53 @@ export const SOURCES: SourceInfo[] = [
 
 export const sourceInfo = (id: string | undefined) => SOURCES.find((s) => s.id === id);
 
-export const ENGINE_MODELS: Record<string, { id: string; name: string }[]> = {
+export interface ModelChoice {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+/** What the engines offer before any computer has reported its CLI's own list (desktop app 0.1.42 and older). */
+export const ENGINE_MODELS: Record<string, ModelChoice[]> = {
   'claude-code': [
     { id: 'default', name: 'Plan default' },
     { id: 'opus', name: 'Opus (latest)' },
+    { id: 'fable', name: 'Fable (latest)' },
     { id: 'sonnet', name: 'Sonnet (latest)' },
     { id: 'haiku', name: 'Haiku (latest)' },
   ],
   'grok-build': [{ id: 'default', name: 'Grok Build default' }],
 };
+
+/**
+ * Claude Code names its models briefly ("Opus") and starts the description with the version ("Opus 5.5 ·
+ * Best for everyday, complex tasks"): the picker shows "Opus 5.5" and keeps the rest as the description.
+ */
+export function engineChoice(m: ModelChoice): ModelChoice {
+  const parts = (m.description ?? '').split(' · ').map((s) => s.trim()).filter(Boolean);
+  const head = parts[0];
+  if (parts.length < 2 || !/\d/.test(head) || head.length > 32) return m;
+  const name = head.toLowerCase().startsWith(m.name.toLowerCase()) ? head : `${m.name} – ${head}`;
+  return { id: m.id, name, description: parts.slice(1).join(' · ') };
+}
+
+/**
+ * The models an engine offers: what the desktop app read from the CLI on each of the user's computers
+ * (merged, first seen wins), or the built-in list until one has reported. Grok Build lists only model
+ * ids, so its "default" (whatever Grok picks) stays first. The agent's current model is always kept.
+ */
+export function engineModels(source: string, reported: (ModelChoice[] | undefined)[], current?: string): ModelChoice[] {
+  const fallback = ENGINE_MODELS[source] ?? [];
+  const got = reported.flatMap((l) => (Array.isArray(l) ? l : [])).filter((m) => typeof m?.id === 'string' && m.id && typeof m.name === 'string');
+  const list: ModelChoice[] = [];
+  const add = (m: ModelChoice) => void (list.some((x) => x.id === m.id) || list.push(m));
+  if (got.length) {
+    if (!got.some((m) => m.id === 'default')) add(fallback.find((m) => m.id === 'default') ?? { id: 'default', name: 'Default' });
+    got.forEach((m) => add(engineChoice(m)));
+  } else fallback.forEach(add);
+  if (current) add({ id: current, name: current });
+  return list;
+}
 
 export function modelLabel(source: string | undefined, model: string | undefined): string {
   if (!model) return 'No model';

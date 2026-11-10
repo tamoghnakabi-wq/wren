@@ -314,6 +314,7 @@ export class DeviceRunner {
       autonomy: c.agent.autonomy,
       instructions: c.agent.instructions.split('## Your instructions from the user\n')[1] ?? '',
       model: c.run.model.model,
+      effort: c.run.model.effort,
       prompt,
       images,
       cwd: policy.folders[0],
