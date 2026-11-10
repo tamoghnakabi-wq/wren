@@ -22,6 +22,10 @@ describe('schedules', () => {
     // Only on the 1st of the month, two minutes apart: found further ahead.
     expect(() => validateCron('0,2 9 1 * *', 'UTC', new Date('2026-10-06T00:00:00Z'))).toThrow(/at most every 15 minutes/);
   });
+  it('says so when the time zone is unknown (it said "CronDate: unhandled timestamp: Tue Nov 10 2026 …")', () => {
+    for (const tz of ['Not/AZone', '', 'Mars/Olympus_Mons']) expect(() => validateCron('0 9 * * *', tz)).toThrow('Unknown time zone.');
+    expect(() => validateCron('0 9 * * *', 'America/New_York')).not.toThrow();
+  });
   it('accepts ordinary schedules', () => {
     for (const c of ['*/15 * * * *', '0 9 * * 1-5', '30 7 * * *', '0 */6 * * *', '0 9 1 * *']) expect(() => validateCron(c, 'Australia/Melbourne')).not.toThrow();
   });

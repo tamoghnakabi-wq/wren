@@ -1,5 +1,6 @@
 import { cleanUp } from './cleanup';
-import { get, put } from '@vercel/blob';
+import { BlobNotFoundError, get, head, put } from '@vercel/blob';
+import { generateClientTokenFromReadWriteToken } from '@vercel/blob/client';
 import { randomUUID } from 'node:crypto';
 import { HttpError } from './auth';
 import { db } from './db';
@@ -47,6 +48,81 @@ export async function saveArtifact(a: ArtifactInput): Promise<{ id: string; name
     throw new HttpError(409, 'This worker no longer holds this run.', 'lease_lost');
   }
   return { id, name, size, mime: a.mime };
+}
+
+// ---------------------------------------------------------------- direct uploads
+//
+// A request to a Vercel Function carries at most 4.5 MB (the platform answers 413 before Wren's code
+// runs), so a file can't come through the API. Larger ones go straight to the Blob store in three steps:
+//   1. startUpload: Wren picks the file's place and hands out a token good for that one place and size;
+//   2. the browser or the desktop app sends the bytes to the store with it;
+//   3. finishUpload: Wren looks at what arrived and records it.
+// The place is written down in external_cleanups before the token goes out (due in two hours), so an
+// upload nobody finishes is deleted by the cron, and only a place written down there can be recorded:
+// finishing can't adopt some other stored file.
+
+/** What a small file may be and still go through the API in one request (under the platform's 4.5 MB). */
+export const INLINE_UPLOAD_BYTES = 4 * 1024 * 1024;
+/** The most a file someone attaches may be, and the most a file a computer shares may be. */
+export const USER_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const DEVICE_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** Uploads one account may have under way at a time. */
+const PENDING_UPLOADS = 20;
+/** How long an upload has from start to finish. */
+const UPLOAD_MINUTES = 120;
+/** The marker of a place that waits for its upload (a failed deletion carries its error here instead). */
+const PENDING_UPLOAD = 'upload not finished';
+
+const uploadPath = (userId: string, id: string, name: string) => `u/${userId}/${id}/${safeName(name)}`;
+
+export async function startUpload(u: { userId: string; name: string; size: number; maxBytes: number }): Promise<{ id: string; pathname: string; token: string }> {
+  if (!Number.isSafeInteger(u.size) || u.size < 1) throw new HttpError(400, 'Attach a file.', 'invalid');
+  if (u.size > u.maxBytes) throw new HttpError(413, `Files can be up to ${Math.round(u.maxBytes / (1024 * 1024))} MB.`, 'too_large');
+  const id = randomUUID();
+  const pathname = uploadPath(u.userId, id, u.name);
+  // Written down only while the account has few under way, in one statement (no count-then-insert race worth a lock).
+  const noted = await db()`
+    insert into public.external_cleanups (kind, ref, last_error, next_at)
+    select 'blob', ${pathname}, ${PENDING_UPLOAD}, now() + make_interval(mins => ${UPLOAD_MINUTES})
+    where (select count(*) from public.external_cleanups where kind = 'blob' and last_error = ${PENDING_UPLOAD} and starts_with(ref, ${`u/${u.userId}/`})) < ${PENDING_UPLOADS}
+    returning id`;
+  if (!noted.length) throw new HttpError(429, 'Too many uploads at once. Wait for some to finish and try again.', 'too_many');
+  // Good for this one place, once (no overwrite), up to the size limit, for half an hour to begin.
+  const token = await generateClientTokenFromReadWriteToken({ pathname, maximumSizeInBytes: u.maxBytes, validUntil: Date.now() + 30 * 60_000, addRandomSuffix: false, allowOverwrite: false });
+  return { id, pathname, token };
+}
+
+export async function finishUpload(a: Omit<ArtifactInput, 'data' | 'mime'> & { id: string; maxBytes: number }): Promise<{ id: string; name: string; size: number; mime: string }> {
+  const name = safeName(a.name);
+  const path = uploadPath(a.userId, a.id, a.name);
+  const stored = await head(path).catch((e: unknown) => {
+    if (e instanceof BlobNotFoundError) return null;
+    throw e;
+  });
+  if (!stored) throw new HttpError(400, 'The file didn’t arrive. Attach it again.', 'upload_missing');
+  if (stored.size > a.maxBytes) {
+    await deleteArtifactBlob(path);
+    throw new HttpError(413, `Files can be up to ${Math.round(a.maxBytes / (1024 * 1024))} MB.`, 'too_large');
+  }
+  const mime = stored.contentType && stored.contentType !== 'application/octet-stream' ? stored.contentType : guessMime(name);
+  const sql = db();
+  const out = await sql.begin(async (tx) => {
+    // Only a place Wren handed out, and not one the cron is about to clear (it takes those that are due).
+    const pending = await tx`
+      delete from public.external_cleanups
+      where kind = 'blob' and ref = ${path} and last_error = ${PENDING_UPLOAD} and next_at > now() + interval '1 minute' returning id`;
+    if (!pending.length) return 'expired' as const;
+    const rows = await tx`
+      insert into public.artifacts (id, user_id, agent_id, session_id, run_id, name, mime, size, kind, blob_path, source)
+      select ${a.id}, ${a.userId}, ${a.agentId ?? null}, ${a.sessionId ?? null}, ${a.runId ?? null}, ${name}, ${mime}, ${stored.size}, ${a.kind ?? 'file'}, ${path}, ${a.source ?? 'cloud'}
+      where ${a.leaseId && a.runId ? tx`exists (select 1 from public.runs where id = ${a.runId}::uuid and lease_id = ${a.leaseId}::uuid for share)` : tx`true`}
+      returning id`;
+    // Not recorded: the place stays written down (the delete above is undone), and the cron clears it.
+    if (!rows.length) throw new HttpError(409, 'This worker no longer holds this run.', 'lease_lost');
+    return 'saved' as const;
+  });
+  if (out === 'expired') throw new HttpError(410, 'That upload took too long. Attach the file again.', 'upload_expired');
+  return { id: a.id, name, size: stored.size, mime };
 }
 
 export async function readArtifact(blobPath: string): Promise<{ stream: ReadableStream; contentType: string } | null> {

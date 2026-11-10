@@ -17,7 +17,18 @@ export function nextRun(cron: string, timezone: string, from = new Date()): Date
 /** Schedules run at most this often. */
 const MIN_GAP_MS = 15 * 60 * 1000;
 
+/** Whether this is a time zone the server knows (cron-parser reports an unknown one as "unhandled timestamp"). */
+export function knownTimeZone(timezone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: timezone });
+    return !!timezone;
+  } catch {
+    return false;
+  }
+}
+
 export function validateCron(cron: string, timezone: string, from = new Date()) {
+  if (!knownTimeZone(timezone)) throw new HttpError(400, 'Unknown time zone.', 'invalid');
   if (cron.trim().split(/\s+/).length !== 5) throw new HttpError(400, 'Use a 5-field cron expression (minute hour day month weekday).', 'invalid');
   // Every gap over the coming year, not just the next one: "0,1 0,12 * * *" looks like twice a
   // day from just after midnight, but runs at 12:00 and again at 12:01.

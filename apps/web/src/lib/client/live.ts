@@ -12,6 +12,8 @@ export interface LiveOptions {
   select?: string;
   eq?: Record<string, string | null | undefined>;
   is?: Record<string, null>;
+  /** Columns that must have a value (e.g. `archived_at` for archived tasks). */
+  notNull?: string[];
   inList?: { column: string; values: string[] };
   order?: { column: string; ascending?: boolean };
   limit?: number;
@@ -51,6 +53,7 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
     const matches = (r: Row) => {
       for (const [k, v] of Object.entries(opts.eq ?? {})) if (v !== undefined && r[k] !== v) return false;
       for (const k of Object.keys(opts.is ?? {})) if (r[k] !== null && r[k] !== undefined) return false;
+      for (const k of opts.notNull ?? []) if (r[k] === null || r[k] === undefined) return false;
       if (opts.inList && !opts.inList.values.includes(String(r[opts.inList.column]))) return false;
       return true;
     };
@@ -78,6 +81,7 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
       let q = sb.from(opts.table).select(opts.select ?? '*');
       for (const [k, v] of Object.entries(opts.eq ?? {})) if (v !== undefined) q = v === null ? q.is(k, null) : q.eq(k, v);
       for (const k of Object.keys(opts.is ?? {})) q = q.is(k, null);
+      for (const k of opts.notNull ?? []) q = q.not(k, 'is', null);
       if (opts.inList) q = q.in(opts.inList.column, opts.inList.values);
       return q;
     };

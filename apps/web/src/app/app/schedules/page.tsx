@@ -137,9 +137,13 @@ function ScheduleDialog({ schedule, defaultAgent, timezone, onClose, onSaved }: 
               variant="ghost"
               className="mr-auto text-danger"
               onClick={async () => {
-                await api(`/api/schedules/${schedule.id}`, { method: 'DELETE' });
-                onSaved();
-                onClose();
+                try {
+                  await api(`/api/schedules/${schedule.id}`, { method: 'DELETE' });
+                  onSaved();
+                  onClose();
+                } catch (e) {
+                  toast((e as Error).message, 'error');
+                }
               }}
             >
               <Trash2 className="h-4 w-4" /> Delete
@@ -197,7 +201,7 @@ function ScheduleDialog({ schedule, defaultAgent, timezone, onClose, onSaved }: 
                 ))}
               </Select>
             )}
-            {preset === 'monthly' && <Input type="number" min={1} max={28} value={dom} onChange={(e) => setDom(Number(e.target.value))} aria-label="Day of month" />}
+            {preset === 'monthly' && <Input type="number" min={1} max={28} value={dom} onChange={(e) => setDom(Math.min(28, Math.max(1, Math.round(Number(e.target.value)) || 1)))} aria-label="Day of month" />}
             {preset === 'custom' && <Input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="0 8 * * 1-5" aria-label="Cron expression" className="font-mono" />}
           </div>
           <p className="mt-1.5 text-[12.5px] text-muted">

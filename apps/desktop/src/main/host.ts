@@ -7,7 +7,8 @@ import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '
 import { fetchReadable } from '@wren/core/net';
 import { BrowserController, registerSelectors } from '@wren/core/browser/controller';
 import type { BrowserContext } from 'playwright-core';
-import { deviceFetch, deviceJson } from './api';
+import { deviceJson } from './api';
+import { uploadArtifact } from './upload';
 import { dataDir, type Policy } from './config';
 import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
@@ -314,14 +315,8 @@ export class LocalHost implements ToolHost {
     return { output: 'Captured the screen.', images: [{ artifactId: a.id, mime: 'image/jpeg' }] };
   }
 
-  private async upload(data: Buffer, name: string, kind: 'file' | 'screenshot'): Promise<{ id: string; name: string; size: number }> {
-    const form = new FormData();
-    form.append('file', new Blob([new Uint8Array(data)]), name);
-    form.append('runId', this.runId);
-    form.append('kind', kind);
-    const res = await deviceFetch('/api/device/artifacts', { method: 'POST', body: form, lease: this.lease });
-    if (!res.ok) throw new Error(`Upload failed (${res.status})`);
-    return res.json();
+  private upload(data: Buffer, name: string, kind: 'file' | 'screenshot'): Promise<{ id: string; name: string; size: number }> {
+    return uploadArtifact({ runId: this.runId, lease: this.lease, data, name, kind });
   }
 }
 

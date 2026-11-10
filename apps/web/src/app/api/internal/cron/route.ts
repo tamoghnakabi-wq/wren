@@ -72,11 +72,31 @@ export const POST = route(async (req) => {
   await stage('schedules', async () => {
     // Claim due schedules by moving them to their next occurrence first, so an
     // interrupted invocation can at worst skip one occurrence, never stall a schedule.
+    const broken: { userId: string; name: string; reason: string }[] = [];
     const due = await sql.begin(async (tx) => {
       const rows = await tx`select * from public.schedules where enabled and next_run_at <= now() order by next_run_at limit 10 for update skip locked`;
-      for (const s of rows) await tx`update public.schedules set next_run_at = ${nextRunAfter(s.cron, s.timezone, new Date(s.next_run_at))} where id = ${s.id}`;
-      return rows;
+      const ready: typeof rows = [] as unknown as typeof rows;
+      for (const s of rows) {
+        // A schedule whose next time can't be worked out (its time zone or expression is no longer
+        // understood) is switched off and its owner told. Left as it was, it failed this whole step
+        // every minute, and with it everybody's schedules.
+        let next: Date;
+        try {
+          next = nextRunAfter(s.cron, s.timezone, new Date(s.next_run_at));
+        } catch (e) {
+          await tx`update public.schedules set enabled = false, next_run_at = null where id = ${s.id}`;
+          broken.push({ userId: s.user_id, name: s.name, reason: (e as Error).message });
+          continue;
+        }
+        await tx`update public.schedules set next_run_at = ${next} where id = ${s.id}`;
+        ready.push(s);
+      }
+      return ready;
     });
+    for (const b of broken) {
+      report.errors.push(`schedule "${b.name}": ${b.reason}`);
+      await notifyUser({ userId: b.userId, kind: 'schedule_failed', title: `Scheduled task "${b.name}" was switched off`, body: 'Wren couldn’t work out when it runs next. Open it and set its time again.', url: '/app/schedules' }).catch(() => {});
+    }
     // Claimed, so started even past the deadline: not starting them would skip these occurrences.
     await Promise.allSettled(
       due.map(async (s) => {

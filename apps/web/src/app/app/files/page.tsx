@@ -5,18 +5,27 @@ import { Download, FileText, FolderOpen, Image as ImageIcon, Trash2 } from 'luci
 import { useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
 import { useApp } from '@/components/app/provider';
-import { cx, EmptyState, formatBytes, PageHeader, SkeletonList, timeAgo, useConfirm, useToast } from '@/components/ui';
+import { Button, cx, EmptyState, formatBytes, PageHeader, SkeletonList, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import type { Artifact } from '@/lib/client/types';
+
+const PAGE = 100;
+const KIND = { files: 'file', screenshots: 'screenshot', uploads: 'upload' } as const;
 
 export default function FilesPage() {
   const { userId, agentById } = useApp();
   const toast = useToast();
   const confirm = useConfirm();
   const [filter, setFilter] = useState<'all' | 'files' | 'screenshots' | 'uploads'>('files');
-  const files = useLive<Artifact>({ table: 'artifacts', eq: { user_id: userId }, order: { column: 'created_at' }, limit: 300, realtimeFilter: { column: 'user_id', value: userId } });
-  const rows = files.rows.filter((f) => (filter === 'all' ? true : filter === 'files' ? f.kind === 'file' : filter === 'screenshots' ? f.kind === 'screenshot' : f.kind === 'upload'));
+  const [shown, setShown] = useState(PAGE);
+  // Each view asks for its own kind. The newest 300 of every kind were loaded and filtered here before,
+  // so once an agent had taken 300 screenshots (one per browser step), "From agents" came up empty.
+  // One more than shown, to know whether there are more.
+  const files = useLive<Artifact>({ table: 'artifacts', eq: { user_id: userId, kind: filter === 'all' ? undefined : KIND[filter] }, order: { column: 'created_at' }, limit: shown + 1, realtimeFilter: { column: 'user_id', value: userId } });
+  // While another view loads, the rows still here are the previous view's: show only what belongs.
+  const all = files.rows.filter((f) => filter === 'all' || f.kind === KIND[filter]);
+  const rows = all.slice(0, shown);
 
   return (
     <div>
@@ -27,7 +36,7 @@ export default function FilesPage() {
             key={f}
             type="button"
             aria-pressed={filter === f}
-            onClick={() => setFilter(f)}
+            onClick={() => (setFilter(f), setShown(PAGE))}
             className={cx('rounded-full border px-3 py-1.5 text-[13px] font-medium capitalize transition-colors', filter === f ? 'border-primary bg-primary text-primary-fg' : 'border-border bg-surface text-muted hover:border-border-strong hover:text-text')}
           >
             {f === 'files' ? 'From agents' : f}
@@ -97,6 +106,13 @@ export default function FilesPage() {
             );
           })}
         </ul>
+      )}
+      {!files.loading && all.length > shown && (
+        <div className="mt-3 text-center">
+          <Button variant="ghost" size="sm" onClick={() => setShown((n) => n + PAGE)}>
+            Show more files
+          </Button>
+        </div>
       )}
     </div>
   );

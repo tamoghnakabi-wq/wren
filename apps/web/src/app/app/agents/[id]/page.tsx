@@ -23,7 +23,8 @@ export default function AgentPage() {
   const agent = agentById(id);
   const [tab, setTab] = useState<'tasks' | 'settings' | 'memory' | 'schedules'>('tasks');
   const [shown, setShown] = useState(15);
-  const sessions = useLive<Session>({ table: 'sessions', eq: { agent_id: id }, is: { archived_at: null }, order: { column: 'last_event_at' }, limit: 50, realtimeFilter: { column: 'agent_id', value: id } });
+  // One more than shown, to know whether there are more (the list stopped at 50 before, for good).
+  const sessions = useLive<Session>({ table: 'sessions', eq: { agent_id: id }, is: { archived_at: null }, order: { column: 'last_event_at' }, limit: shown + 1, realtimeFilter: { column: 'agent_id', value: id } });
 
   if (agentsLoading)
     return (

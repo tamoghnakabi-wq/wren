@@ -2,6 +2,7 @@
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { isFileImage, safeHref } from '@/lib/markdown-rules';
 
 // Agent output is untrusted: no raw HTML, links open in a new tab without referrer.
 export function Markdown({ children }: { children: string }) {
@@ -12,11 +13,11 @@ export function Markdown({ children }: { children: string }) {
         skipHtml
         components={{
           a: ({ href, children }) => (
-            <a href={href && /^(https?:|mailto:|\/)/.test(href) ? href : undefined} target="_blank" rel="noopener noreferrer nofollow">
+            <a href={safeHref(href)} target="_blank" rel="noopener noreferrer nofollow">
               {children}
             </a>
           ),
-          img: ({ src, alt }) => (typeof src === 'string' && src.startsWith('/api/files/') ? <img src={src} alt={alt ?? ''} className="max-h-96 rounded-xl border border-border" /> : <span>[image: {alt}]</span>),
+          img: ({ src, alt }) => (isFileImage(src) ? <img src={src} alt={alt ?? ''} className="max-h-96 rounded-xl border border-border" /> : <span>[image: {alt}]</span>),
         }}
       >
         {children}

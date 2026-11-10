@@ -91,7 +91,7 @@ function Home() {
 
       {agents.length > 0 && (
         <section>
-          <SectionTitle action={<Link href="/app/agents" className="text-[13px] text-muted hover:text-text">All agents →</Link>}>Recent tasks</SectionTitle>
+          <SectionTitle action={<Link href="/app/tasks" className="text-[13px] text-muted hover:text-text">All tasks →</Link>}>Recent tasks</SectionTitle>
           {recent.loading ? (
             <SkeletonList rows={5} />
           ) : (

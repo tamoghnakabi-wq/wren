@@ -3,19 +3,13 @@
 import { ArrowUp, ChevronDown, Cloud, Laptop, Loader2, Paperclip, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/client/api';
+import { uploadFile, type Attachment } from '@/lib/client/upload';
 import { sourceInfo } from '@/lib/client/sources';
 import { isLiveDevice, type Agent } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { cx, formatBytes, useToast } from '../ui';
 import { useApp } from './provider';
 import { ChatGPTPlanBadge, useUsesChatGPTPlan } from './chatgpt-ui';
-
-interface Attachment {
-  artifactId: string;
-  name: string;
-  mime: string;
-  size: number;
-}
 
 export function Composer({
   agent,
@@ -93,14 +87,12 @@ export function Composer({
   const deviceOnline = device ? isLiveDevice(device) : false;
   const usesPlan = useUsesChatGPTPlan(agent, effectiveRuntime);
 
-  async function upload(list: FileList | null) {
-    if (!list) return;
-    for (const f of Array.from(list).slice(0, 10 - files.length)) {
+  async function upload(list: File[]) {
+    if (list.length > 10 - files.length) toast('A message can have up to 10 files.', 'error');
+    for (const f of list.slice(0, 10 - files.length)) {
       setUploading((n) => n + 1);
       try {
-        const form = new FormData();
-        form.append('file', f);
-        const a = await api<Attachment>('/api/files', { form });
+        const a = await uploadFile(f);
         setFiles((cur) => [...cur, a]);
       } catch (e) {
         toast((e as Error).message, 'error');
@@ -160,7 +152,7 @@ export function Composer({
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
-        if (!holding) upload(e.dataTransfer.files);
+        if (!holding) upload(Array.from(e.dataTransfer.files));
       }}
     >
       {dragging && <p className="px-2 pb-1 text-[12.5px] font-medium text-brand-ink">Drop to attach</p>}
@@ -272,7 +264,18 @@ export function Composer({
         <button type="button" onClick={() => fileInput.current?.click()} disabled={holding} className="flex h-8 w-8 items-center justify-center rounded-full text-faint transition-colors hover:bg-bg-subtle hover:text-text disabled:opacity-50" aria-label={uploading ? 'Uploading files' : 'Attach files'} title="Attach files">
           {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
         </button>
-        <input ref={fileInput} type="file" multiple hidden onChange={(e) => upload(e.target.files)} />
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            // Copied out before the box is emptied, so choosing the same file again (after removing it) counts as a change.
+            const picked = Array.from(e.target.files ?? []);
+            e.target.value = '';
+            upload(picked);
+          }}
+        />
         <div className="flex-1" />
         <button
           type="button"

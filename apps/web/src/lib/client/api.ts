@@ -16,6 +16,13 @@ export function setStepUpHandler(h: (() => Promise<boolean>) | null) {
   stepUpHandler = h;
 }
 
+/** What to say when the answer to a failed request didn't come from Wren's own API. */
+export function outsideError(status: number): string {
+  if (status === 413) return 'That’s too large to send.';
+  if (status >= 500) return `Wren isn’t answering right now (${status}). Try again in a moment.`;
+  return `Request failed (${status})`;
+}
+
 export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown; form?: FormData } = {}, retried = false): Promise<T> {
   const res = await fetch(path, {
     method: opts.method ?? (opts.body || opts.form ? 'POST' : 'GET'),
@@ -28,7 +35,9 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
-    data = { error: text };
+    // Not Wren's own answer: the hosting platform's or a proxy's error page. Its text isn't for the user
+    // ("Request Entity Too Large FUNCTION_PAYLOAD_TOO_LARGE syd1::…" was shown as it came).
+    data = res.ok ? { error: text } : null;
   }
   if (!res.ok) {
     const d = data as { error?: string; code?: string } | null;
@@ -45,7 +54,7 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign('/auth/signout');
     }
-    throw new ApiError(d?.error ?? `Request failed (${res.status})`, res.status, d?.code);
+    throw new ApiError(d?.error ?? outsideError(res.status), res.status, d?.code);
   }
   return data as T;
 }
