@@ -43,6 +43,8 @@ export interface AgentTools {
   notify: boolean;
   screen: boolean; // desktop screen capture
   mcp: string[]; // connection ids of MCP servers
+  /** Ids of the user's other agents this one may ask (task.ask_agent). The user picks each one. */
+  agents: string[];
 }
 
 export const DEFAULT_TOOLS: AgentTools = {
@@ -54,6 +56,7 @@ export const DEFAULT_TOOLS: AgentTools = {
   notify: true,
   screen: false,
   mcp: [],
+  agents: [],
 };
 
 export interface AgentConfig {
@@ -120,6 +123,8 @@ export interface ToolCallData {
   startedAt?: number;
   endedAt?: number;
   engine?: boolean; // emitted by an external CLI engine (display only)
+  /** task.ask_agent: the task that asks the other agent, and that agent's name. */
+  ask?: { sessionId: string; agent: string };
   /** The page element a browser action was assessed (and approved) against. */
   /**
    * The browser element a click/type/press was assessed (and approved) against: the exact DOM

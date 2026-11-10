@@ -1,4 +1,4 @@
-import type { ApprovalRequest, ApprovalState, ModelClient, ModelRequest, ModelStreamEvent, ModelTurn, ModelUsage, RunStore, SessionEvent } from '@wren/core';
+import type { AgentAnswer, ApprovalRequest, ApprovalState, AskAgentRequest, AskAgentStart, ModelClient, ModelRequest, ModelStreamEvent, ModelTurn, ModelUsage, RunStore, SessionEvent } from '@wren/core';
 import { ModelError } from '@wren/core';
 import { deviceFetch, deviceJson } from './api';
 
@@ -53,6 +53,17 @@ export class RemoteStore implements RunStore {
   }
   async notify(title: string, body: string, kind: string): Promise<void> {
     await this.call('notify', { title, body, kind });
+  }
+  /** Ask another of the user's agents (the server checks this agent may). */
+  async askAgent(req: AskAgentRequest): Promise<AskAgentStart> {
+    return this.call<AskAgentStart>('ask-agent', req);
+  }
+  async agentAnswer(key: string): Promise<AgentAnswer> {
+    return this.call<AgentAnswer>('agent-answer', { key });
+  }
+  /** Stop the agent answering an ask nobody waits for any more. */
+  async cancelAsk(key: string): Promise<void> {
+    await this.call('ask-cancel', { key });
   }
   memory = {
     add: async (fact: string) => (await this.call<{ id: string }>('memory', { op: 'add', value: fact })).id,

@@ -37,6 +37,7 @@ vi.mock('@/lib/runs', () => ({
   cleanUpCloudRun: async () => true,
   startTask: async (t: { scheduleId: string }) => (h.started.push(t.scheduleId), { sessionId: `session-of-${t.scheduleId}` }),
   endRemovedAgentRuns: async () => 0,
+  tidyAsks: async () => ({ woken: 0, stopped: 0 }),
 }));
 vi.mock('@/lib/devices', () => ({ revokeUnclaimedDevices: async () => 0, endOrphanedRuns: async () => 0 }));
 vi.mock('@/lib/cleanup', () => ({ runCleanups: async () => 0 }));

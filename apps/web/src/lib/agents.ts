@@ -29,6 +29,8 @@ export const AgentSchema = z.object({
       notify: z.boolean(),
       screen: z.boolean(),
       mcp: z.array(z.string().uuid()).max(10),
+      /** The user's other agents this one may ask (checked against their own agents when it asks). */
+      agents: z.array(z.string().uuid()).max(20),
     })
     .partial()
     .optional(),

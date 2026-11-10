@@ -857,6 +857,7 @@ export function assessCall(
     case 'memory.forget':
     case 'task.update_plan':
     case 'task.ask_user':
+    case 'task.ask_agent':
     case 'task.notify':
     case 'browser.snapshot':
     case 'browser.screenshot':

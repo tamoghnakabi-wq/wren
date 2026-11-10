@@ -1,11 +1,11 @@
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { assessCall, describeCall, needsApproval, type Autonomy, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
+import { agentAnswerText, assessCall, describeCall, needsApproval, type AskableAgent, type Autonomy, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
 import { dataDir } from '../main/config';
@@ -43,6 +43,8 @@ export interface EngineRun {
   signal: AbortSignal;
   /** Remembered engine session id for follow-ups in the same Wren task. */
   saveResumeId: (id: string) => Promise<void>;
+  /** The user's other agents this one may ask (its ask_agent tool); none for a task another agent asked. */
+  askable?: AskableAgent[];
 }
 
 /**
@@ -229,6 +231,8 @@ export async function spawnClaude(cli: string, args: string[], run: EngineRun, h
       WREN_SHELL_SB: seatbeltProfile(allowedRoots(run.folders), dataDir(), undefined, appPaths(helper)),
     });
   }
+  // Wren's own MCP calls wait for a person (an approval) or another agent (an answer): longer than any wait.
+  if (run.askable?.length) env.MCP_TOOL_TIMEOUT = String(ASK_WAIT_MS + 5 * 60_000);
   return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
 }
 
@@ -435,6 +439,64 @@ export async function decide(
 }
 
 export type BridgeHandler = (req: { tool_name: string; input: Record<string, unknown>; tool_use_id?: string; signal: AbortSignal }) => Promise<{ allow: boolean; message?: string }>;
+/** An engine's ask_agent call (through Wren's MCP helper): the answer, or why there is none. */
+export type AskHandler = (req: { agent: string; question: string; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
+
+/** How long an engine waits for another agent's answer (the server stops asked tasks after an hour too). */
+export const ASK_WAIT_MS = 60 * 60_000;
+
+/**
+ * An engine asks another of the user's agents (Claude Code's ask_agent tool) and waits for the answer, like
+ * an approval: polling the server while the CLI's call stays open. Stop (or the CLI going away) stops the
+ * asked agent too. The ask's key is the question itself, so a turn run again after a crash finds the task
+ * it already started; the same question asked again in one turn (`seen`) is a new ask.
+ */
+export async function askThroughWren(
+  run: EngineRun,
+  writer: TimelineWriter,
+  req: { agent: string; question: string; signal: AbortSignal },
+  seen: Map<string, number>,
+  opts: { pollMs?: number; waitMs?: number } = {},
+): Promise<{ text: string; isError?: boolean }> {
+  const agent = req.agent.trim();
+  const question = req.question.trim().slice(0, 8000);
+  if (!agent || !question) return { text: 'Say which agent to ask and what to ask it.', isError: true };
+  const hash = createHash('sha256').update(`${run.runId}\n${agent.toLowerCase()}\n${question}`).digest('hex').slice(0, 40);
+  const n = (seen.get(hash) ?? 0) + 1;
+  seen.set(hash, n);
+  const key = n === 1 ? `engine:${hash}` : `engine:${hash}:${n}`;
+  const over = () => req.signal.aborted || run.signal.aborted;
+  const started = await run.store.askAgent({ key, agent, question });
+  if ('error' in started) return { text: started.error, isError: true };
+  // The step the engine's stream showed for this call links to the asked task.
+  const title = describeCall('task.ask_agent', { agent, question });
+  const shown = writer.matchOpen('task.ask_agent', title, false) ?? writer.matchOpen('task.ask_agent', describeCall('task.ask_agent', { agent: started.agent, question }), false);
+  const step = shown ? writer.tools.get(shown) : undefined;
+  if (step) await writer.setStep(step, 'awaiting_agent', { ask: { sessionId: started.sessionId, agent: started.agent } }).catch(() => {});
+  const giveUpAt = Date.now() + (opts.waitMs ?? ASK_WAIT_MS);
+  for (;;) {
+    if (over()) {
+      await run.store.cancelAsk(key).catch(() => {});
+      // Shown as stopped: the engine may still report the call it was waiting on as failed ("Connection
+      // closed" once its helper is gone), which toolEnd then leaves alone.
+      if (step) await writer.setStep(step, 'cancelled', { endedAt: Date.now(), result: { output: 'Stopped while waiting for the answer.', isError: true } }).catch(() => {});
+      return { text: 'Stopped: the task was stopped while waiting for the answer.', isError: true };
+    }
+    if (Date.now() > giveUpAt) {
+      await run.store.cancelAsk(key).catch(() => {});
+      return { text: `${started.agent} didn’t answer within ${Math.round((opts.waitMs ?? ASK_WAIT_MS) / 60_000)} minutes, so its task was stopped. Carry on without it.`, isError: true };
+    }
+    const a = await run.store.agentAnswer(key).catch(() => ({ state: 'pending' as const, agent: started.agent }));
+    if (a.state === 'answered') return { text: agentAnswerText(a.agent, a.answer) };
+    if (a.state === 'failed') return { text: a.error, isError: true };
+    await new Promise<void>((r) => {
+      const t = setTimeout(r, opts.pollMs ?? 2000);
+      const stop = () => (clearTimeout(t), r());
+      req.signal.addEventListener('abort', stop, { once: true });
+      run.signal.addEventListener('abort', stop, { once: true });
+    });
+  }
+}
 
 /** Localhost endpoint that engine permission hooks call back into (per-run bearer token). */
 /** Requests being decided at once: an engine runs several tools in parallel, background sub-agents too. */
@@ -449,7 +511,7 @@ const MAX_PROMPT_BYTES = 512 * 1024;
 /** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks (its default is 30 s). */
 const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 5_000 };
 
-export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL): Promise<{ url: string; token: string; close: () => void }> {
+export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL, onAsk?: AskHandler): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
   // Every admitted request, from admission (still sending its body) until its decision ends (W-135).
@@ -514,6 +576,12 @@ export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRI
       res.setHeader('content-type', 'application/json');
       try {
         const r = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (r && typeof r.ask === 'object' && r.ask) {
+          // The helper's ask_agent tool: answered with the other agent's answer (or why there is none).
+          const out = onAsk && !gone.signal.aborted ? await onAsk({ agent: String(r.ask.agent ?? ''), question: String(r.ask.question ?? ''), signal: gone.signal }) : { text: 'Asking other agents isn’t available here.', isError: true };
+          res.end(JSON.stringify(out));
+          return;
+        }
         const d = await handler({ tool_name: String(r.tool_name ?? 'unknown'), input: (r.input ?? {}) as Record<string, unknown>, tool_use_id: r.tool_use_id, signal: gone.signal });
         res.end(JSON.stringify(d.allow && !gone.signal.aborted ? { behavior: 'allow', updatedInput: r.input } : { behavior: 'deny', message: d.message ?? 'Denied.' }));
       } catch (e) {

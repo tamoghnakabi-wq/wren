@@ -4,7 +4,7 @@ import { readArtifactBytes } from '../blob';
 import { db } from '../db';
 import { resolveCloudModel, connectionSecret } from '../models';
 import { notifyUser } from '../notify';
-import { finishRun, kickTick } from '../runs';
+import { askableAgents, finishRun, kickTick, stricter } from '../runs';
 import { DbRunStore, LeaseLostError } from './store';
 import { mcpNamespace, mcpToolSpecs, type McpToolInfo } from '../mcp';
 import { SandboxHost, WORKSPACE } from './sandbox-host';
@@ -117,10 +117,11 @@ export async function runTick(runId: string): Promise<string> {
       source: access.source,
       effort: modelRef.effort,
       instructions,
-      tools: toolCatalog({ runtime: 'cloud', tools, githubConnected: !!github, extra: mcpSpecs }),
+      tools: toolCatalog({ runtime: 'cloud', tools, githubConnected: !!github, extra: mcpSpecs, askable: await askableAgents(run as unknown as { user_id: string; agent_id: string; trigger: string }, tools) }),
       hosted: tools.web && access.webSearch ? [{ type: 'web_search' }] : [],
       runId,
-      autonomy: agent.autonomy,
+      // A task another agent asked works with no more freedom than that agent.
+      autonomy: stricter(agent.autonomy, run.autonomy_cap),
       store,
       host,
       deadline: started + BUDGET_MS,

@@ -22,7 +22,7 @@ export const POST = route(async (req) => {
       policy = coalesce(${b.policy ? sql.json(b.policy as Json) : null}, policy)
     where id = ${device.id}`;
   const runs = await sql`
-    select id, status, cancel_requested, pause_requested, lease_until from public.runs
+    select id, status, cancel_requested, pause_requested, lease_until, trigger from public.runs
     where device_id = ${device.id} and runtime = 'desktop' and status in ('queued', 'running')
     order by created_at limit 20`;
   const settings = { ...(await userSettings(device.userId)), openaiKey: !!(await connectionSecret(device.userId, 'openai')) };
@@ -31,6 +31,7 @@ export const POST = route(async (req) => {
     device: { id: device.id, name: device.name },
     account: { email: profile?.email, name: profile?.display_name },
     settings,
-    work: runs.map((r) => ({ id: r.id, status: r.status, cancel: r.cancel_requested, pause: r.pause_requested, leased: r.lease_until ? new Date(r.lease_until) > new Date() : false })),
+    // `asked`: another agent asked this task and waits for it (the desktop starts it even when busy).
+    work: runs.map((r) => ({ id: r.id, status: r.status, cancel: r.cancel_requested, pause: r.pause_requested, leased: r.lease_until ? new Date(r.lease_until) > new Date() : false, asked: r.trigger === 'agent' })),
   });
 });

@@ -105,7 +105,7 @@ function AgentSettings() {
   const dirty = JSON.stringify(toPayload(draft)) !== JSON.stringify(toPayload(draftFromAgent(agent)));
   return (
     <div className="mx-auto max-w-2xl">
-      <AgentForm draft={draft} onChange={setDraft} />
+      <AgentForm draft={draft} onChange={setDraft} selfId={agent.id} />
       <div className="mt-10 flex items-center justify-between gap-2 border-t border-border pt-6">
         <Button
           variant="ghost"

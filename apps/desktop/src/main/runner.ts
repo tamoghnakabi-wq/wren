@@ -8,6 +8,7 @@ import {
   toolCatalog,
   type AgentTools,
   type ApprovalRequest,
+  type AskableAgent,
   type ImageRef,
   type LoopOutcome,
   type MessageData,
@@ -43,13 +44,16 @@ interface Claim {
   agent: { id: string; name: string; autonomy: 'careful' | 'balanced' | 'autonomous'; tools: AgentTools; instructions: string };
   mcpTools: ToolSpec[];
   githubConnected: boolean;
+  /** The user's other agents this one may ask (servers before 0.1.44 don't send it). */
+  askable?: AskableAgent[];
 }
 
 interface Heartbeat {
   account?: { email?: string; name?: string };
   device: { id: string; name: string };
   settings: { openaiAccess: 'chatgpt' | 'api'; openaiAllowFallback: boolean; openaiKey?: boolean };
-  work: { id: string; status: string; cancel: boolean; pause: boolean; leased: boolean }[];
+  /** `asked`: another agent asked this task and waits for its answer. */
+  work: { id: string; status: string; cancel: boolean; pause: boolean; leased: boolean; asked?: boolean }[];
 }
 
 export interface RunnerState {
@@ -189,7 +193,10 @@ export class DeviceRunner {
           this.userStops.add(w.id);
           running.abort();
         }
-        if (!running && !w.cancel && !this.suspended && this.active.size < 3 && (w.status === 'queued' || !w.leased)) void this.execute(w.id, hb.settings);
+        // A task another agent asked gets a place even when three tasks are running: its asker may be one of
+        // them, waiting for it (the server lets only three such tasks run at once).
+        const room = this.active.size < 3 || (w.asked && this.active.size < 6);
+        if (!running && !w.cancel && !this.suspended && room && (w.status === 'queued' || !w.leased)) void this.execute(w.id, hb.settings);
       }
     } catch (e) {
       this.state.lastError = (e as Error).message;
@@ -333,6 +340,8 @@ export class DeviceRunner {
         },
       },
       resumeId: resume?.data.resumeId,
+      // Claude Code can ask the user's other agents through Wren's MCP helper; Grok Build can't yet.
+      askable: engine === 'claude-code' ? c.askable : undefined,
       plan: ([...events].reverse().find((e) => e.type === 'plan')?.data as { items?: PlanItem[] } | undefined)?.items,
       signal,
       saveResumeId: async (id: string) => {
@@ -394,7 +403,7 @@ export class DeviceRunner {
     }
     store.usageSource = source;
 
-    const tools = toolCatalog({ runtime: 'desktop', tools: c.agent.tools, githubConnected: c.githubConnected, extra: c.mcpTools }).filter((t) => {
+    const tools = toolCatalog({ runtime: 'desktop', tools: c.agent.tools, githubConnected: c.githubConnected, extra: c.mcpTools, askable: c.askable }).filter((t) => {
       if (t.namespace === 'browser') return policy.browser;
       if (t.namespace === 'screen') return policy.screen;
       if (t.namespace === 'computer' && (t.name === 'shell' || t.name === 'shell_status')) return policy.shell;

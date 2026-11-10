@@ -1,4 +1,17 @@
-import { DESKTOP_ONLY_SOURCES, runContext, type LoopOutcome, type MessageData, type ModelRef, type Runtime, type StatusData } from '@wren/core';
+import {
+  DESKTOP_ONLY_SOURCES,
+  runContext,
+  type AgentAnswer,
+  type AgentTools,
+  type AskableAgent,
+  type AskAgentStart,
+  type Autonomy,
+  type LoopOutcome,
+  type MessageData,
+  type ModelRef,
+  type Runtime,
+  type StatusData,
+} from '@wren/core';
 import type { TransactionSql } from 'postgres';
 import { db, type Json } from './db';
 import { env, selfUrl } from './env';
@@ -6,6 +19,7 @@ import { HttpError } from './auth';
 import { assertPlatformAllowed } from './platform-credits';
 import { notifyUser, nudgeDevice } from './notify';
 import { SandboxHost } from './runner/sandbox-host';
+import { sourceInfo } from './client/sources';
 
 // Task lifecycle shared by the API routes, the cloud tick and the desktop API.
 
@@ -17,11 +31,25 @@ export interface StartTaskInput {
   sessionId?: string;
   text: string;
   attachments?: { artifactId: string; name: string; mime: string; size: number }[];
-  trigger?: 'user' | 'schedule';
+  trigger?: 'user' | 'schedule' | 'agent';
   scheduleId?: string;
   scheduleName?: string;
   runtime?: Runtime; // override (e.g. "run this one in the cloud")
   deviceId?: string;
+  /** A question another agent asked (task.ask_agent): the task is linked to the run that asked. */
+  parent?: AskParent;
+}
+
+interface AskParent {
+  runId: string;
+  sessionId: string;
+  /** Names this ask within the asking run: the same key finds the same task. */
+  key: string;
+  /** The asking worker's lease, checked when the task is created. */
+  lease?: string;
+  agentName: string;
+  taskTitle: string;
+  autonomy: Autonomy;
 }
 
 export async function startTask(i: StartTaskInput): Promise<{ sessionId: string; runId: string; continued: boolean }> {
@@ -55,16 +83,20 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   let runtime: Runtime = i.runtime ?? agent.runtime;
   if (DESKTOP_ONLY_SOURCES.includes(modelRef.source) && modelRef.source !== 'chatgpt') runtime = 'desktop';
   let deviceId: string | null = null;
-  let device: { id: string; name: string; platform: string; policy: Record<string, unknown> } | undefined;
+  let device: { id: string; name: string; platform: string; policy: Record<string, unknown>; last_seen_at: Date | null } | undefined;
   if (runtime === 'desktop') {
     const wanted = i.deviceId ?? agent.device_id;
     const rows = wanted
-      ? await sql`select id, name, platform, policy from public.devices where id = ${wanted} and user_id = ${i.userId} and revoked_at is null`
-      : await sql`select id, name, platform, policy from public.devices where user_id = ${i.userId} and revoked_at is null order by last_seen_at desc nulls last limit 1`;
+      ? await sql`select id, name, platform, policy, last_seen_at from public.devices where id = ${wanted} and user_id = ${i.userId} and revoked_at is null`
+      : await sql`select id, name, platform, policy, last_seen_at from public.devices where user_id = ${i.userId} and revoked_at is null order by last_seen_at desc nulls last limit 1`;
     if (!rows.length && wanted) throw new HttpError(400, 'The computer this agent uses isn’t linked any more. Choose another computer in the agent’s settings, or link it again from the desktop app.', 'no_device');
     if (!rows.length) throw new HttpError(400, 'This agent runs on your computer, but no desktop app is linked. Install Wren for Mac or Windows and link it.', 'no_device');
     device = rows[0] as typeof device;
     deviceId = device!.id;
+    // An agent asking would wait for an answer that can't come while the computer is off.
+    if (i.parent && !(device!.last_seen_at && Date.now() - new Date(device!.last_seen_at).getTime() < 3 * 60_000)) {
+      throw new HttpError(409, `${agent.name} works on ${device!.name}, which isn’t online right now, so it can’t answer. Carry on without it, or tell the user.`, 'device_offline');
+    }
   }
 
   const [profile] = await sql`select timezone from public.profiles where id = ${i.userId}`;
@@ -79,6 +111,7 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
     memories: memories.map((m) => ({ id: String(m.id), content: m.content })),
     trigger: i.trigger ?? 'user',
     scheduleName: i.scheduleName,
+    askedBy: i.parent ? { agent: i.parent.agentName, task: i.parent.taskTitle } : undefined,
   });
   const msg: MessageData & { context: string } = { ...(userMessage as MessageData), context };
 
@@ -93,6 +126,20 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
       const [linked] = await tx`select id from public.devices where id = ${deviceId} and revoked_at is null for share`;
       if (!linked) throw new HttpError(400, 'That computer was unlinked. Link it again in the desktop app, or choose another.', 'no_device');
     }
+    if (i.parent) {
+      // Under the asking task's lock: asks from one run are counted (and found again) one at a time.
+      const p = i.parent;
+      await tx`select id from public.sessions where id = ${p.sessionId} for no key update`;
+      const [asker] = await tx`select status, cancel_requested, lease_id from public.runs where id = ${p.runId}`;
+      if (!asker || !(ACTIVE as readonly string[]).includes(asker.status) || asker.cancel_requested) throw new HttpError(409, 'The task that asked has ended.', 'conflict');
+      if (p.lease && asker.lease_id !== p.lease) throw new HttpError(409, 'This worker no longer holds this run.', 'lease_lost');
+      const [same] = await tx`select id from public.sessions where parent_run_id = ${p.runId} and parent_ask_key = ${p.key}`;
+      if (same) return { sessionId: same.id as string, runId: null as string | null };
+      const [{ n }] = await tx`select count(*)::int as n from public.sessions where parent_run_id = ${p.runId}`;
+      if (n >= MAX_ASKS_PER_RUN) throw new HttpError(429, `This task has already asked other agents ${MAX_ASKS_PER_RUN} times, the most one task may. Carry on with what you have.`, 'ask_limit');
+      const [{ m }] = await tx`select count(*)::int as m from public.runs where user_id = ${i.userId} and trigger = 'agent' and status in ('queued', 'running', 'waiting', 'paused')`;
+      if (m >= MAX_ACTIVE_ASKS) throw new HttpError(429, `${m} agents are already answering other agents' questions. Wait for an answer, then ask again.`, 'ask_busy');
+    }
     let sessionId = i.sessionId;
     if (sessionId) {
       const [session] = await tx`select id from public.sessions where id = ${sessionId} and user_id = ${i.userId} for no key update`;
@@ -102,13 +149,13 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
       if (active) return { sessionId, runId: null as string | null };
     } else {
       const title = (text.split('\n')[0] || 'New task').slice(0, 80);
-      const [s] = await tx`insert into public.sessions (user_id, agent_id, title, status, runtime, device_id)
-        values (${i.userId}, ${agent.id}, ${title}, 'queued', ${runtime}, ${deviceId}) returning id`;
+      const [s] = await tx`insert into public.sessions (user_id, agent_id, title, status, runtime, device_id, parent_session_id, parent_run_id, parent_ask_key)
+        values (${i.userId}, ${agent.id}, ${title}, 'queued', ${runtime}, ${deviceId}, ${i.parent?.sessionId ?? null}, ${i.parent?.runId ?? null}, ${i.parent?.key ?? null}) returning id`;
       sessionId = s.id as string;
     }
     const [run] = await tx`
-      insert into public.runs (user_id, agent_id, session_id, status, runtime, device_id, trigger, schedule_id, model)
-      values (${i.userId}, ${agent.id}, ${sessionId!}, 'queued', ${runtime}, ${deviceId}, ${i.trigger ?? 'user'}, ${i.scheduleId ?? null}, ${tx.json(modelRef as unknown as Json)})
+      insert into public.runs (user_id, agent_id, session_id, status, runtime, device_id, trigger, schedule_id, model, autonomy_cap)
+      values (${i.userId}, ${agent.id}, ${sessionId!}, 'queued', ${runtime}, ${deviceId}, ${i.parent ? 'agent' : (i.trigger ?? 'user')}, ${i.scheduleId ?? null}, ${tx.json(modelRef as unknown as Json)}, ${i.parent?.autonomy ?? null})
       returning id`;
     await tx`insert into public.events (user_id, session_id, run_id, type, status, data) values (${i.userId}, ${sessionId!}, ${run.id}, 'message', 'done', ${tx.json(msg as unknown as Json)})`;
     await tx`update public.sessions set status = 'queued', runtime = ${runtime}, device_id = ${deviceId}, last_event_at = now() where id = ${sessionId!}`;
@@ -117,6 +164,7 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
   // After commit: the transaction only share-locks the agent (two tasks for it at once mustn't
   // deadlock upgrading that lock, W-160).
   if (created.runId) await sql`update public.agents set last_active_at = now() where id = ${agent.id}`.catch(() => {});
+  if (!created.runId && i.parent) return { sessionId: created.sessionId, runId: '', continued: true }; // asked already: the same task
   if (!created.runId) {
     const cont = await continueOrRestart(created.sessionId, i.userId, userMessage);
     if (!cont) throw new HttpError(409, 'The task changed while sending; try again.', 'conflict');
@@ -231,6 +279,8 @@ const SESSION_STATUS: Record<LoopOutcome['kind'], string> = {
   completed: 'completed',
   waiting_approval: 'waiting',
   waiting_input: 'waiting',
+  // Not waiting for the user: the task is busy, through the agent it asked.
+  waiting_agent: 'running',
   yield: 'running',
   cancelled: 'cancelled',
   paused: 'paused',
@@ -283,7 +333,7 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
     // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
     const cancelledLate = run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(o.kind);
     if (cancelledLate) o = { kind: 'cancelled', steps: o.steps };
-    let runStatus = o.kind === 'waiting_approval' || o.kind === 'waiting_input' ? 'waiting' : o.kind === 'yield' ? 'running' : o.kind;
+    let runStatus = o.kind === 'waiting_approval' || o.kind === 'waiting_input' || o.kind === 'waiting_agent' ? 'waiting' : o.kind === 'yield' ? 'running' : o.kind;
     let resume = false;
     if (o.kind === 'waiting_approval') {
       const [a] = await tx`select status from public.approvals where id = ${o.approvalId} and run_id = ${runId}`;
@@ -292,6 +342,15 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       const [answered] = await tx`
         select 1 from public.events m where m.run_id = ${runId} and m.type = 'message' and m.data->>'role' = 'user'
           and m.seq > (select coalesce(max(seq), 0) from public.events where run_id = ${runId} and type = 'tool' and status = 'awaiting_input')
+        limit 1`;
+      resume = !!answered;
+    } else if (o.kind === 'waiting_agent') {
+      // An agent that answered while this run was stopping: its wake-up found the run still running.
+      const [answered] = await tx`
+        select 1 from public.events e
+          join public.sessions s on s.parent_run_id = e.run_id and s.parent_ask_key = e.id::text
+          join public.runs c on c.session_id = s.id and c.trigger = 'agent'
+        where e.run_id = ${runId} and e.type = 'tool' and e.status = 'awaiting_agent' and c.status in ('completed', 'failed', 'cancelled')
         limit 1`;
       resume = !!answered;
     } else if (o.kind === 'completed' && typeof o.seenSeq === 'number') {
@@ -312,7 +371,7 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       where id = ${runId}`;
     if (o.kind === 'cancelled') {
       // Steps and approvals the run never finished end with it.
-      await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'running')`;
+      await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'awaiting_agent', 'running')`;
       await tx`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
     }
     await tx`update public.sessions set status = ${resume ? 'queued' : SESSION_STATUS[o.kind]}, last_event_at = now() where id = ${run.session_id}`;
@@ -326,6 +385,11 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
   if (typeof done === 'string') return done;
   const { run, o, resume, terminal } = done;
   if (resume) await kickRun(runId);
+  if (terminal && !resume) {
+    // An asked agent's answer is in: the agent that asked carries on. Agents this run asked stop with it.
+    if (run.trigger === 'agent') await wakeAsker(run.session_id).catch((e) => console.warn('wakeAsker failed', (e as Error).message));
+    await stopAsks(run.user_id, runId, run.agent_name).catch((e) => console.warn('stopAsks failed', (e as Error).message));
+  }
   // A finished run's shell jobs (background ones included) and browser tab end with it. The
   // flag set above stays until the VM confirms it, and the cron retries until then.
   if (terminalKind(o.kind) && !resume && run.runtime === 'cloud') await cleanUpCloudRun(run.agent_id, runId);
@@ -333,7 +397,8 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
   const url = `/app/s/${run.session_id}`;
   if (o.kind === 'failed') {
     await notifyUser({ userId: run.user_id, kind: 'run_failed', title: `${run.agent_name} couldn't finish`, body: `${run.title}: ${o.error}`.slice(0, 300), url, sessionId: run.session_id });
-  } else if (o.kind === 'completed') {
+  } else if (o.kind === 'completed' && run.trigger !== 'agent') {
+    // An asked agent's answer goes to the agent that asked, which reports to the user.
     await notifyUser({ userId: run.user_id, kind: 'run_completed', title: `${run.agent_name} finished`, body: (o.result || run.title).replace(/[#*_`>]/g, '').slice(0, 280), url, sessionId: run.session_id });
   }
   // waiting_input: the question notification is sent by the loop's ask_user handler
@@ -468,4 +533,192 @@ export async function resumeRun(userId: string, runId: string) {
     return !!run;
   });
   if (resumed) await kickRun(runId);
+}
+
+// ---------------------------------------------------------------- agents asking agents (task.ask_agent)
+
+/** Questions one run may ask other agents, and agents answering questions at once (per user). */
+export const MAX_ASKS_PER_RUN = 5;
+export const MAX_ACTIVE_ASKS = 3;
+/** How long an asked agent may work on an answer before its task is stopped (the cron). */
+export const ASK_MINUTES = 60;
+
+const AUTONOMY_ORDER: Autonomy[] = ['careful', 'balanced', 'autonomous'];
+/** The stricter of an agent's own autonomy and the cap its run got from the agent that asked. */
+export function stricter(own: Autonomy, cap?: string | null): Autonomy {
+  const i = cap ? AUTONOMY_ORDER.indexOf(cap as Autonomy) : -1;
+  return i >= 0 && i < AUTONOMY_ORDER.indexOf(own) ? AUTONOMY_ORDER[i] : own;
+}
+
+const brainOf = (m: ModelRef | null | undefined) => {
+  const label = sourceInfo(m?.source)?.label ?? m?.source ?? 'unknown';
+  return m?.model && m.model !== 'default' ? `${label}, ${m.model}` : label;
+};
+
+/**
+ * The agents a run's agent may ask, as its tool lists them: the ones the user picked in its settings that
+ * still exist. None for a task another agent asked (one agent may ask another, but not further).
+ */
+export async function askableAgents(run: { user_id: string; agent_id: string; trigger: string }, tools: Partial<AgentTools>): Promise<AskableAgent[]> {
+  const ids = (tools.agents ?? []).filter((x) => typeof x === 'string');
+  if (run.trigger === 'agent' || !ids.length) return [];
+  const rows = await db()`select name, model, instructions from public.agents
+    where user_id = ${run.user_id} and id = any(${ids}::uuid[]) and id <> ${run.agent_id} and archived_at is null order by created_at`;
+  return rows.map((r) => {
+    const about = String(r.instructions ?? '').split('\n').map((l) => l.trim()).find(Boolean);
+    return { name: String(r.name), brain: brainOf(r.model as ModelRef), ...(about ? { about: about.length > 120 ? `${about.slice(0, 119)}…` : about } : {}) };
+  });
+}
+
+/**
+ * Ask another of the user's agents (for the run `runId`): checks the asking agent may, then starts the asked
+ * agent's task linked to this run. Everything is decided here from the database, never from what the
+ * asking worker says about itself. The same key returns the task it started before.
+ */
+export async function askAgent(a: { userId: string; runId: string; lease?: string; key: string; agent: string; question: string }): Promise<AskAgentStart> {
+  const sql = db();
+  const [run] = await sql`select r.id, r.session_id, r.agent_id, r.trigger, r.autonomy_cap, ag.name as agent_name, ag.tools, ag.autonomy, s.title
+    from public.runs r join public.agents ag on ag.id = r.agent_id join public.sessions s on s.id = r.session_id
+    where r.id = ${a.runId} and r.user_id = ${a.userId}`;
+  if (!run) return { error: 'This task wasn’t found.' };
+  if (run.trigger === 'agent') return { error: 'You are answering another agent’s question, so you can’t ask a further agent. Answer with what you have.' };
+  const allowed = ((run.tools as Partial<AgentTools>)?.agents ?? []).filter((x): x is string => typeof x === 'string');
+  const candidates = allowed.length
+    ? await sql`select id, name from public.agents where user_id = ${a.userId} and id = any(${allowed}::uuid[]) and id <> ${run.agent_id} and archived_at is null order by created_at`
+    : [];
+  const wanted = a.agent.trim().toLowerCase();
+  const matches = candidates.filter((c) => String(c.name).trim().toLowerCase() === wanted);
+  if (!matches.length) {
+    const names = candidates.map((c) => c.name).join(', ');
+    return { error: `${a.agent} isn’t one of the agents you may ask${names ? ` (you may ask: ${names})` : ''}. The user chooses them in your settings.` };
+  }
+  if (matches.length > 1) return { error: `More than one of the user’s agents is called ${matches[0].name}. Ask the user to rename one.` };
+  const target = matches[0];
+  try {
+    const r = await startTask({
+      userId: a.userId,
+      agentId: target.id,
+      text: a.question,
+      parent: {
+        runId: a.runId,
+        sessionId: run.session_id,
+        key: a.key,
+        lease: a.lease,
+        agentName: run.agent_name,
+        taskTitle: run.title,
+        // The asked agent acts with no more freedom than the one asking.
+        autonomy: stricter(run.autonomy as Autonomy, run.autonomy_cap),
+      },
+    });
+    return { sessionId: r.sessionId, agent: String(target.name) };
+  } catch (e) {
+    if (e instanceof HttpError) {
+      if (e.code === 'lease_lost') throw e;
+      return { error: e.message };
+    }
+    throw e;
+  }
+}
+
+/** Where the ask `key` of run `runId` stands: the asked task's first run (the one the ask started) says. */
+export async function agentAnswer(userId: string, runId: string, key: string): Promise<AgentAnswer> {
+  const [c] = await db()`
+    select ag.name, r.status, r.result, r.error from public.sessions s join public.agents ag on ag.id = s.agent_id
+      left join lateral (select status, result, error from public.runs where session_id = s.id and trigger = 'agent' order by created_at limit 1) r on true
+    where s.parent_run_id = ${runId} and s.parent_ask_key = ${key} and s.user_id = ${userId}`;
+  if (!c?.status) return { state: 'failed', agent: c?.name ?? '', error: 'That question was lost before an agent took it. Ask again if it still matters.' };
+  const agent = String(c.name);
+  switch (c.status) {
+    case 'completed':
+      return { state: 'answered', agent, answer: String(c.result ?? '') };
+    case 'failed':
+      return { state: 'failed', agent, error: `${agent} couldn’t answer: ${c.error ?? 'its task failed'}.` };
+    case 'cancelled':
+      return { state: 'failed', agent, error: `${agent} was stopped before it answered.` };
+    default:
+      return { state: 'pending', agent };
+  }
+}
+
+/** Stop the agent answering ask `key` of run `runId` (the asker stopped waiting). */
+export async function cancelAsk(userId: string, runId: string, key: string): Promise<void> {
+  const rows = await db()`select r.id, r.session_id, ag.name as asker from public.runs r join public.sessions s on s.id = r.session_id
+      join public.runs p on p.id = s.parent_run_id join public.agents ag on ag.id = p.agent_id
+    where s.parent_run_id = ${runId} and s.parent_ask_key = ${key} and s.user_id = ${userId} and r.trigger = 'agent' and r.status in ('queued', 'running', 'waiting', 'paused')`;
+  for (const r of rows) await stopAsked(userId, { id: String(r.id), session_id: String(r.session_id) }, `${r.asker} stopped waiting for this answer.`);
+}
+
+/**
+ * Queue a run waiting only for other agents again (one of them answered). Under its task's locks, like
+ * decideApproval: a run still running is left alone, since finishRun looks for answers when it stops.
+ * A run also waiting for the user (an approval, a question) waits for that instead.
+ */
+export async function wakeForAnswer(runId: string): Promise<boolean> {
+  const [ref] = await db()`select session_id from public.runs where id = ${runId}`;
+  if (!ref) return false;
+  const woke = await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    const [r] = await tx`update public.runs set status = 'queued', wake_at = null
+      where id = ${runId} and status = 'waiting'
+        and exists (select 1 from public.events where run_id = ${runId} and type = 'tool' and status = 'awaiting_agent')
+        and not exists (select 1 from public.events where run_id = ${runId} and type = 'tool' and status in ('awaiting_approval', 'awaiting_input'))
+      returning id`;
+    if (r) await tx`update public.sessions set status = 'queued' where id = ${ref.session_id}`;
+    return !!r;
+  });
+  if (woke) await kickRun(runId);
+  return woke;
+}
+
+/** An asked agent's task ended: wake the run that asked. In its own transaction (never two tasks' locks at once). */
+async function wakeAsker(sessionId: string) {
+  const [s] = await db()`select parent_run_id from public.sessions where id = ${sessionId}`;
+  if (s?.parent_run_id) await wakeForAnswer(s.parent_run_id);
+}
+
+/** The run that asked ended: the agents still answering it stop, and their tasks say why. */
+async function stopAsks(userId: string, runId: string, askerName: string) {
+  const rows = await db()`select r.id, r.session_id from public.runs r join public.sessions s on s.id = r.session_id
+    where s.parent_run_id = ${runId} and r.trigger = 'agent' and r.status in ('queued', 'running', 'waiting', 'paused')`;
+  for (const r of rows) await stopAsked(userId, { id: String(r.id), session_id: String(r.session_id) }, `${askerName}’s task ended, so it no longer needs this answer.`);
+}
+
+/** Stop an asked agent's run, saying why on its task first. */
+async function stopAsked(userId: string, r: { id: string; session_id: string }, why: string) {
+  await db()`insert into public.events (user_id, session_id, run_id, type, status, data)
+    values (${userId}, ${r.session_id}, ${r.id}, 'status', 'done', ${db().json({ text: why, level: 'info' } satisfies StatusData as unknown as Json)})`;
+  await cancelRun(userId, r.id);
+}
+
+/**
+ * Cron backstop: wake runs whose asked agent answered but whose wake-up was missed (a crash between the
+ * two), and stop asked agents that ran past ASK_MINUTES (the agent that asked then gets an error).
+ */
+export async function tidyAsks(until = Infinity): Promise<{ woken: number; stopped: number }> {
+  const sql = db();
+  const missed = await sql`
+    select distinct e.run_id from public.events e
+      join public.runs p on p.id = e.run_id and p.status = 'waiting'
+      join public.sessions s on s.parent_run_id = e.run_id and s.parent_ask_key = e.id::text
+      join public.runs c on c.session_id = s.id and c.trigger = 'agent'
+    where e.type = 'tool' and e.status = 'awaiting_agent' and c.status in ('completed', 'failed', 'cancelled') and c.ended_at < now() - interval '30 seconds'
+    limit 20`;
+  let woken = 0;
+  for (const m of missed) {
+    if (Date.now() > until) break;
+    if (await wakeForAnswer(m.run_id)) woken++;
+  }
+  const late = await sql`
+    select r.id, r.user_id, r.session_id from public.runs r
+    where r.trigger = 'agent' and r.status in ('queued', 'running', 'waiting', 'paused') and r.created_at < now() - make_interval(mins => ${ASK_MINUTES})
+    order by r.created_at limit 20`;
+  let stopped = 0;
+  for (const r of late) {
+    if (Date.now() > until) break;
+    await sql`insert into public.events (user_id, session_id, run_id, type, status, data)
+      values (${r.user_id}, ${r.session_id}, ${r.id}, 'status', 'done', ${sql.json({ text: `Stopped: the agent that asked waits at most ${ASK_MINUTES} minutes for an answer.`, level: 'warn' } satisfies StatusData as unknown as Json)})`;
+    await cancelRun(r.user_id, r.id);
+    stopped++;
+  }
+  return { woken, stopped };
 }

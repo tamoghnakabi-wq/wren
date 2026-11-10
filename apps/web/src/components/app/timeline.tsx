@@ -1,6 +1,7 @@
 'use client';
 
-import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
+import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MessagesSquare, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
+import Link from 'next/link';
 import { GithubMark as Github } from '../brand';
 import { createContext, useContext, useEffect, useId, useMemo, useState } from 'react';
 import type { Approval, EventRow, PlanItem } from '@/lib/client/types';
@@ -33,6 +34,7 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   'memory.forget': Brain,
   'task.update_plan': ListChecks,
   'task.ask_user': CircleHelp,
+  'task.ask_agent': MessagesSquare,
   'task.notify': Bell,
   'screen.capture': Camera,
 };
@@ -49,6 +51,8 @@ interface ToolData {
   endedAt?: number;
   turnId?: string;
   engine?: boolean;
+  /** task.ask_agent: the task the other agent works on, and its name. */
+  ask?: { sessionId: string; agent: string };
 }
 
 type Item =
@@ -128,7 +132,10 @@ export function Timeline({ events, agent, approvals, working, waitingFor, stoppe
   const items = useMemo(() => markStopped(group(events), new Set(stoppedKey ? stoppedKey.split(',') : [])), [events, stoppedKey]);
   const last = events[events.length - 1];
   const showThinking = working && !(last?.type === 'message' && last.status === 'streaming' && String(last.data.text ?? ''));
-  const toolRunning = events.some((e) => e.type === 'tool' && e.status === 'running');
+  // Waiting for another agent's answer (task.ask_agent): working, through that agent.
+  const askingStep = events.find((e) => e.type === 'tool' && e.status === 'awaiting_agent');
+  const asking = askingStep ? String((askingStep.data as unknown as ToolData).ask?.agent || askingStep.data.args && (askingStep.data.args as Record<string, unknown>).agent || 'another agent') : undefined;
+  const toolRunning = !!asking || events.some((e) => e.type === 'tool' && e.status === 'running');
   return (
     <EndedRuns.Provider value={ended}>
     <div className="space-y-5">
@@ -169,7 +176,7 @@ export function Timeline({ events, agent, approvals, working, waitingFor, stoppe
       {showThinking && !waitingFor && (
         <div className="fade-in flex items-center gap-3 pl-1" role="status">
           {agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={toolRunning ? 'working' : 'thinking'} seed={agent.name} />}
-          <QuietFor key={last ? `${last.id}:${last.updated_at}` : 'start'} at={last?.updated_at ?? last?.created_at} thinking={!toolRunning} />
+          <QuietFor key={last ? `${last.id}:${last.updated_at}` : 'start'} at={last?.updated_at ?? last?.created_at} thinking={!toolRunning} asking={asking} />
         </div>
       )}
     </div>
@@ -184,7 +191,7 @@ const elapsed = (s: number) =>
  * "Thinking…" with how long it has been since the agent's last step. Some models think for minutes between
  * steps without showing any of it (Grok Build at its default effort), which otherwise looks frozen.
  */
-function QuietFor({ at, thinking }: { at?: string; thinking: boolean }) {
+function QuietFor({ at, thinking, asking }: { at?: string; thinking: boolean; /** The agent whose answer this one waits for. */ asking?: string }) {
   // The step's server time, or when this page saw it if that's earlier: a clock here running behind the
   // server's would otherwise show nothing. After a reload the server time still counts the whole wait.
   const [since] = useState(() => Math.min(Date.now(), Date.parse(at ?? '') || Date.now()));
@@ -197,7 +204,7 @@ function QuietFor({ at, thinking }: { at?: string; thinking: boolean }) {
   return (
     <span className="flex min-w-0 flex-col gap-0.5">
       <span className="flex items-baseline gap-2">
-        <span className="text-shimmer text-sm font-medium">{thinking ? 'Thinking…' : 'Working…'}</span>
+        <span className="text-shimmer text-sm font-medium">{thinking ? 'Thinking…' : asking ? `Waiting for ${asking}’s answer…` : 'Working…'}</span>
         {secs >= 10 && (
           <span className="text-[12.5px] text-faint tabular-nums" aria-hidden>
             {elapsed(secs)}
@@ -357,6 +364,14 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
         </div>
       )}
       {status === 'awaiting_approval' && !approval && <p className="px-3.5 pb-2.5 text-[12.5px] text-warning">Waiting for approval…</p>}
+      {d.name === 'task.ask_agent' && d.ask && (
+        <p className="px-3.5 pb-2.5 pl-10 text-[12.5px] text-muted">
+          {status === 'awaiting_agent' ? `${d.ask.agent} is working on the answer. ` : ''}
+          <Link href={`/app/s/${d.ask.sessionId}`} className="font-medium text-text underline decoration-border-strong underline-offset-2 hover:decoration-text">
+            Open {d.ask.agent}’s task
+          </Link>
+        </p>
+      )}
       {(images.length > 0 || artifacts.length > 0) && (
         <div className="flex flex-wrap gap-2 px-3.5 pb-2.5">
           {images.map((im) => (
@@ -386,6 +401,7 @@ function StepStatus({ status }: { status: string }) {
   if (status === 'running' || status === 'pending') return <span className="flex">{sr('Running')}<Loader2 className="h-3.5 w-3.5 animate-spin text-success" aria-hidden /></span>;
   if (status === 'done') return <span className="flex">{sr('Done')}<Check className="h-3.5 w-3.5 text-success" aria-hidden /></span>;
   if (status === 'awaiting_approval') return <span className="flex">{sr('Waiting for approval')}<Hand className="h-3.5 w-3.5 text-warning" aria-hidden /></span>;
+  if (status === 'awaiting_agent') return <span className="flex">{sr('Waiting for the other agent')}<Loader2 className="h-3.5 w-3.5 animate-spin text-faint" aria-hidden /></span>;
   if (status === 'denied') return <span className="text-[11.5px] font-medium text-warning">Denied</span>;
   if (status === 'cancelled') return <span className="text-[11.5px] text-faint">Stopped</span>;
   if (status === 'unfinished') return <span className="text-[11.5px] text-faint">Didn’t finish</span>;

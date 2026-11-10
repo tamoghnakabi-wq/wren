@@ -38,6 +38,8 @@ export interface Session {
   last_event_at: string;
   archived_at: string | null;
   created_at: string;
+  /** Set when another agent asked this task (task.ask_agent): the task that asked. */
+  parent_session_id?: string | null;
 }
 
 export interface Run {
@@ -47,6 +49,7 @@ export interface Run {
   status: SessionStatus;
   runtime: 'cloud' | 'desktop';
   device_id: string | null;
+  /** 'agent' for a task another agent asked. */
   trigger: string;
   model: ModelRef;
   step: number;

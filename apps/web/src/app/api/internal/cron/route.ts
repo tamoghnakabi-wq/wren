@@ -6,7 +6,7 @@ import { json, route } from '@/lib/http';
 import { notifyUser } from '@/lib/notify';
 import { runCleanups } from '@/lib/cleanup';
 import { endOrphanedRuns, revokeUnclaimedDevices } from '@/lib/devices';
-import { cleanUpCloudRun, endRemovedAgentRuns, kickRun, kickTick, startTask } from '@/lib/runs';
+import { cleanUpCloudRun, endRemovedAgentRuns, kickRun, kickTick, startTask, tidyAsks } from '@/lib/runs';
 import { nextRunAfter } from '@/lib/schedules';
 
 // Called every minute by pg_cron (Supabase) with the cron secret:
@@ -17,6 +17,7 @@ import { nextRunAfter } from '@/lib/schedules';
 //     of computers that were unlinked (W-147) and what removed agents left unfinished (W-163)
 //  5. finish cleaning up ended cloud runs whose commands weren't confirmed stopped
 //  6. retry deletions of cloud computers and stored files that didn't go through (W-157)
+//  7. wake agents whose answer from another agent was missed, and stop asked agents that took too long
 // The whole call answers by DEADLINE_MS (maxDuration is 60): each stage, its database work included, is
 // waited for only until then, the stages that are mostly database work come before the provider calls
 // (computers, files), and none starts new work once the time is up. A stage not reached is named in
@@ -35,7 +36,7 @@ export const POST = route(async (req) => {
   const until = Date.now() + DEADLINE_MS;
   const left = () => until - Date.now();
   const sql = db();
-  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, errors: [] as string[], skipped: [] as string[], late: [] as string[] };
+  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, asks: { woken: 0, stopped: 0 }, errors: [] as string[], skipped: [] as string[], late: [] as string[] };
   /** Wait for `work` at most `ms`, and never past the deadline: false if it was still going. */
   const inTime = async (work: Promise<unknown>, ms = Infinity): Promise<boolean> => {
     let timer: NodeJS.Timeout | undefined;
@@ -138,6 +139,9 @@ export const POST = route(async (req) => {
   });
   await stage('removed', async () => {
     report.removed = await endRemovedAgentRuns(until);
+  });
+  await stage('asks', async () => {
+    report.asks = await tidyAsks(until);
   });
 
   // At most 15 s here, so the deletions below still get their turn.

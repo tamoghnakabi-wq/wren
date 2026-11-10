@@ -6,13 +6,17 @@ import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
-import { appPaths, claudeSupportsRestricted, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { describeCall } from '@wren/core';
+import { appPaths, askThroughWren, claudeSupportsRestricted, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 import { engineProgram } from './program';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
 // computer, signed in by the user through Anthropic's login. Wren never sees
 // Claude credentials; it streams the CLI's events into the task timeline and
 // answers its permission prompts through a local MCP tool (mcp__wren__approve).
+
+/** Wren's ask_agent tool as Claude Code names it. */
+export const ASK_TOOL = 'mcp__wren__ask_agent';
 
 const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: string; args: Record<string, unknown>; paths: string[] }> = {
   Bash: (i) => ({ name: 'computer.shell', args: { command: String(i.command ?? '') }, paths: [] }),
@@ -25,6 +29,8 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
   Grep: (i) => ({ name: 'computer.list_files', args: { path: String(i.path ?? '.') }, paths: i.path ? [String(i.path)] : [] }),
   WebFetch: (i) => ({ name: 'web.fetch', args: { url: String(i.url ?? '') }, paths: [] }),
   WebSearch: (i) => ({ name: 'web.fetch', args: { url: `search: ${String(i.query ?? '')}` }, paths: [] }),
+  // Wren's own tool (its MCP helper): asking another of the user's agents, shown like the agent loop's.
+  [ASK_TOOL]: (i) => ({ name: 'task.ask_agent', args: { agent: String(i.agent ?? ''), question: String(i.question ?? '') }, paths: [] }),
 };
 
 /**
@@ -89,6 +95,8 @@ function titleFor(name: string, input: Record<string, unknown>): string {
     case 'Task':
     case 'Agent':
       return `Delegate: ${String(input.description ?? '').slice(0, 80)}`;
+    case ASK_TOOL:
+      return describeCall('task.ask_agent', { agent: String(input.agent ?? ''), question: String(input.question ?? '') });
     default:
       return name;
   }
@@ -153,11 +161,18 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   const writer = new TimelineWriter(run.store, 'claude-code', run.model === 'default' ? 'Claude Code' : run.model);
   run.store.usageSource = 'claude-code';
 
-  // Local endpoint the MCP approval tool calls back into.
-  const bridge = await startApprovalBridge(async ({ tool_name, input, tool_use_id, signal }) => {
-    const m = mapTool(tool_name, input);
-    return decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders, signal);
-  });
+  // Local endpoint the MCP approval tool (and ask_agent) calls back into.
+  const asked = new Map<string, number>();
+  const bridge = await startApprovalBridge(
+    async ({ tool_name, input, tool_use_id, signal }) => {
+      // Wren's own ask_agent needs no approval: the server decides which agents this one may ask.
+      if (tool_name === ASK_TOOL) return run.askable?.length ? { allow: true } : { allow: false, message: 'Asking other agents isn’t available here.' };
+      const m = mapTool(tool_name, input);
+      return decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders, signal);
+    },
+    undefined,
+    run.askable?.length ? (req) => askThroughWren(run, writer, req, asked) : undefined,
+  );
 
   // Everything acquired from here on (the bridge, the private folder, the CLI and its Stop handler) is
   // released in the finally, each step on its own, so one failing can't skip the others (W-131).
@@ -171,7 +186,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     // The approval server gets a sandbox profile that can read that folder (see SHELL_PREFIX).
     mkdirSync(privateDir, { recursive: true, mode: 0o700 });
     const approvalFile = join(privateDir, 'approval.json');
-    writeFileSync(approvalFile, JSON.stringify({ url: bridge.url, token: bridge.token }), { mode: 0o600 });
+    writeFileSync(approvalFile, JSON.stringify({ url: bridge.url, token: bridge.token, askable: run.askable ?? [] }), { mode: 0o600 });
     const serverEnv: Record<string, string> = { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_FILE: approvalFile };
     if (hasSeatbelt()) serverEnv.WREN_APPROVAL_SB = approvalServerProfile(allowedRoots(run.folders), dataDir(), appPaths(approveScript), privateDir);
     const mcpFile = join(privateDir, 'mcp.json');

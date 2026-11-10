@@ -5,9 +5,9 @@ import { Check, Cloud, Info, Laptop, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
-import { engineModels, SOURCES, sourceInfo, type ModelChoice } from '@/lib/client/sources';
+import { engineModels, modelLabel, SOURCES, sourceInfo, type ModelChoice } from '@/lib/client/sources';
 import type { Agent, Connection } from '@/lib/client/types';
-import { AGENT_COLORS } from '../agent-avatar';
+import { AGENT_COLORS, AgentAvatar } from '../agent-avatar';
 import { CHARACTER_KEYS, CHARACTERS, characterFor, MOOD_LABEL, type CharacterKey, type Mood } from '@/lib/characters';
 import { AgentCharacter } from '../agent-character';
 import { Badge, Card, cx, Input, Label, Select, Skeleton, Spinner, Switch, Textarea } from '../ui';
@@ -21,7 +21,7 @@ export interface AgentDraft {
   model: { source: string; model: string; connectionId?: string; effort?: 'low' | 'medium' | 'high' };
   runtime: 'cloud' | 'desktop';
   deviceId: string | null;
-  tools: { computer: boolean; browser: boolean; web: boolean; github: boolean; memory: boolean; notify: boolean; screen: boolean; mcp: string[] };
+  tools: { computer: boolean; browser: boolean; web: boolean; github: boolean; memory: boolean; notify: boolean; screen: boolean; mcp: string[]; agents: string[] };
   autonomy: 'careful' | 'balanced' | 'autonomous';
   memoryEnabled: boolean;
 }
@@ -34,7 +34,7 @@ export const emptyDraft = (): AgentDraft => ({
   model: { source: '', model: '' },
   runtime: 'cloud',
   deviceId: null,
-  tools: { computer: true, browser: true, web: true, github: false, memory: true, notify: true, screen: false, mcp: [] },
+  tools: { computer: true, browser: true, web: true, github: false, memory: true, notify: true, screen: false, mcp: [], agents: [] },
   autonomy: 'balanced',
   memoryEnabled: true,
 });
@@ -85,8 +85,10 @@ const TOOLS: { key: keyof AgentDraft['tools']; title: string; body: string; desk
   { key: 'screen', title: 'Screen capture', body: 'See your screen (always asks)', desktopOnly: true },
 ];
 
-export function AgentForm({ draft, onChange }: { draft: AgentDraft; onChange: (d: AgentDraft) => void }) {
-  const { devices, userId } = useApp();
+/** `selfId`: the agent being edited (it can't ask itself). */
+export function AgentForm({ draft, onChange, selfId }: { draft: AgentDraft; onChange: (d: AgentDraft) => void; selfId?: string }) {
+  const { devices, userId, agents } = useApp();
+  const others = agents.filter((a) => a.id !== selfId);
   const set = <K extends keyof AgentDraft>(k: K, v: AgentDraft[K]) => onChange({ ...draft, [k]: v });
   const src = sourceInfo(draft.model.source);
   const connections = useLive<Connection>({ table: 'connections', eq: { user_id: userId } });
@@ -183,6 +185,31 @@ export function AgentForm({ draft, onChange }: { draft: AgentDraft; onChange: (d
             </div>
           ))}
         </Card>
+      </section>
+
+      <section>
+        <h3 className="mb-1 text-base font-semibold">Other agents it can ask</h3>
+        <p className="mb-3 text-[13px] text-muted">For a second opinion or help, in the middle of a task. Each one answers with its own brain and tools, and with no more freedom than this agent has.</p>
+        {others.length ? (
+          <Card className="divide-y divide-border">
+            {others.map((a) => (
+              <div key={a.id} className="flex items-center gap-3 px-4 py-3">
+                <AgentAvatar icon={a.icon} color={a.color} size={32} still seed={a.id} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{a.name}</p>
+                  <p className="truncate text-[12.5px] text-muted">{modelLabel(a.model?.source, a.model?.model)}</p>
+                </div>
+                <Switch
+                  label={`Can ask ${a.name}`}
+                  checked={draft.tools.agents.includes(a.id)}
+                  onChange={(v) => set('tools', { ...draft.tools, agents: v ? [...draft.tools.agents, a.id] : draft.tools.agents.filter((x) => x !== a.id) })}
+                />
+              </div>
+            ))}
+          </Card>
+        ) : (
+          <p className="rounded-xl border border-dashed border-border px-4 py-3 text-[13px] text-muted">Once you have another agent, you can let this one ask it questions.</p>
+        )}
       </section>
 
       <section>

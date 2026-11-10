@@ -76,7 +76,12 @@ export default function SessionPage() {
   for (const e of events.rows) if (e.run_id && e.type === 'message' && e.data.role === 'assistant') turns.set(e.run_id, (turns.get(e.run_id) ?? 0) + 1);
   const steps = runs.rows.reduce((n, r) => n + Math.max(r.step, turns.get(r.id) ?? 0), 0);
   const sessionApprovals = approvals.filter((a) => a.session_id === id);
-  const working = !!run && ['queued', 'running'].includes(run.status);
+  // Waiting for another agent's answer counts as working: the task is busy, through that agent.
+  const askingAgent = events.rows.some((e) => e.type === 'tool' && e.run_id === run?.id && e.status === 'awaiting_agent');
+  const working = !!run && (['queued', 'running'].includes(run.status) || (run.status === 'waiting' && askingAgent));
+  // A task another agent asked: link back to the task that asked.
+  const parent = useLive<Session>({ table: 'sessions', eq: { id: s?.parent_session_id ?? undefined }, enabled: !!s?.parent_session_id });
+  const asker = parent.rows[0];
   const plan = useMemo(() => {
     const p = [...latestPlan.rows].sort((a, b) => b.seq - a.seq)[0];
     return (p?.data.items as PlanItem[] | undefined) ?? null;
@@ -88,7 +93,7 @@ export default function SessionPage() {
   const device = devices.find((d) => d.id === s?.device_id);
   // A desktop task whose computer is offline hasn't started: say so, rather than "Thinking…".
   const waitingForComputer = !!run && run.status === 'queued' && s?.runtime === 'desktop' && !(device && isLiveDevice(device));
-  const toolRunning = working && events.rows.some((e) => e.type === 'tool' && e.run_id === run?.id && e.status === 'running');
+  const toolRunning = working && (askingAgent || events.rows.some((e) => e.type === 'tool' && e.run_id === run?.id && e.status === 'running'));
   const mood: Mood =
     sessionApprovals.length || askingQuestion || s?.status === 'waiting'
       ? 'waiting'
@@ -327,6 +332,23 @@ export default function SessionPage() {
                     Load earlier activity
                   </Button>
                 </div>
+              )}
+              {s.parent_session_id && (
+                <p className="mb-5 flex items-center justify-center gap-2 text-center text-[12.5px] text-muted" role="note">
+                  <AgentAvatar icon={agentById(asker?.agent_id)?.icon} color={agentById(asker?.agent_id)?.color} size={20} still seed={asker?.agent_id} />
+                  <span>
+                    {agentById(asker?.agent_id)?.name ?? 'Another agent'} asked this
+                    {asker ? (
+                      <>
+                        {' '}while working on{' '}
+                        <Link href={`/app/s/${asker.id}`} title={asker.title} className="font-medium text-text underline decoration-border-strong underline-offset-2 hover:decoration-text">
+                          {asker.title.length > 60 ? `${asker.title.slice(0, 59).trimEnd()}…` : asker.title}
+                        </Link>
+                      </>
+                    ) : null}
+                    . The answer goes back to it.
+                  </span>
+                </p>
               )}
               {events.loading ? (
                 <TimelineSkeleton />

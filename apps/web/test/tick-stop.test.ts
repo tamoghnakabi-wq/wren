@@ -131,6 +131,8 @@ vi.mock('../src/lib/runs', () => ({
   kickTick: async () => {
     state.kicked++;
   },
+  askableAgents: async () => [],
+  stricter: (own: string) => own,
 }));
 vi.mock('../src/lib/notify', () => ({ notifyUser: async () => {} }));
 vi.mock('../src/lib/cleanup', () => ({ cleanUp: async () => {} }));

@@ -24,6 +24,7 @@ vi.mock('@/lib/runs', () => ({
   cleanUpCloudRun: async () => true,
   startTask: async () => ({ sessionId: 's' }),
   endRemovedAgentRuns: (...a: unknown[]) => record('removed', 0)(...a),
+  tidyAsks: (...a: unknown[]) => record('asks', { woken: 0, stopped: 0 })(...a),
 }));
 vi.mock('@/lib/devices', () => ({
   revokeUnclaimedDevices: (...a: unknown[]) => record('unclaimed', 0)(...a),
@@ -50,7 +51,7 @@ describe('cron deadline', () => {
     await vi.advanceTimersByTimeAsync(45_000);
     const report = await (await res).json();
     expect(report.late).toEqual(['kick']);
-    expect(report.skipped).toEqual(['schedules', 'approvals', 'unclaimed', 'orphaned', 'removed', 'cleanup', 'deletions', 'housekeeping']);
+    expect(report.skipped).toEqual(['schedules', 'approvals', 'unclaimed', 'orphaned', 'removed', 'asks', 'cleanup', 'deletions', 'housekeeping']);
     expect(report.kicked).toBe(1);
     expect(calls.deletions).toBeUndefined();
   });
@@ -74,7 +75,7 @@ describe('cron deadline', () => {
     const report = await (await call()).json();
     expect(report.skipped).toEqual([]);
     expect(report.late).toEqual([]);
-    for (const name of ['unclaimed', 'removed']) {
+    for (const name of ['unclaimed', 'removed', 'asks']) {
       const until = calls[name][0] as number;
       expect(until, name).toBeGreaterThan(before);
       expect(until, name).toBeLessThanOrEqual(before + 45_000 + 1000);

@@ -1,7 +1,8 @@
-import type { ApprovalRequest, ApprovalState, ModelUsage, RunStore, SessionEvent } from '@wren/core';
+import type { AgentAnswer, ApprovalRequest, ApprovalState, AskAgentRequest, AskAgentStart, ModelUsage, RunStore, SessionEvent } from '@wren/core';
 import { HttpError } from '../auth';
 import { db, type Json } from '../db';
 import { notifyUser, sendPush } from '../notify';
+import { agentAnswer, askAgent } from '../runs';
 
 // RunStore backed by Postgres. Every write bumps the session's last_event_at
 // so lists sort by activity; Realtime pushes the rows to open browsers.
@@ -164,6 +165,19 @@ export class DbRunStore implements RunStore {
     const sql = db();
     const saved = await notifyUser({ userId: this.r.userId, kind, title: `${this.r.agentName}: ${title}`, body, url: `/app/s/${this.r.sessionId}`, sessionId: this.r.sessionId }, this.holds(sql));
     if (!saved) throw new LeaseLostError();
+  }
+
+  /** Ask another of the user's agents; the asking run's lease is checked as the task is created. */
+  async askAgent(req: AskAgentRequest): Promise<AskAgentStart> {
+    const r = await askAgent({ userId: this.r.userId, runId: this.r.runId, lease: this.r.leaseId, ...req }).catch((e: HttpError) => {
+      throw e?.code === 'lease_lost' ? new LeaseLostError() : e;
+    });
+    if ('error' in r) await this.assertLease();
+    return r;
+  }
+
+  async agentAnswer(key: string): Promise<AgentAnswer> {
+    return agentAnswer(this.r.userId, this.r.runId, key);
   }
 
   memory = {

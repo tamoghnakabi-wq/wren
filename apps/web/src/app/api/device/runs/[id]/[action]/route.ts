@@ -8,7 +8,7 @@ import { body, json, route, uuid } from '@/lib/http';
 import { callMcp, mcpNamespace, mcpToolSpecs, type McpToolInfo } from '@/lib/mcp';
 import { connectionSecret } from '@/lib/models';
 import { assertPlatformAllowed, operatorGatewayToken } from '@/lib/platform-credits';
-import { decideApproval, finishRun, taskTx } from '@/lib/runs';
+import { agentAnswer, askableAgents, askAgent, cancelAsk, decideApproval, finishRun, stricter, taskTx } from '@/lib/runs';
 import { DbRunStore } from '@/lib/runner/store';
 
 // Everything a desktop device needs to execute a run it owns. The device runs
@@ -88,9 +88,11 @@ export const POST = route<Ctx>(async (req, ctx) => {
         claimed: true,
         leaseId,
         run: { id: run.id, sessionId: run.session_id, step: claimed[0].step, maxSteps: claimed[0].max_steps, model: run.model, trigger: run.trigger },
-        agent: { id: agent.id, name: agent.name, autonomy: agent.autonomy, tools, instructions: systemPrompt({ name: agent.name, instructions: agent.instructions }, 'desktop', device.platform) },
+        // A task another agent asked works with no more freedom than that agent.
+        agent: { id: agent.id, name: agent.name, autonomy: stricter(agent.autonomy, claimed[0].autonomy_cap), tools, instructions: systemPrompt({ name: agent.name, instructions: agent.instructions }, 'desktop', device.platform) },
         mcpTools,
         githubConnected: github,
+        askable: await askableAgents(claimed[0] as { user_id: string; agent_id: string; trigger: string }, tools),
       });
     }
     case 'events': {
@@ -143,6 +145,22 @@ export const POST = route<Ctx>(async (req, ctx) => {
     case 'notify': {
       const b = z.object({ title: z.string().max(200), body: z.string().max(2000), kind: z.string().max(30) }).parse(raw);
       await storeFor(run, lease).notify(b.title, b.body, b.kind);
+      return json({ ok: true });
+    }
+    case 'ask-agent': {
+      // Who may be asked is decided from the database (the agent's settings), not from this request.
+      const b = z.object({ key: z.string().min(1).max(100), agent: z.string().trim().min(1).max(100), question: z.string().trim().min(1).max(8000) }).parse(raw);
+      await renew(runId, lease);
+      return json(await askAgent({ userId: run.user_id as string, runId, lease: lease!, ...b }));
+    }
+    case 'agent-answer': {
+      const b = z.object({ key: z.string().min(1).max(100) }).parse(raw);
+      await renew(runId, lease);
+      return json(await agentAnswer(run.user_id as string, runId, b.key));
+    }
+    case 'ask-cancel': {
+      const b = z.object({ key: z.string().min(1).max(100) }).parse(raw);
+      await cancelAsk(run.user_id as string, runId, b.key);
       return json({ ok: true });
     }
     case 'memory': {
