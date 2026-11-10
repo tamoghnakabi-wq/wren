@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Ban, Cloud, KeyRound, Laptop, Smartphone } from 'lucide-react';
+import { Ban, CircleStop, Cloud, KeyRound, Laptop, ShieldCheck, Smartphone, ToggleRight } from 'lucide-react';
 import { cx } from '@/lib/cx';
 import { AgentCharacter } from '@/components/agent-character';
 import { CHARACTERS, type CharacterKey, type Mood } from '@/lib/characters';
@@ -7,6 +7,7 @@ import { SiteFooter, SiteNav } from '@/components/site';
 import { DownloadButtons } from '@/components/download-buttons';
 import { HeroRun } from '@/components/landing/hero-run';
 import { AutonomyPicker } from '@/components/landing/autonomy';
+import { AskExchange } from '@/components/landing/ask-exchange';
 
 export default function Landing() {
   return (
@@ -17,6 +18,7 @@ export default function Landing() {
         <Day />
         <Crew />
         <Plans />
+        <AskEachOther />
         <Brakes />
         <FinalCta />
       </main>
@@ -295,6 +297,39 @@ function Plans() {
             </div>
           ))}
         </dl>
+      </div>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------ agents asking agents
+
+function AskEachOther() {
+  const facts: [typeof Ban, string, string][] = [
+    [ToggleRight, 'You choose who asks whom', 'Each agent has a list of the others it may ask. Until you switch one on, it can’t ask anyone.'],
+    [ShieldCheck, 'No more freedom than the asker', 'The agent that answers works at the more careful of the two settings, and can’t pass the question on.'],
+    [CircleStop, 'Stopping one stops both', 'Stop a task and any agent it asked stops too. Every question stays in your task list with its answer.'],
+  ];
+  return (
+    <section className="border-b border-border">
+      <div className="mx-auto max-w-6xl px-4 py-24 sm:px-6 lg:py-32">
+        <h2 className={cx(h2, 'max-w-3xl')}>Your agents can ask each other.</h2>
+        <p className={lede}>Mix the plans you already have. An agent on your Claude plan can stop in the middle of a task, ask one on your ChatGPT plan for a second opinion, and carry on with the answer.</p>
+        <div className="mt-14">
+          <AskExchange />
+        </div>
+        <dl className="mt-12 grid gap-8 sm:grid-cols-3">
+          {facts.map(([Icon, t, b]) => (
+            <div key={t}>
+              <dt className="flex items-center gap-2.5 text-[16px] font-semibold">
+                <Icon className="h-4 w-4 shrink-0 text-brand-ink" aria-hidden />
+                {t}
+              </dt>
+              <dd className="mt-1 pl-[26px] text-[15px] leading-relaxed text-muted">{b}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-10 text-[13px] text-faint">Agents on ChatGPT, Claude Code, an API key or a local model can ask. Grok Build agents can be asked, but can’t ask others yet.</p>
       </div>
     </section>
   );
