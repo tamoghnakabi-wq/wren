@@ -69,7 +69,7 @@ export default function InboxPage() {
       />
       {approvals.length > 0 && (
         <section className="mb-8">
-          <h2 className="mb-3 text-[13px] font-semibold tracking-wide text-faint uppercase">Waiting for your approval</h2>
+          <h2 className="mb-3 font-display text-[22px] leading-none font-bold">Waiting for your approval</h2>
           <div className="space-y-3">
             {approvals.map((a) => (
               <ApprovalCard key={a.id} approval={a} />
@@ -81,7 +81,7 @@ export default function InboxPage() {
         {notifications.length ? (
           groups.map((g) => (
             <div key={g.label}>
-              <h2 className="mb-3 text-[13px] font-semibold tracking-wide text-faint uppercase">{g.label}</h2>
+              <h2 className="mb-3 font-display text-[22px] leading-none font-bold">{g.label}</h2>
               <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
             {g.items.map((n) => {
               const Icon = ICON[n.kind] ?? Bell;

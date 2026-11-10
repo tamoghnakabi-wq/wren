@@ -251,7 +251,7 @@ export async function signIn(opts: { forceConsent?: boolean } = {}): Promise<Cha
       }
       const page = (title: string, body: string) => {
         res.setHeader('content-type', 'text/html; charset=utf-8');
-        res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0;background:#f7f5f2;color:#1c1917"><div style="text-align:center"><h1 style="font-weight:600">${title}</h1><p>${body}</p></div></body>`);
+        res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0;background:#f4f4f3;color:#141414"><div style="text-align:center"><h1 style="font-weight:700;letter-spacing:-0.02em">${title}</h1><p>${body}</p></div></body>`);
       };
       clearTimeout(timer);
       if (url.searchParams.get('state') !== state) {

@@ -210,7 +210,7 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
           );
         })}
       </nav>
-      <div className="mt-6 flex items-center justify-between px-6 text-[11px] font-semibold tracking-wider text-faint uppercase rail:mt-4 rail:justify-center rail:border-t rail:border-border rail:px-0 rail:pt-4">
+      <div className="mt-6 flex items-center justify-between px-6 text-[13px] font-semibold text-muted rail:mt-4 rail:justify-center rail:border-t rail:border-border rail:px-0 rail:pt-4">
         <span className="rail:sr-only">Agents</span>
         <Link href="/app/agents/new" className="group relative rounded p-0.5 transition-colors hover:bg-surface hover:text-text rail:p-1.5" aria-label="New agent">
           <Plus className="h-3.5 w-3.5" aria-hidden />

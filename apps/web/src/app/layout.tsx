@@ -1,12 +1,14 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter, Instrument_Serif, JetBrains_Mono } from 'next/font/google';
+import { Bricolage_Grotesque, Instrument_Sans, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { ThemeWatcher } from '@/components/theme-watcher';
 import { SiteAnalytics } from '@/components/analytics';
 import { PREFS_SCRIPT } from '@/lib/prefs';
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
-const serif = Instrument_Serif({ subsets: ['latin'], weight: '400', variable: '--font-display-serif', display: 'swap' });
+// Instrument Sans for the interface and body text; Bricolage Grotesque (narrow, heavy) for headlines;
+// JetBrains Mono only for commands and code.
+const sans = Instrument_Sans({ subsets: ['latin'], variable: '--font-sans-face', display: 'swap' });
+const display = Bricolage_Grotesque({ subsets: ['latin'], variable: '--font-display-face', display: 'swap', axes: ['opsz', 'wdth'] });
 const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono-face', display: 'swap' });
 
 export const metadata: Metadata = {
@@ -19,8 +21,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#f7f5f2' },
-    { media: '(prefers-color-scheme: dark)', color: '#121110' },
+    { media: '(prefers-color-scheme: light)', color: '#f4f4f3' },
+    { media: '(prefers-color-scheme: dark)', color: '#131313' },
   ],
   width: 'device-width',
   initialScale: 1,
@@ -29,7 +31,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning className={`${inter.variable} ${serif.variable} ${mono.variable}`}>
+    <html lang="en" suppressHydrationWarning className={`${sans.variable} ${display.variable} ${mono.variable}`}>
       <head>
         {/* A plain inline script in <head> runs before the page is drawn (next/script's
             beforeInteractive is queued and runs after first paint, which flashed the wrong

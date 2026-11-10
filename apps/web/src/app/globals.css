@@ -8,70 +8,86 @@
 /* The on-screen keyboard is open (set by the task page from the visual viewport). */
 @custom-variant kb-open (&:where(:root[data-keyboard] *));
 
+/* Graphite: black and white, so the colour on screen is the agents' own (their characters) and one
+   amber "lamp" that only means "an agent needs you". Every text pair is ≥4.5:1. */
 :root {
-  --bg: #f7f5f2;
-  --bg-subtle: #f0ede8;
+  --bg: #f4f4f3;
+  --bg-subtle: #eaeae8;
   --surface: #ffffff;
-  --surface-2: #faf9f7;
-  --border: #e6e2dc;
-  --border-strong: #d6d0c7;
-  --text: #1c1917;
-  --text-muted: #5f5953;
-  --text-faint: #706860; /* ≥4.5:1 on bg, bg-subtle and surface */
-  --primary: #1c1917;
+  --surface-2: #f9f9f8;
+  --border: #e2e2df;
+  --border-strong: #cbcbc7;
+  --text: #141414;
+  --text-muted: #52524f;
+  --text-faint: #64645f; /* ≥4.5:1 on bg, bg-subtle, surface and surface-2 */
+  --primary: #141414;
   --primary-fg: #ffffff;
-  --brand: #d9622b;
-  --brand-soft: #fbe9df;
-  /* Filled brand surfaces (badges, brand buttons) and the text on them: 4.5:1 or better. */
-  --brand-solid: #c2531f;
-  /* Brand-coloured small text: ≥4.5:1 on surface and brand-soft. */
-  --brand-ink: #b04a17;
+  /* The brand is ink itself: brand fills are black, brand text is body text. */
+  --brand: #141414;
+  --brand-soft: #e7e7e4;
+  --brand-solid: #141414;
+  --brand-ink: #141414;
   --brand-fg: #ffffff;
   --danger-fg: #ffffff;
-  --success: #15803d;
-  --success-soft: #dcfce7;
-  --warning: #b45309;
-  --warning-soft: #fef3c7;
-  --danger: #b91c1c;
-  --danger-soft: #fee2e2;
-  --info: #1d4ed8;
-  --info-soft: #dbeafe;
-  --ring: #d9622b55;
-  --shadow: 0 1px 2px rgb(28 25 23 / 0.04), 0 4px 16px rgb(28 25 23 / 0.06);
-  --shadow-lg: 0 2px 6px rgb(28 25 23 / 0.06), 0 16px 48px rgb(28 25 23 / 0.12);
+  --success: #0d7341;
+  --success-soft: #dcf5e7;
+  --warning: #8f5300;
+  --warning-soft: #fff1d6;
+  --danger: #c0262d;
+  --danger-soft: #fde4e4;
+  --info: #52524f;
+  --info-soft: #ececea;
+  --ring: rgb(20 20 20 / 0.18);
+  --focus: #141414;
+  --shadow: 0 0 0 1px rgb(20 20 20 / 0.02), 0 1px 2px rgb(20 20 20 / 0.05), 0 10px 28px -16px rgb(20 20 20 / 0.2);
+  --shadow-lg: 0 0 0 1px rgb(20 20 20 / 0.04), 0 4px 12px rgb(20 20 20 / 0.06), 0 28px 64px -24px rgb(20 20 20 / 0.34);
   color-scheme: light;
 }
 
 .dark {
-  --bg: #121110;
-  --bg-subtle: #1a1917;
-  --surface: #1c1b19;
-  --surface-2: #232220;
-  --border: #2f2d2a;
-  --border-strong: #403d39;
-  --text: #f3f1ee;
-  --text-muted: #b3ada6;
-  --text-faint: #908a82; /* ≥4.5:1 on bg, surface and surface-2 */
-  --primary: #f3f1ee;
-  --primary-fg: #121110;
-  --brand: #f07b43;
-  --brand-soft: #3a2418;
-  --brand-solid: #f07b43;
-  --brand-ink: #f08a59;
-  --brand-fg: #1a0f08;
+  --bg: #0f0f0f;
+  --bg-subtle: #141414;
+  --surface: #191919;
+  --surface-2: #202020;
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
+  --text: #f2f2f0;
+  --text-muted: #a9a9a5;
+  --text-faint: #8d8d89; /* ≥4.5:1 on bg, bg-subtle, surface and surface-2 */
+  --primary: #f2f2f0;
+  --primary-fg: #0f0f0f;
+  --brand: #f2f2f0;
+  --brand-soft: #262626;
+  --brand-solid: #f2f2f0;
+  --brand-ink: #f2f2f0;
+  --brand-fg: #0f0f0f;
   --danger-fg: #1f0a0a;
-  --success: #4ade80;
-  --success-soft: #14301f;
-  --warning: #fbbf24;
-  --warning-soft: #3a2c0d;
-  --danger: #f87171;
-  --danger-soft: #3b1515;
-  --info: #93c5fd;
-  --info-soft: #172338;
-  --ring: #f07b4366;
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 4px 16px rgb(0 0 0 / 0.25);
-  --shadow-lg: 0 2px 6px rgb(0 0 0 / 0.4), 0 16px 48px rgb(0 0 0 / 0.45);
+  --success: #5be39a;
+  --success-soft: #0f2e22;
+  --warning: #ffc266;
+  --warning-soft: #33260c;
+  --danger: #ff8a8a;
+  --danger-soft: #3a1520;
+  --info: #a9a9a5;
+  --info-soft: #262626;
+  --ring: rgb(242 242 240 / 0.24);
+  --focus: #f2f2f0;
+  --shadow: 0 0 0 1px rgb(255 255 255 / 0.015), 0 1px 2px rgb(0 0 0 / 0.35), 0 12px 32px -18px rgb(0 0 0 / 0.7);
+  --shadow-lg: 0 0 0 1px rgb(255 255 255 / 0.03), 0 4px 14px rgb(0 0 0 / 0.35), 0 32px 72px -24px rgb(0 0 0 / 0.75);
   color-scheme: dark;
+}
+
+/* The night palette is the same in both themes: the site's hero, the sign-in page's side, the desktop's
+   offline page. */
+:root {
+  --night: #131313;
+  --night-2: #1b1b1b;
+  --night-3: #242424;
+  --night-line: #2e2e2e;
+  --night-text: #f4f4f2;
+  --night-muted: #a6a6a2;
+  --lamp: #ffb23f;
+  --lamp-ink: #1a1200;
 }
 
 @theme inline {
@@ -100,11 +116,31 @@
   --color-danger-soft: var(--danger-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-display: var(--font-display-serif), ui-serif, Georgia, serif;
+  --color-night: var(--night);
+  --color-night-2: var(--night-2);
+  --color-night-3: var(--night-3);
+  --color-night-line: var(--night-line);
+  --color-night-text: var(--night-text);
+  --color-night-muted: var(--night-muted);
+  --color-lamp: var(--lamp);
+  --color-lamp-ink: var(--lamp-ink);
+  --font-sans: var(--font-sans-face), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: var(--font-display-face), var(--font-sans-face), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-mono-face), ui-monospace, SFMono-Regular, Menlo, monospace;
   --shadow-card: var(--shadow);
   --shadow-pop: var(--shadow-lg);
+  /* Radius by role: controls 10px, panels 14px, large surfaces 20px, pills round. */
+  --radius-xl: 10px;
+  --radius-2xl: 14px;
+  --radius-3xl: 20px;
+}
+
+/* Bricolage Grotesque, cut narrow and heavy at display sizes: the site's and app's headline voice. */
+@utility font-display {
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 96, 'wdth' 84;
+  letter-spacing: -0.028em;
+  font-feature-settings: 'ss01';
 }
 
 /* Element defaults live in Tailwind's base layer, so a utility on the element (e.g.
@@ -127,7 +163,7 @@
   }
 
   :focus-visible {
-    outline: 2px solid var(--brand);
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
 
@@ -378,7 +414,31 @@ dialog[open].dialog-in::backdrop {
   animation: wren-fade 0.2s ease-out both;
 }
 
+/* The landing page's task replay (components/landing/hero-run.tsx). */
+@keyframes hero-step {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.hero-step {
+  animation: hero-step 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.hero-pop {
+  animation: wren-dialog 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.hero-fade {
+  animation: wren-fade 0.35s ease-out both;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .hero-step,
+  .hero-pop,
+  .hero-fade,
   .skeleton,
   .pop-in,
   .toast-in,

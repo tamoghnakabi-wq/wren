@@ -1,26 +1,28 @@
 import { cx } from '@/lib/cx';
 
-/** Wren mark: a small bird in a single stroke-free shape. */
-export function WrenMark({ className }: { className?: string }) {
+/** Wren mark: a small bird cut out of an ink tile, with an amber eye (the "lamp" that means an agent
+    needs you). `night` is for the always-dark sections, where the tile turns light. */
+export function WrenMark({ className, tone = 'auto' }: { className?: string; tone?: 'auto' | 'night' }) {
+  const night = tone === 'night';
   return (
     <svg viewBox="0 0 32 32" className={cx('h-7 w-7', className)} aria-hidden>
-      <rect width="32" height="32" rx="9" fill="var(--brand)" />
+      <rect width="32" height="32" rx="8" className={night ? 'fill-night-text' : 'fill-primary'} />
       <g transform="translate(-1.6 -1.5)">
-      <path
-        d="M8.5 19.2c0-4.6 3.6-8.3 8.1-8.3 2.2 0 4 .8 5.3 2.2l3.7-1.6-1.9 3.4c.4 1 .6 2.1.6 3.3 0 .5 0 .9-.1 1.4l2 2.6-3.2-.6c-1.5 2.1-3.9 3.4-6.6 3.4H8.5l2.6-2.4c-1.6-.9-2.6-2-2.6-3.4Z"
-        fill="#fff"
-      />
-      <circle cx="20.2" cy="15.6" r="1.25" fill="var(--brand)" />
+        <path
+          d="M8.5 19.2c0-4.6 3.6-8.3 8.1-8.3 2.2 0 4 .8 5.3 2.2l3.7-1.6-1.9 3.4c.4 1 .6 2.1.6 3.3 0 .5 0 .9-.1 1.4l2 2.6-3.2-.6c-1.5 2.1-3.9 3.4-6.6 3.4H8.5l2.6-2.4c-1.6-.9-2.6-2-2.6-3.4Z"
+          className={night ? 'fill-night' : 'fill-primary-fg'}
+        />
+        <circle cx="20.2" cy="15.6" r="1.35" className="fill-lamp" />
       </g>
     </svg>
   );
 }
 
-export function Logo({ className }: { className?: string }) {
+export function Logo({ className, tone = 'auto' }: { className?: string; tone?: 'auto' | 'night' }) {
   return (
-    <span className={cx('inline-flex items-center gap-2 font-semibold tracking-tight', className)}>
-      <WrenMark />
-      <span className="text-[17px]">Wren</span>
+    <span className={cx('inline-flex items-center gap-2', className)}>
+      <WrenMark tone={tone} />
+      <span className="font-display text-[21px] leading-none font-bold">Wren</span>
     </span>
   );
 }

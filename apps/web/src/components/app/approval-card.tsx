@@ -93,7 +93,7 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
             )}
             {showAgent && (
               <Link href={`/app/s/${approval.session_id}`} className="ml-auto text-[13px] text-muted hover:text-text">
-                Open task →
+                Open task
               </Link>
             )}
           </div>

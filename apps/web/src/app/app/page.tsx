@@ -52,7 +52,7 @@ function Home() {
   return (
     <div className="space-y-10">
       <section className="pt-2 lg:pt-6">
-        <h1 className="font-display text-[34px] leading-tight tracking-tight sm:text-[42px]">
+        <h1 className="font-display text-[40px] leading-[0.95] font-bold sm:text-[54px]">
           {greeting()}
           {name ? `, ${name}` : ''}.
         </h1>
@@ -91,7 +91,7 @@ function Home() {
 
       {agents.length > 0 && (
         <section>
-          <SectionTitle action={<Link href="/app/tasks" className="text-[13px] text-muted hover:text-text">All tasks →</Link>}>Recent tasks</SectionTitle>
+          <SectionTitle action={<Link href="/app/tasks" className="text-[13px] text-muted hover:text-text">All tasks</Link>}>Recent tasks</SectionTitle>
           {recent.loading ? (
             <SkeletonList rows={5} />
           ) : (
@@ -126,7 +126,7 @@ function HomeSkeleton() {
 function SectionTitle({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="mb-3 flex items-center justify-between">
-      <h2 className="text-[13px] font-semibold tracking-wide text-faint uppercase">{children}</h2>
+      <h2 className="font-display text-[22px] leading-none font-bold">{children}</h2>
       {action}
     </div>
   );

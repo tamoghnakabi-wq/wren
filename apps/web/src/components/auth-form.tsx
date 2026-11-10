@@ -9,18 +9,40 @@ import { safeNext } from '@/lib/next-path';
 import { supabase } from '@/lib/client/supabase';
 import { forgetPushHere } from './app/push';
 import { Logo } from './brand';
+import { AgentCharacter } from './agent-character';
 import { Button, Input, Label } from './ui';
 
 export function AuthShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-dvh flex-col items-center justify-center px-4 py-10">
-      <Link href="/" className="mb-8" aria-label="Wren home">
-        <Logo />
-      </Link>
-      <div className="w-full max-w-[400px] rounded-3xl border border-border bg-surface p-7 shadow-pop sm:p-8">{children}</div>
-      <p className="mt-6 max-w-sm text-center text-[12px] text-faint">
-        By continuing you agree to the <Link href="/legal" className="underline">terms and privacy notice</Link>.
-      </p>
+    <div className="grid min-h-dvh lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      {/* The night side: the crew waiting for their first job. Wide screens only. */}
+      <aside className="relative isolate hidden overflow-hidden bg-night p-10 text-night-text lg:flex lg:flex-col">
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-2/3 bg-[radial-gradient(60%_70%_at_50%_100%,rgb(255_255_255/0.08),transparent_72%)]" />
+        <Link href="/" aria-label="Wren home" className="w-fit rounded-lg">
+          <Logo tone="night" />
+        </Link>
+        <div className="mt-auto">
+          <div className="flex items-end gap-3">
+            <AgentCharacter character="kit" color="rose" mood="hello" size={64} seed="auth-kit" />
+            <AgentCharacter character="pip" color="orange" mood="idle" size={88} seed="auth-pip" />
+            <AgentCharacter character="bolt" color="violet" mood="thinking" size={64} seed="auth-bolt" />
+          </div>
+          <p className="mt-8 font-display text-[clamp(40px,3.6vw,56px)] leading-[0.95] font-bold">
+            <span className="block">It does the work.</span>
+            <span className="block">You keep the last word.</span>
+          </p>
+          <p className="mt-4 max-w-[40ch] text-[15px] leading-relaxed text-night-muted">Agents with their own computers, on the web, on your phone and on your Mac or PC.</p>
+        </div>
+      </aside>
+      <div className="flex flex-col items-center justify-center px-4 py-10">
+        <Link href="/" className="mb-8 rounded-lg lg:hidden" aria-label="Wren home">
+          <Logo />
+        </Link>
+        <div className="w-full max-w-[400px] rounded-[20px] border border-border bg-surface p-7 shadow-pop sm:p-8 lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none">{children}</div>
+        <p className="mt-6 max-w-sm text-center text-[12px] text-faint">
+          By continuing you agree to the <Link href="/legal" className="underline">terms and privacy notice</Link>.
+        </p>
+      </div>
     </div>
   );
 }
@@ -105,7 +127,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'signup' }) {
   return (
     <form onSubmit={submit} className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold">{mode === 'signup' ? 'Create your account' : 'Welcome back'}</h1>
+        <h1 className="font-display text-[32px] leading-none font-bold">{mode === 'signup' ? 'Create your account' : 'Welcome back'}</h1>
         <p className="mt-1 text-sm text-muted">{mode === 'signup' ? 'Your own team of AI agents, everywhere you are.' : 'Sign in to your agents.'}</p>
       </div>
       {mode === 'signup' && (
