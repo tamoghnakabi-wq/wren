@@ -45,22 +45,22 @@
 }
 
 .dark {
-  --bg: #0f0f0f;
-  --bg-subtle: #141414;
-  --surface: #191919;
-  --surface-2: #202020;
-  --border: #2a2a2a;
-  --border-strong: #3a3a3a;
+  --bg: #000000;
+  --bg-subtle: #070707;
+  --surface: #0c0c0c;
+  --surface-2: #131313;
+  --border: #1f1f1f;
+  --border-strong: #2e2e2e;
   --text: #f2f2f0;
   --text-muted: #a9a9a5;
   --text-faint: #8d8d89; /* ≥4.5:1 on bg, bg-subtle, surface and surface-2 */
   --primary: #f2f2f0;
-  --primary-fg: #0f0f0f;
+  --primary-fg: #000000;
   --brand: #f2f2f0;
-  --brand-soft: #262626;
+  --brand-soft: #1a1a1a;
   --brand-solid: #f2f2f0;
   --brand-ink: #f2f2f0;
-  --brand-fg: #0f0f0f;
+  --brand-fg: #000000;
   --danger-fg: #1f0a0a;
   --success: #5be39a;
   --success-soft: #0f2e22;
@@ -69,7 +69,7 @@
   --danger: #ff8a8a;
   --danger-soft: #3a1520;
   --info: #a9a9a5;
-  --info-soft: #262626;
+  --info-soft: #1a1a1a;
   --ring: rgb(242 242 240 / 0.24);
   --focus: #f2f2f0;
   --shadow: 0 0 0 1px rgb(255 255 255 / 0.015), 0 1px 2px rgb(0 0 0 / 0.35), 0 12px 32px -18px rgb(0 0 0 / 0.7);
@@ -80,10 +80,10 @@
 /* The night palette is the same in both themes: the site's hero, the sign-in page's side, the desktop's
    offline page. */
 :root {
-  --night: #131313;
-  --night-2: #1b1b1b;
-  --night-3: #242424;
-  --night-line: #2e2e2e;
+  --night: #000000;
+  --night-2: #0c0c0c;
+  --night-3: #171717;
+  --night-line: #222222;
   --night-text: #f4f4f2;
   --night-muted: #a6a6a2;
   --lamp: #ffb23f;

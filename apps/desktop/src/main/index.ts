@@ -363,7 +363,7 @@ function createWindow(path = '/app') {
     minWidth: 380,
     minHeight: 560,
     title: 'Wren',
-    backgroundColor: '#131313',
+    backgroundColor: '#000000',
     show: false,
     webPreferences: {
       preload: join(DIST, 'preload.js'),
@@ -402,7 +402,7 @@ const OFFLINE_MARK =
   '<svg width="44" height="44" viewBox="0 0 32 32" aria-hidden="true" style="display:block;margin:0 auto"><rect width="32" height="32" rx="8" fill="#f4f4f2"/><g transform="translate(-1.6 -1.5)"><path d="M8.5 19.2c0-4.6 3.6-8.3 8.1-8.3 2.2 0 4 .8 5.3 2.2l3.7-1.6-1.9 3.4c.4 1 .6 2.1.6 3.3 0 .5 0 .9-.1 1.4l2 2.6-3.2-.6c-1.5 2.1-3.9 3.4-6.6 3.4H8.5l2.6-2.4c-1.6-.9-2.6-2-2.6-3.4Z" fill="#131313"/><circle cx="20.2" cy="15.6" r="1.35" fill="#ffb23f"/></g></svg>';
 
 function offlinePage(desc: string, url: string) {
-  return `<!doctype html><title>Wren</title><body style="font-family:system-ui,-apple-system,sans-serif;background:#131313;color:#f4f4f2;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:420px;padding:0 24px">${OFFLINE_MARK}<h2 style="font-weight:700;font-size:28px;letter-spacing:-0.02em;margin:20px 0 0">Can’t reach Wren</h2><p style="color:#a6a6a2;line-height:1.55">${desc}. Check your connection — agents already running on this computer keep going.</p><button onclick="location.href='${url.replace(/'/g, '')}'" style="margin-top:12px;padding:11px 20px;border-radius:10px;border:0;background:#f4f4f2;color:#131313;font:600 15px system-ui,-apple-system,sans-serif;cursor:pointer">Try again</button></div></body>`;
+  return `<!doctype html><title>Wren</title><body style="font-family:system-ui,-apple-system,sans-serif;background:#000000;color:#f4f4f2;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:420px;padding:0 24px">${OFFLINE_MARK}<h2 style="font-weight:700;font-size:28px;letter-spacing:-0.02em;margin:20px 0 0">Can’t reach Wren</h2><p style="color:#a6a6a2;line-height:1.55">${desc}. Check your connection — agents already running on this computer keep going.</p><button onclick="location.href='${url.replace(/'/g, '')}'" style="margin-top:12px;padding:11px 20px;border-radius:10px;border:0;background:#f4f4f2;color:#000000;font:600 15px system-ui,-apple-system,sans-serif;cursor:pointer">Try again</button></div></body>`;
 }
 
 /** Settings… (⌘, / Ctrl+,): Wren's window on its Settings page, reloaded only if it's elsewhere. */
