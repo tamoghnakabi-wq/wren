@@ -27,11 +27,28 @@ export type ModelSource =
 export const DESKTOP_ONLY_SOURCES: ModelSource[] = ['chatgpt', 'local', 'claude-code', 'grok-build'];
 export const ENGINE_SOURCES: ModelSource[] = ['claude-code', 'grok-build'];
 
+/**
+ * How hard a model thinks before it answers. Each provider takes its own subset (Claude: low to max; ChatGPT
+ * models list theirs, some up to ultra; OpenAI API reasoning models also none and minimal), so the picker offers
+ * only the levels the chosen model lists.
+ */
+export const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+export type Effort = (typeof EFFORTS)[number];
+
+/** The levels a provider or CLI reported, in Wren's order, keeping only ones Wren knows (so never a free string). */
+export function effortLevels(raw: unknown): Effort[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const got = new Set(raw.map((x) => (typeof x === 'string' ? x : x && typeof x === 'object' ? ((x as { effort?: unknown; value?: unknown }).effort ?? (x as { value?: unknown }).value) : undefined)));
+  return EFFORTS.filter((e) => got.has(e));
+}
+
+export const isEffort = (v: unknown): v is Effort => typeof v === 'string' && (EFFORTS as readonly string[]).includes(v);
+
 export interface ModelRef {
   source: ModelSource;
   model: string;
   connectionId?: string;
-  effort?: 'low' | 'medium' | 'high';
+  effort?: Effort;
 }
 
 export interface AgentTools {
@@ -184,7 +201,7 @@ export interface ModelRequest {
   events: SessionEvent[]; // transcript source
   tools: ToolSpec[];
   hosted: HostedTool[];
-  effort?: 'low' | 'medium' | 'high';
+  effort?: Effort;
   maxOutputTokens?: number;
   signal?: AbortSignal;
 }

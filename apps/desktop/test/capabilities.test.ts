@@ -68,6 +68,27 @@ describe("the engines' model lists", () => {
     expect(parseClaudeModels('not json\n')).toEqual([]);
   });
 
+  it('keeps the effort levels Claude Code lists for each model, and none for a model it gives none', () => {
+    const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
+    const answer = {
+      type: 'control_response',
+      response: {
+        response: {
+          models: [
+            { value: 'opus', displayName: 'Opus 5.5', supportsEffort: true, supportedEffortLevels: levels, supportsFastMode: true },
+            { value: 'claude-opus-4-6', displayName: 'Opus 4.6', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'max', '--flag'] },
+            { value: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5', supportsThinkingOff: true },
+          ],
+        },
+      },
+    };
+    expect(parseClaudeModels(JSON.stringify(answer) + '\n')).toEqual([
+      { id: 'opus', name: 'Opus 5.5', efforts: levels },
+      { id: 'claude-opus-4-6', name: 'Opus 4.6', efforts: ['low', 'medium', 'high', 'max'] },
+      { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5', efforts: [] },
+    ]);
+  });
+
   it('reads Grok Build\'s models from `grok models`', () => {
     const out = 'You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n    grok-code-fast-2\n\nTip: use -m\n';
     expect(parseGrokModels(out)).toEqual([

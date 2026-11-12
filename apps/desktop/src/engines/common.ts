@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { agentAnswerText, assessCall, describeCall, needsApproval, type AskableAgent, type Autonomy, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
+import { agentAnswerText, assessCall, describeCall, needsApproval, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
 import { dataDir } from '../main/config';
@@ -29,7 +29,7 @@ export interface EngineRun {
   instructions: string;
   model: string;
   /** How hard the model thinks (the agent's Effort setting); unset leaves the CLI's own default. */
-  effort?: 'low' | 'medium' | 'high';
+  effort?: Effort;
   prompt: string;
   /** Images the user attached to the messages in `prompt`. */
   images?: EngineImage[];
@@ -208,8 +208,8 @@ export function claudeSupportsRestricted(cli: string): boolean {
 }
 
 /**
- * The flag that sets how hard the CLI's model thinks: Claude Code `--effort`, Grok Build `--reasoning-effort`
- * (both take low, medium and high). Null for a version without it, which then keeps its own default.
+ * The flag that sets how hard the CLI's model thinks: Claude Code `--effort` (low to max), Grok Build
+ * `--reasoning-effort` (none to max). Null for a version without it, which then keeps its own default.
  */
 export function effortFlag(engine: Engine, cli: string): string | null {
   const flag = engine === 'claude-code' ? '--effort' : '--reasoning-effort';

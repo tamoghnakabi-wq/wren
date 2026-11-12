@@ -6,5 +6,5 @@ export * from './loop';
 export * from './prompt';
 export * from './text';
 export * from './semver';
-export { createModelClient, listModels, PROVIDER_BASE, type ClientOptions, type ModelInfo } from './models/index';
+export { chatgptEfforts, createModelClient, listModels, PROVIDER_BASE, type ClientOptions, type ModelInfo } from './models/index';
 export { ScriptedModel } from './models/scripted';

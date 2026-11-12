@@ -17,6 +17,8 @@ export interface AnthropicConfig {
   baseURL?: string;
   loadImage?: (ref: ImageRef) => Promise<{ mime: string; data: string } | null>;
   maxImages?: number;
+  /** For tests: the HTTP client the SDK uses. */
+  fetch?: typeof fetch;
 }
 
 type Block = Record<string, unknown>;
@@ -31,7 +33,7 @@ export class AnthropicClient implements ModelClient {
   private client: Anthropic;
 
   constructor(private readonly cfg: AnthropicConfig) {
-    this.client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseURL, maxRetries: 1 });
+    this.client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseURL, maxRetries: 1, ...(cfg.fetch ? { fetch: cfg.fetch } : {}) });
   }
 
   private async renderMessages(turns: NeutralTurn[]): Promise<Msg[]> {
@@ -121,6 +123,9 @@ export class AnthropicClient implements ModelClient {
       betas.push('thinking-binding-controls-2026-08-01');
       params.thinking = { type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'drop_block' } };
       params.output_config = { effort: req.effort ?? 'high' };
+    } else if (req.effort) {
+      // Models that think without Wren asking (Claude Haiku 5.5) still take an effort the user chose.
+      params.output_config = { effort: req.effort };
     }
     if (FALLBACK_MODELS.test(req.model)) {
       betas.push('server-side-fallback-2026-07-01');
@@ -141,6 +146,11 @@ export class AnthropicClient implements ModelClient {
       }
       if (err.status === 400 && /bound to a different conversation|Invalid `signature`/i.test(err.message)) {
         stripThinking(messages);
+        return this.run(params, betas, req.signal, onEvent);
+      }
+      // A level this model doesn't take (an agent kept its effort when its model changed): its own default instead.
+      if (err.status === 400 && params.output_config && /effort/i.test(err.message)) {
+        delete params.output_config;
         return this.run(params, betas, req.signal, onEvent);
       }
       throw e;

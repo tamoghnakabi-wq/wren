@@ -5,7 +5,8 @@ import { Check, Cloud, Info, Laptop, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
-import { engineModels, modelLabel, SOURCES, sourceInfo, type ModelChoice } from '@/lib/client/sources';
+import type { Effort } from '@wren/core/types';
+import { EFFORT_LABEL, effortChoices, engineModels, modelLabel, SOURCES, sourceInfo, type ModelChoice } from '@/lib/client/sources';
 import type { Agent, Connection } from '@/lib/client/types';
 import { AGENT_COLORS, AgentAvatar } from '../agent-avatar';
 import { CHARACTER_KEYS, CHARACTERS, characterFor, MOOD_LABEL, type CharacterKey, type Mood } from '@/lib/characters';
@@ -18,7 +19,7 @@ export interface AgentDraft {
   icon: string;
   color: string;
   instructions: string;
-  model: { source: string; model: string; connectionId?: string; effort?: 'low' | 'medium' | 'high' };
+  model: { source: string; model: string; connectionId?: string; effort?: Effort };
   runtime: 'cloud' | 'desktop';
   deviceId: string | null;
   tools: { computer: boolean; browser: boolean; web: boolean; github: boolean; memory: boolean; notify: boolean; screen: boolean; mcp: string[]; agents: string[] };
@@ -267,7 +268,7 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   const known: ModelChoice[] | null = !source || creditsOff ? [] : engineList ?? (source === 'local' ? localModels : null);
   const knownNote = source === 'local' && !localModels.length ? 'No local models found. Start LM Studio or Ollama on your computer, then check Settings in the desktop app.' : null;
   const fetchKey = known ? null : JSON.stringify([source, draft.model.connectionId, connections.length, chatgptModels.length]);
-  const [fetched, setFetched] = useState<{ key: string; models: { id: string; name: string }[]; note: string | null } | null>(null);
+  const [fetched, setFetched] = useState<{ key: string; models: ModelChoice[]; note: string | null } | null>(null);
 
   useEffect(() => {
     if (!fetchKey) return;
@@ -275,13 +276,15 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
     const params = new URLSearchParams({ source: source === 'openai' && !keyFor('openai') ? 'openai' : source });
     if (draft.model.connectionId) params.set('connectionId', draft.model.connectionId);
     const wantApi = source !== 'openai' || keyFor('openai');
-    (wantApi ? api<{ models: { id: string; name: string }[]; error?: string; needsConnection?: boolean }>(`/api/models?${params}`) : Promise.resolve({ models: [] as { id: string; name: string }[], needsConnection: true, error: undefined }))
+    (wantApi ? api<{ models: ModelChoice[]; error?: string; needsConnection?: boolean }>(`/api/models?${params}`) : Promise.resolve({ models: [] as ModelChoice[], needsConnection: true, error: undefined }))
       .then((r) => {
         if (cancel) return;
         let list = r.models;
         if (source === 'openai') {
+          // The ChatGPT plan lists each model's reasoning levels; OpenAI's API list doesn't, so its entries borrow them.
           const seen = new Set(list.map((m) => m.id));
-          list = [...chatgptModels.filter((m) => !seen.has(m.id)), ...list];
+          const plan = new Map(chatgptModels.filter((m) => m.efforts).map((m) => [m.id, m.efforts]));
+          list = [...chatgptModels.filter((m) => !seen.has(m.id)), ...list.map((m) => (m.efforts || !plan.has(m.id) ? m : { ...m, efforts: plan.get(m.id) }))];
           if (!list.length) list = [{ id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }, { id: 'gpt-6-astra', name: 'GPT-6 Astra' }, { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' }];
         }
         const note = r.error ?? (r.needsConnection && source !== 'openai' ? 'Add an API key for this provider in Connections to load its models.' : null);
@@ -296,6 +299,12 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
   const current = fetched?.key === fetchKey ? fetched : null;
   const models: ModelChoice[] = known ?? current?.models ?? [];
   const chosen = models.find((m) => m.id === draft.model.model);
+  const efforts = effortChoices(source, chosen, draft.model.effort);
+  // A level the newly chosen model doesn't list is dropped, so it uses its own default rather than fail.
+  const chooseModel = (id: string) => {
+    const keep = draft.model.effort && effortChoices(source, models.find((m) => m.id === id))?.levels.includes(draft.model.effort);
+    onChange({ ...draft, model: { ...draft.model, model: id, effort: keep ? draft.model.effort : undefined } });
+  };
   const note = known ? knownNote : current?.note ?? null;
   const loading = !!fetchKey && !current;
 
@@ -385,7 +394,7 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
                 <Spinner />
               </div>
             ) : models.length ? (
-              <Select id="agent-model" value={draft.model.model} onChange={(e) => onChange({ ...draft, model: { ...draft.model, model: e.target.value } })}>
+              <Select id="agent-model" value={draft.model.model} onChange={(e) => chooseModel(e.target.value)}>
                 <option value="">Choose a model…</option>
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -399,14 +408,16 @@ function ModelPicker({ draft, onChange, connections, loadingConnections }: { dra
             {chosen?.description && <p className="mt-1.5 text-[12.5px] text-muted">{chosen.description}</p>}
             {note && <p className="mt-1.5 text-[12.5px] text-warning">{note}</p>}
           </div>
-          {source !== 'local' && source !== 'test' && (
+          {efforts && (
             <div>
               <Label htmlFor="agent-effort">Effort</Label>
-              <Select id="agent-effort" value={draft.model.effort ?? ''} onChange={(e) => onChange({ ...draft, model: { ...draft.model, effort: (e.target.value || undefined) as AgentDraft['model']['effort'] } })}>
-                <option value="">Default</option>
-                <option value="low">Low (faster)</option>
-                <option value="medium">Medium</option>
-                <option value="high">High (smarter)</option>
+              <Select id="agent-effort" value={draft.model.effort ?? ''} onChange={(e) => onChange({ ...draft, model: { ...draft.model, effort: (e.target.value || undefined) as Effort | undefined } })}>
+                <option value="">{efforts.byDefault ? `Default (${EFFORT_LABEL[efforts.byDefault]})` : 'Default'}</option>
+                {efforts.levels.map((e) => (
+                  <option key={e} value={e}>
+                    {EFFORT_LABEL[e]}
+                  </option>
+                ))}
               </Select>
             </div>
           )}

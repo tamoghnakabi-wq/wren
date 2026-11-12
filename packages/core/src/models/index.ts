@@ -1,4 +1,4 @@
-import type { ImageRef, ModelClient, ModelSource } from '../types';
+import { effortLevels, EFFORTS, type Effort, type ImageRef, type ModelClient, type ModelSource } from '../types';
 import { AnthropicClient } from './anthropic';
 import { ChatClient } from './chat';
 import { ResponsesClient } from './responses';
@@ -52,6 +52,22 @@ export function createModelClient(o: ClientOptions): ModelClient {
 export interface ModelInfo {
   id: string;
   name: string;
+  /** The effort levels the provider lists for this model ([] when it takes none); absent when the provider doesn't say. */
+  efforts?: Effort[];
+}
+
+/** Anthropic's Models API `capabilities.effort`: `{ supported, low: { supported }, …, max: { supported } }`. */
+function anthropicEfforts(caps: unknown): Effort[] | undefined {
+  const effort = (caps as { effort?: Record<string, { supported?: unknown } | unknown> } | undefined)?.effort as ({ supported?: unknown } & Record<string, unknown>) | undefined;
+  if (!effort || typeof effort !== 'object') return undefined;
+  if (effort.supported !== true) return [];
+  return EFFORTS.filter((e) => (effort[e] as { supported?: unknown } | undefined)?.supported === true);
+}
+
+/** The ChatGPT catalog's `supported_reasoning_levels` (each `{ effort, description }`). */
+export function chatgptEfforts(m: { supported_reasoning_levels?: unknown }): Pick<ModelInfo, 'efforts'> {
+  const efforts = effortLevels(m.supported_reasoning_levels);
+  return efforts ? { efforts } : {};
 }
 
 /** List models available to a credential (used for pickers and connection checks). */
@@ -59,16 +75,19 @@ export async function listModels(source: ModelSource, credential: string, f: typ
   if (source === 'anthropic') {
     const res = await f('https://api.anthropic.com/v1/models?limit=100', { headers: { 'x-api-key': credential, 'anthropic-version': '2023-06-01' } });
     if (!res.ok) throw new Error(await errorText(res));
-    const j = (await res.json()) as { data: { id: string; display_name?: string }[] };
-    return j.data.map((m) => ({ id: m.id, name: m.display_name ?? m.id }));
+    const j = (await res.json()) as { data: { id: string; display_name?: string; capabilities?: unknown }[] };
+    return j.data.map((m) => {
+      const efforts = anthropicEfforts(m.capabilities);
+      return { id: m.id, name: m.display_name ?? m.id, ...(efforts ? { efforts } : {}) };
+    });
   }
   const base = source === 'local' ? baseUrl ?? 'http://127.0.0.1:1234/v1' : PROVIDER_BASE[source];
   const res = await f(`${base}/models`, { headers: credential ? { authorization: `Bearer ${credential}` } : {} });
   if (!res.ok) throw new Error(await errorText(res));
-  const j = (await res.json()) as { data?: { id: string; name?: string; type?: string }[]; models?: { slug: string; display_name?: string; visibility?: string }[] };
+  const j = (await res.json()) as { data?: { id: string; name?: string; type?: string }[]; models?: { slug: string; display_name?: string; visibility?: string; supported_reasoning_levels?: unknown }[] };
   if (j.models) {
     // ChatGPT-plan catalog shape
-    return j.models.filter((m) => !m.visibility || m.visibility === 'list').map((m) => ({ id: m.slug, name: m.display_name ?? m.slug }));
+    return j.models.filter((m) => !m.visibility || m.visibility === 'list').map((m) => ({ id: m.slug, name: m.display_name ?? m.slug, ...chatgptEfforts(m) }));
   }
   let list = (j.data ?? []).map((m) => ({ id: m.id, name: m.name ?? m.id, type: m.type }));
   if (source === 'openai') list = list.filter((m) => /^(gpt|o\d|chatgpt|computer-use)/.test(m.id) && !/(audio|realtime|tts|transcribe|image|embedding|search-preview|moderation|instruct)/.test(m.id));

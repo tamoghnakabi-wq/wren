@@ -117,11 +117,20 @@ export interface Device {
   created_at: string;
 }
 
+/** A model a computer reported. Its effort levels come from the device, so the picker keeps only ones Wren knows. */
+export interface ReportedModel {
+  id: string;
+  name: string;
+  description?: string;
+  efforts?: string[];
+}
+
 export interface DeviceCapabilities {
-  chatgpt?: { signedIn: boolean; email?: string; planUsage?: boolean; models?: { id: string; name: string }[] };
-  /** `models`: what the CLI itself lists for the signed-in account (desktop app 0.1.43+). */
-  claudeCode?: { installed: boolean; version?: string; loggedIn?: boolean; models?: { id: string; name: string; description?: string }[] };
-  grokBuild?: { installed: boolean; version?: string; loggedIn?: boolean; models?: { id: string; name: string; description?: string }[] };
+  /** `models[].efforts`: the reasoning levels each plan model lists (desktop app 0.1.46+). */
+  chatgpt?: { signedIn: boolean; email?: string; planUsage?: boolean; models?: ReportedModel[] };
+  /** `models`: what the CLI itself lists for the signed-in account (desktop app 0.1.43+), with Claude Code's effort levels (0.1.46+). */
+  claudeCode?: { installed: boolean; version?: string; loggedIn?: boolean; models?: ReportedModel[] };
+  grokBuild?: { installed: boolean; version?: string; loggedIn?: boolean; models?: ReportedModel[] };
   local?: { baseUrl: string; reachable: boolean; models?: { id: string; name: string }[] };
   browser?: { available: boolean; name?: string };
 }

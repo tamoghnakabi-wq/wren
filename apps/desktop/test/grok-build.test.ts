@@ -224,6 +224,14 @@ describe('Grok Build model and effort', () => {
     expect(h.args.at(-1)).toBe('stdio');
   });
 
+  it('passes Extra high, and leaves a level Grok does not take to its own default', async () => {
+    await runGrokBuild({ ...run().run, effort: 'xhigh' }, () => true, '/dev/null');
+    expect(h.args.slice(2, 4)).toEqual(['--reasoning-effort', 'xhigh']);
+    await runGrokBuild({ ...run().run, effort: 'ultra' }, () => true, '/dev/null');
+    expect(h.args).not.toContain('--reasoning-effort');
+    expect(h.args).not.toContain('ultra');
+  });
+
   it("leaves both to Grok when they aren't set, or when this version has no effort flag", async () => {
     const { run: r } = run();
     await runGrokBuild(r, () => true, '/dev/null');

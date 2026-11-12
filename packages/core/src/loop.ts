@@ -3,6 +3,7 @@ import { describeCall } from './tools';
 import { clipMiddle } from './transcript';
 import type {
   Autonomy,
+  Effort,
   HostedTool,
   MessageData,
   ModelClient,
@@ -98,7 +99,7 @@ export interface LoopOptions {
   model: ModelClient;
   modelName: string;
   source: string;
-  effort?: 'low' | 'medium' | 'high';
+  effort?: Effort;
   instructions: string;
   tools: ToolSpec[];
   hosted: HostedTool[];

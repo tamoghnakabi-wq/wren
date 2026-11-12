@@ -257,4 +257,14 @@ describe('Claude Code model and effort', () => {
     expect(h.args).not.toContain('--model');
     expect(h.args).not.toContain('--effort');
   });
+
+  it('passes Extra high and Max, and leaves a level Claude Code does not take to its own default', async () => {
+    for (const effort of ['xhigh', 'max'] as const) {
+      await runClaudeCode(engineRun('hello', { runId: `r-${effort}`, effort }), () => true, '/dev/null');
+      expect(h.args[h.args.indexOf('--effort') + 1]).toBe(effort);
+    }
+    await runClaudeCode(engineRun('hello', { runId: 'r-ultra', effort: 'ultra' }), () => true, '/dev/null');
+    expect(h.args).not.toContain('--effort');
+    expect(h.args).not.toContain('ultra');
+  });
 });

@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { claudeSupportsRestricted, cliHasFlag, engineEnv } from '../engines/common';
 import { engineProgram } from '../engines/program';
+import { effortLevels, type Effort } from '@wren/core';
 import * as chatgpt from './chatgpt';
 import type { Policy } from './config';
 
@@ -13,6 +14,8 @@ export interface ModelChoice {
   id: string;
   name: string;
   description?: string;
+  /** The effort levels the CLI lists for this model ([] when it takes none); absent when the CLI doesn't say. */
+  efforts?: Effort[];
 }
 
 interface EngineCaps {
@@ -24,7 +27,7 @@ interface EngineCaps {
 }
 
 export interface Capabilities {
-  chatgpt: { signedIn: boolean; email?: string; planUsage?: boolean; models?: { id: string; name: string }[] };
+  chatgpt: { signedIn: boolean; email?: string; planUsage?: boolean; models?: ModelChoice[] };
   claudeCode: EngineCaps;
   grokBuild: EngineCaps;
   local: { baseUrl: string; reachable: boolean; models: { id: string; name: string }[] };
@@ -60,7 +63,8 @@ const text = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v
 
 /**
  * Claude Code's models, from the answer to its `initialize` control request in stream-json mode (what the
- * Agent SDK's supportedModels() reads). Only the model list is kept: the same answer names the account.
+ * Agent SDK's supportedModels() reads), with the effort levels each takes. Only the model list is kept: the
+ * same answer names the account.
  */
 export function parseClaudeModels(out: string): ModelChoice[] {
   for (const line of out.split('\n')) {
@@ -71,12 +75,15 @@ export function parseClaudeModels(out: string): ModelChoice[] {
       if (!Array.isArray(list)) return [];
       const seen = new Set<string>();
       const models: ModelChoice[] = [];
+      // A CLI that says which models take an effort: one that doesn't say so for a model (Haiku 4.5) takes none.
+      const saysEffort = (list as Record<string, unknown>[]).some((x) => typeof x?.supportsEffort === 'boolean');
       for (const x of list as Record<string, unknown>[]) {
         const id = typeof x?.value === 'string' ? x.value : '';
         if (!MODEL_ID.test(id) || seen.has(id)) continue;
         seen.add(id);
         const description = text(x.description, 160);
-        models.push({ id, name: text(x.displayName, 80) ?? id, ...(description ? { description } : {}) });
+        const efforts = x.supportsEffort === true ? effortLevels(x.supportedEffortLevels) : saysEffort ? [] : undefined;
+        models.push({ id, name: text(x.displayName, 80) ?? id, ...(description ? { description } : {}), ...(efforts ? { efforts } : {}) });
       }
       return models.slice(0, 40);
     } catch {
@@ -186,7 +193,7 @@ function browserName(): string | undefined {
   return paths.find(([p]) => existsSync(p))?.[1];
 }
 
-let chatgptModels: { at: number; list: { id: string; name: string }[] } = { at: 0, list: [] };
+let chatgptModels: { at: number; list: ModelChoice[] } = { at: 0, list: [] };
 
 export async function detect(policy: Policy): Promise<Capabilities> {
   const local: Capabilities['local'] = { baseUrl: policy.localModelUrl, reachable: false, models: [] };

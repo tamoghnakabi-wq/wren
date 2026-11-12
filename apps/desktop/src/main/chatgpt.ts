@@ -2,6 +2,7 @@ import { shell } from 'electron';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { chatgptEfforts, type ModelInfo } from '@wren/core';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { clearSecret, installId, readJson, readSecret, readText, secretDigest, writeJson, writeSecret } from './config';
 
@@ -402,11 +403,12 @@ export async function signOut(): Promise<{ revoked: boolean; cleared: boolean; r
   return { revoked, cleared, recorded };
 }
 
-export async function models(): Promise<{ id: string; name: string }[]> {
+/** The models the ChatGPT plan offers, with the reasoning levels each lists. */
+export async function models(): Promise<ModelInfo[]> {
   const token = await accessToken();
   const res = await fetch(`${RESOURCE}/models`, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) return [];
-  const j = (await res.json()) as { models?: { slug: string; display_name?: string; visibility?: string }[]; data?: { id: string }[] };
-  if (j.models) return j.models.filter((m) => !m.visibility || m.visibility === 'list').map((m) => ({ id: m.slug, name: m.display_name ?? m.slug }));
+  const j = (await res.json()) as { models?: { slug: string; display_name?: string; visibility?: string; supported_reasoning_levels?: unknown }[]; data?: { id: string }[] };
+  if (j.models) return j.models.filter((m) => !m.visibility || m.visibility === 'list').map((m) => ({ id: m.slug, name: m.display_name ?? m.slug, ...chatgptEfforts(m) }));
   return (j.data ?? []).map((m) => ({ id: m.id, name: m.id }));
 }

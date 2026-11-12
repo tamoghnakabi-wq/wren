@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DESKTOP_ONLY_SOURCES, type ModelRef } from '@wren/core';
+import { DESKTOP_ONLY_SOURCES, EFFORTS, type ModelRef } from '@wren/core';
 
 export const SOURCES = ['openai', 'chatgpt', 'anthropic', 'xai', 'gateway', 'platform', 'local', 'claude-code', 'grok-build', 'test'] as const;
 
@@ -13,7 +13,7 @@ export const AgentSchema = z.object({
       source: z.enum(SOURCES),
       model: z.string().min(1).max(200),
       connectionId: z.string().uuid().optional(),
-      effort: z.enum(['low', 'medium', 'high']).optional(),
+      effort: z.enum(EFFORTS).optional(),
       baseUrl: z.string().url().optional(),
     })
     .optional(),

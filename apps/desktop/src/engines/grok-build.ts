@@ -66,6 +66,8 @@ function mapGrokTool(name: string, input: Record<string, unknown>) {
 const WORK = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan']);
 
 /** How long Grok gets to answer each setup step (start, sign-in, new session) and to replay a resumed session. */
+/** The levels `grok agent --reasoning-effort` takes (grok-4.7 itself lists low to xhigh). Any other keeps Grok's default. */
+const GROK_EFFORTS: string[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const SETUP_MS = 60_000;
 const LOAD_MS = 180_000;
 
@@ -102,7 +104,7 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     writeFileSync(join(pluginDir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: hookCmd, timeout: 3600 }] }] } }));
     const args = ['--no-auto-update', 'agent'];
     if (run.model && run.model !== 'default') args.push('-m', run.model);
-    const effort = run.effort && effortFlag('grok-build', cli);
+    const effort = run.effort && GROK_EFFORTS.includes(run.effort) && effortFlag('grok-build', cli);
     if (effort) args.push(effort, run.effort!);
     args.push('--always-approve', '--plugin-dir', pluginDir, 'stdio');
     proc = await spawnEngine('grok-build', cli, args, run, hookScript, { ELECTRON_RUN_AS_NODE: '1', WREN_APPROVAL_URL: bridge.url, WREN_APPROVAL_TOKEN: bridge.token }, [pluginDir]);

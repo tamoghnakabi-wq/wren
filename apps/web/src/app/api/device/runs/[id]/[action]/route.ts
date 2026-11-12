@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { createModelClient, DEFAULT_TOOLS, friendlyModelError, systemPrompt, type AgentTools, type ImageRef, type LoopOutcome, type ModelRef, type ModelStreamEvent } from '@wren/core';
+import { createModelClient, DEFAULT_TOOLS, EFFORTS, friendlyModelError, systemPrompt, type AgentTools, type ImageRef, type LoopOutcome, type ModelRef, type ModelStreamEvent } from '@wren/core';
 import { HttpError, requireDevice, type AuthDevice } from '@/lib/auth';
 import { readArtifactBytes } from '@/lib/blob';
 import { db, type Json } from '@/lib/db';
@@ -245,7 +245,7 @@ async function modelProxy(req: Request, run: Record<string, unknown>): Promise<R
       source: z.enum(['openai', 'anthropic', 'xai', 'gateway', 'platform']),
       model: z.string().max(200),
       connectionId: z.string().uuid().optional(),
-      effort: z.enum(['low', 'medium', 'high']).optional(),
+      effort: z.enum(EFFORTS).optional(),
       instructions: z.string().max(100_000),
       tools: z.array(z.object({ namespace: z.string(), name: z.string(), description: z.string(), parameters: z.record(z.string(), z.unknown()) })).max(200),
       hosted: z.array(z.object({ type: z.literal('web_search') })).max(2),

@@ -41,6 +41,8 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
 const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet,Task';
 /** Claude Code's own to-do list: shown as the task's plan, not as steps. */
 const PLAN_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet']);
+/** The levels `claude --effort` takes. Any other (an agent that came from another brain) keeps Claude Code's own default. */
+const CLAUDE_EFFORTS: string[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
  * A path as Claude Code's permission rules write it: "//" + the absolute path (gitignore syntax, so its
@@ -221,7 +223,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       `You are working for the user through Wren as the agent "${run.agentName}". ${run.instructions}`.slice(0, 20000),
     ];
     if (run.model && run.model !== 'default') args.push('--model', run.model);
-    const effort = run.effort && effortFlag('claude-code', cli);
+    const effort = run.effort && CLAUDE_EFFORTS.includes(run.effort) && effortFlag('claude-code', cli);
     if (effort) args.push(effort, run.effort!);
     for (const f of run.folders.slice(1)) args.push('--add-dir', f);
     if (run.resumeId) args.push('--resume', run.resumeId);

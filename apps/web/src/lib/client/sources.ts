@@ -1,3 +1,5 @@
+import { EFFORTS, isEffort, type Effort } from '@wren/core/types';
+
 // Model sources as presented in the product. The honesty notes here are shown
 // in the UI wherever a user picks how an agent's model is paid for.
 
@@ -74,6 +76,8 @@ export interface ModelChoice {
   id: string;
   name: string;
   description?: string;
+  /** The effort levels the model lists itself ([] when it takes none); absent when nothing said. */
+  efforts?: string[];
 }
 
 /** What the engines offer before any computer has reported its CLI's own list (desktop app 0.1.42 and older). */
@@ -97,7 +101,7 @@ export function engineChoice(m: ModelChoice): ModelChoice {
   const head = parts[0];
   if (parts.length < 2 || !/\d/.test(head) || head.length > 32) return m;
   const name = head.toLowerCase().startsWith(m.name.toLowerCase()) ? head : `${m.name} – ${head}`;
-  return { id: m.id, name, description: parts.slice(1).join(' · ') };
+  return { ...m, name, description: parts.slice(1).join(' · ') };
 }
 
 /**
@@ -116,6 +120,45 @@ export function engineModels(source: string, reported: (ModelChoice[] | undefine
   } else fallback.forEach(add);
   if (current) add({ id: current, name: current });
   return list;
+}
+
+export const EFFORT_LABEL: Record<Effort, string> = {
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+  ultra: 'Ultra',
+};
+
+/**
+ * The brains Wren sets an effort for, with the levels to offer when the model doesn't list its own (desktop app
+ * 0.1.45 and older; Grok Build, whose CLI lists none) and the level Wren or the CLI uses when none is chosen.
+ * xAI, AI Gateway and Wren credits are sent without one, and local servers and the test model take none.
+ */
+const SOURCE_EFFORTS: Record<string, { levels: Effort[]; byDefault?: Effort }> = {
+  'claude-code': { levels: ['low', 'medium', 'high'] },
+  'grok-build': { levels: ['low', 'medium', 'high', 'xhigh'], byDefault: 'high' },
+  openai: { levels: ['low', 'medium', 'high'], byDefault: 'medium' },
+  anthropic: { levels: ['low', 'medium', 'high'] },
+};
+
+/**
+ * The effort levels to offer for a model: those it lists itself (Claude Code and the ChatGPT plan through the
+ * desktop app, Anthropic's API through its model list), else the brain's usual ones. Null when there is nothing to
+ * choose. The agent's current level stays listed, so a saved choice is never shown as something else.
+ */
+export function effortChoices(source: string, chosen: ModelChoice | undefined, current?: string): { levels: Effort[]; byDefault?: Effort } | null {
+  const base = SOURCE_EFFORTS[source];
+  if (!base) return null;
+  const own = chosen?.efforts;
+  const listed = Array.isArray(own) ? EFFORTS.filter((e) => own.includes(e)) : null;
+  const levels = new Set<Effort>(listed ?? base.levels);
+  if (isEffort(current)) levels.add(current);
+  if (!levels.size) return null;
+  return { levels: EFFORTS.filter((e) => levels.has(e)), byDefault: base.byDefault };
 }
 
 export function modelLabel(source: string | undefined, model: string | undefined): string {
