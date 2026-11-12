@@ -53,8 +53,10 @@ describe('effort levels', () => {
 // A fake Messages endpoint: records each request body; answers with an error for the first `errors` requests.
 function fakeAnthropic(errors: string[] = []) {
   const bodies: Record<string, unknown>[] = [];
+  const betas: string[] = [];
   const f = (async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
+    betas.push(new Headers(init.headers).get('anthropic-beta') ?? '');
     const err = errors.shift();
     if (err) return json({ type: 'error', error: { type: 'invalid_request_error', message: err } }, 400);
     const message = { id: 'msg_1', type: 'message', role: 'assistant', model: 'm', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } };
@@ -69,7 +71,7 @@ function fakeAnthropic(errors: string[] = []) {
     const sse = events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join('');
     return new Response(new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(sse)), c.close()) }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
   }) as unknown as typeof fetch;
-  return { f, bodies };
+  return { f, bodies, betas };
 }
 
 const events = [{ id: 'ev1', seq: 1, runId: 'run1', type: 'message', data: { role: 'user', text: 'hi' }, status: 'done' }] as SessionEvent[];
@@ -99,5 +101,16 @@ describe('Anthropic API effort', () => {
     expect(bodies).toHaveLength(2);
     expect(bodies[1].output_config).toBeUndefined();
     expect(bodies[1].thinking).toEqual(bodies[0].thinking);
+  });
+});
+
+describe('Anthropic API refusal fallback', () => {
+  it("asks Anthropic to re-run a declined request on its recommended fallback, for the models that have one", async () => {
+    const { f, bodies, betas } = fakeAnthropic();
+    const client = new AnthropicClient({ apiKey: 'k', fetch: f });
+    const models = ['claude-fable-5-2', 'claude-mythos-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-4-8'];
+    for (const m of models) await ask(client, m);
+    expect(bodies.map((b) => b.fallbacks)).toEqual(['default', 'default', 'default', 'default', 'default', 'default', undefined, undefined]);
+    expect(betas.map((b) => b.includes('server-side-fallback-2026-07-01'))).toEqual([true, true, true, true, true, true, false, false]);
   });
 });

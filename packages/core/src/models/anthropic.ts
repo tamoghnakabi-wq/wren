@@ -25,7 +25,9 @@ type Block = Record<string, unknown>;
 type Msg = { role: 'user' | 'assistant'; content: Block[] };
 
 const THINKING_MODELS = /claude-(opus|sonnet)-(4-[6-9]|5)|claude-fable|claude-mythos/;
-const FALLBACK_MODELS = /^claude-(opus-5-5|opus-5$|fable-5-1|sonnet-5-5)/;
+// Models whose refusals Anthropic re-runs server-side on its recommended fallback (`fallbacks: "default"`).
+// Not Haiku 5.5: it has no server-side fallback.
+const FALLBACK_MODELS = /^claude-(opus-5-5|opus-5$|fable-5-[12]|mythos-5-[12]|sonnet-5-5)/;
 const NEW_WEB_SEARCH = /claude-(opus|sonnet)-(4-[6-9]|5)|claude-fable|claude-mythos/;
 
 export class AnthropicClient implements ModelClient {
