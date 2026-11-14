@@ -13,7 +13,7 @@ const { changedPolicy, loadPolicy, readPolicy, savePolicy } = await import('../s
 
 const policyFile = join(process.env.WREN_DATA_DIR, 'policy.json');
 const workspace = join(home.dir, 'Wren');
-const restrictive = { folders: [], shell: false, browser: false, screen: false, remoteApprovals: false, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false };
+const restrictive = { folders: [], shell: false, browser: false, screen: false, remoteApprovals: false, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false, keepAwake: false };
 // A file can't be made unreadable to root, and Windows doesn't take read permission away with chmod.
 const noChmod = process.platform === 'win32' || process.getuid?.() === 0;
 
@@ -29,14 +29,14 @@ afterEach(() => {
 // turn into the permissive first-install policy, and turning a permission on over it must still ask natively.
 describe("reading this computer's permissions", () => {
   it('starts a new install with the first-install defaults and ~/Wren', () => {
-    expect(loadPolicy()).toEqual({ folders: [workspace], shell: true, browser: true, screen: false, remoteApprovals: true, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false });
+    expect(loadPolicy()).toEqual({ folders: [workspace], shell: true, browser: true, screen: false, remoteApprovals: true, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false, keepAwake: true });
     expect(existsSync(workspace)).toBe(true);
     expect(readPolicy().state).toBe('new');
   });
 
   it('fills in keys an older file lacks, and ignores keys it doesn’t know', () => {
     writeFileSync(policyFile, JSON.stringify({ folders: ['/work'], shell: false, theme: 'dark' }));
-    expect(loadPolicy()).toMatchObject({ folders: ['/work'], shell: false, browser: true, screen: false, remoteApprovals: true, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false });
+    expect(loadPolicy()).toMatchObject({ folders: ['/work'], shell: false, browser: true, screen: false, remoteApprovals: true, localModelUrl: 'http://127.0.0.1:1234/v1', launchAtLogin: false, keepAwake: true });
     expect(readPolicy().state).toBe('saved');
     writeFileSync(policyFile, JSON.stringify({ shell: false })); // never listed folders: ~/Wren, as before
     expect(loadPolicy()).toMatchObject({ folders: [workspace], shell: false });
@@ -75,6 +75,24 @@ describe("reading this computer's permissions", () => {
     expect(existsSync(workspace)).toBe(false);
     savePolicy({ ...restrictive, browser: true }); // what Settings does with any change
     expect(readPolicy()).toEqual({ policy: { ...restrictive, browser: true }, state: 'saved' });
+  });
+});
+
+describe('staying awake while agents work', () => {
+  it('is a setting the page changes without a native prompt, saved only as true or false', async () => {
+    savePolicy({ ...restrictive, folders: ['/work'], keepAwake: true });
+    const ask = vi.fn(async () => true);
+    let { next } = await changedPolicy({ keepAwake: false }, ask);
+    expect(next.keepAwake).toBe(false);
+    savePolicy(next);
+    ({ next } = await changedPolicy({ keepAwake: true }, ask));
+    expect(next.keepAwake).toBe(true);
+    expect(ask).not.toHaveBeenCalled();
+    // Anything else would make the saved file unreadable, which allows nothing.
+    ({ next } = await changedPolicy({ keepAwake: 'yes' as unknown as boolean }, ask));
+    expect(next.keepAwake).toBe(false);
+    savePolicy(next);
+    expect(readPolicy().state).toBe('saved');
   });
 });
 

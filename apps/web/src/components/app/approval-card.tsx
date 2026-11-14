@@ -7,7 +7,7 @@ import { api } from '@/lib/client/api';
 import { desktop } from '@/lib/client/desktop';
 import type { Approval } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
-import { Button, cx, timeAgo, useToast } from '../ui';
+import { Button, cx, Input, timeAgo, useToast } from '../ui';
 import { useApp } from './provider';
 import { CodeText } from '@/components/app/code-text';
 
@@ -29,13 +29,17 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
   const { agentById } = useApp();
   const toast = useToast();
   const [busy, setBusy] = useState<'approve' | 'deny' | null>(null);
+  // "Deny with a reason": what the user types goes to the agent with the denial.
+  const [asking, setAsking] = useState(false);
+  const [note, setNote] = useState('');
   const agent = agentById(approval.agent_id);
   const r = RISK[approval.risk];
-  const decide = async (approve: boolean) => {
+  const decide = async (approve: boolean, reason?: string) => {
     setBusy(approve ? 'approve' : 'deny');
     try {
-      await api(`/api/approvals/${approval.id}`, { body: { approve, via: window.matchMedia('(max-width: 640px)').matches ? 'mobile' : 'web' } });
-      toast(approve ? 'Approved — the agent is continuing.' : 'Denied. The agent will try another way.');
+      const why = reason?.trim() || undefined;
+      await api(`/api/approvals/${approval.id}`, { body: { approve, note: why, via: window.matchMedia('(max-width: 640px)').matches ? 'mobile' : 'web' } });
+      toast(approve ? 'Approved — the agent is continuing.' : why ? 'Denied. The agent has your reason.' : 'Denied. The agent will try another way.');
     } catch (e) {
       toast((e as Error).message, 'error');
     } finally {
@@ -81,6 +85,32 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
               </Button>
             ) : localOnly ? (
               <p className="text-[13px] text-muted">Remote approvals are off for that computer — answer in the Wren app on it.</p>
+            ) : asking ? (
+              <form
+                className="flex w-full flex-wrap items-center gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void decide(false, note);
+                }}
+              >
+                <Input
+                  autoFocus
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Escape' && setAsking(false)}
+                  maxLength={500}
+                  placeholder="Why not, or what to do instead"
+                  aria-label={`Your reason for denying, sent to ${agent?.name ?? 'the agent'}`}
+                  className="min-w-0 flex-1 basis-56"
+                  disabled={!!busy}
+                />
+                <Button size="sm" variant="secondary" type="submit" loading={busy === 'deny'} disabled={!!busy}>
+                  Deny
+                </Button>
+                <Button size="sm" variant="ghost" type="button" onClick={() => setAsking(false)} disabled={!!busy}>
+                  Cancel
+                </Button>
+              </form>
             ) : (
               <>
                 <Button size="sm" onClick={() => decide(true)} loading={busy === 'approve'} disabled={!!busy}>
@@ -89,9 +119,12 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
                 <Button size="sm" variant="secondary" onClick={() => decide(false)} loading={busy === 'deny'} disabled={!!busy}>
                   Deny
                 </Button>
+                <Button size="sm" variant="ghost" onClick={() => setAsking(true)} disabled={!!busy}>
+                  Deny with a reason
+                </Button>
               </>
             )}
-            {showAgent && (
+            {showAgent && !asking && (
               <Link href={`/app/s/${approval.session_id}`} className="ml-auto text-[13px] text-muted hover:text-text">
                 Open task
               </Link>

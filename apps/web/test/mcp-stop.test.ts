@@ -79,6 +79,7 @@ vi.mock('../src/lib/runner/store', () => ({ DbRunStore: class {} }));
 // (the real one for http and mcp).
 vi.mock('@/lib/auth', () => import('../src/lib/auth'));
 vi.mock('@/lib/blob', () => import('../src/lib/blob'));
+vi.mock('@/lib/attachments', () => import('../src/lib/attachments'));
 vi.mock('@/lib/db', () => import('../src/lib/db'));
 vi.mock('@/lib/http', () => import('../src/lib/http'));
 vi.mock('@/lib/mcp', () => import('../src/lib/mcp'));

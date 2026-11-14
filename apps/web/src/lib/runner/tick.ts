@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { runLoop, systemPrompt, toolCatalog, DEFAULT_TOOLS, type AgentTools, type ImageRef, type LoopOutcome, type ModelRef, type StatusData, type ToolSpec } from '@wren/core';
+import { attachmentLoader } from '../attachments';
 import { readArtifactBytes } from '../blob';
 import { db } from '../db';
 import { resolveCloudModel, connectionSecret } from '../models';
@@ -130,6 +131,7 @@ export async function runTick(runId: string): Promise<string> {
       maxSteps: run.max_steps,
       modelRetries: Number(run.retry_count) || 0,
       signal: watch.signal,
+      loadAttachment: attachmentLoader(run.user_id),
       log: (m, e) => console.log(`[run ${runId.slice(0, 8)}] ${m}`, e ?? ''),
     });
   } catch (e) {

@@ -12,6 +12,8 @@ export interface DesktopPolicy {
   screen: boolean;
   remoteApprovals: boolean;
   localModelUrl: string;
+  /** Desktop 0.1.49 and later. */
+  keepAwake?: boolean;
 }
 
 export interface DesktopStatus {

@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { agentAnswerText, assessCall, clipMiddle, describeCall, MAX_TOOL_OUTPUT, needsApproval, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
+import { agentAnswerText, assessCall, clipMiddle, deniedText, describeCall, MAX_TOOL_OUTPUT, needsApproval, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
 import { APPROVAL_WAIT_MS, ASK_WAIT_MS, ENGINE_MCP_TIMEOUT_MS } from './bridge-client';
@@ -457,8 +457,9 @@ export async function decide(
       return over() ? stopped : { allow: true }; // a Stop during that write still counts (W-122)
     }
     if (state !== 'pending') {
-      await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: 'Denied by the user.', isError: true } });
-      return { allow: false, message: 'The user denied this action. Do not retry it; continue another way or explain what you need.' };
+      const note = state === 'denied' ? await run.store.approvalNote?.(approvalId).catch(() => undefined) : undefined;
+      await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: note ? deniedText(note) : 'Denied by the user.', isError: true } });
+      return { allow: false, message: note ? deniedText(note) : 'The user denied this action. Do not retry it; continue another way or explain what you need.' };
     }
     await pause(1500, run.signal, ...(asker ? [asker] : []));
   }

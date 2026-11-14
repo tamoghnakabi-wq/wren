@@ -149,6 +149,12 @@ export class DbRunStore implements RunStore {
     return (r?.status ?? 'denied') as ApprovalState;
   }
 
+  /** What the user said when they denied one of this run's approvals. */
+  async approvalNote(id: string): Promise<string | undefined> {
+    const [r] = await db()`select note from public.approvals where id = ${id} and run_id = ${this.r.runId} and user_id = ${this.r.userId} and status = 'denied'`;
+    return typeof r?.note === 'string' && r.note.trim() ? r.note : undefined;
+  }
+
   async recordUsage(u: ModelUsage, model: string): Promise<void> {
     const sql = db();
     // Usage is what the provider charged, so it is always recorded, even by a worker that just

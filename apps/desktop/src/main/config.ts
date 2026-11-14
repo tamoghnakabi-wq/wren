@@ -183,6 +183,8 @@ export interface Policy {
   remoteApprovals: boolean;
   localModelUrl: string;
   launchAtLogin: boolean;
+  /** Keep the computer from sleeping while tasks run here (KeepAwake). Not a permission, so no prompt. */
+  keepAwake: boolean;
 }
 
 function defaultFolder(): string {
@@ -192,7 +194,7 @@ function defaultFolder(): string {
 }
 
 const DEFAULT_MODEL_URL = 'http://127.0.0.1:1234/v1';
-const SWITCHES = ['shell', 'browser', 'screen', 'remoteApprovals', 'launchAtLogin'] as const;
+const SWITCHES = ['shell', 'browser', 'screen', 'remoteApprovals', 'launchAtLogin', 'keepAwake'] as const;
 
 /**
  * `saved`: read from policy.json. `new`: there is none yet (first start), so the first-install defaults.
@@ -217,7 +219,7 @@ function isSavedPolicy(v: unknown): v is Partial<Policy> {
  */
 export function readPolicy(): { policy: Policy; state: PolicyState } {
   const unreadable: { policy: Policy; state: PolicyState } = {
-    policy: { folders: [], shell: false, browser: false, screen: false, remoteApprovals: false, localModelUrl: DEFAULT_MODEL_URL, launchAtLogin: false },
+    policy: { folders: [], shell: false, browser: false, screen: false, remoteApprovals: false, localModelUrl: DEFAULT_MODEL_URL, launchAtLogin: false, keepAwake: false },
     state: 'unreadable',
   };
   let saved: unknown = {};
@@ -239,6 +241,7 @@ export function readPolicy(): { policy: Policy; state: PolicyState } {
     remoteApprovals: true,
     localModelUrl: DEFAULT_MODEL_URL,
     launchAtLogin: false,
+    keepAwake: true,
     ...saved,
     // Only a policy that never listed folders starts with ~/Wren; an empty list means none.
     folders: saved.folders ?? [defaultFolder()],
@@ -277,6 +280,8 @@ export async function changedPolicy(patch: Partial<Policy>, confirm: (what: stri
   const next: Policy = { ...before, ...patch };
   for (const [k] of GRANTS) next[k] = next[k] === true && (before[k] || (allowed && asked.some(([a]) => a === k)));
   next.folders = (Array.isArray(next.folders) ? next.folders : before.folders).filter((f) => before.folders.includes(f));
+  // Saved only as a true/false: anything else in the file would make the whole policy unreadable (W-201).
+  if (typeof next.keepAwake !== 'boolean') next.keepAwake = before.keepAwake;
   if (typeof next.localModelUrl !== 'string' || !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(next.localModelUrl)) next.localModelUrl = before.localModelUrl;
   return { before, next };
 }

@@ -1,8 +1,10 @@
 import { app, dialog, Notification } from 'electron';
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
 import {
+  cachedLoader,
   createModelClient,
   resolveOpenAIRoute,
+  withAttachedText,
   runLoop,
   ScriptedModel,
   toolCatalog,
@@ -10,6 +12,7 @@ import {
   type ApprovalRequest,
   type AskableAgent,
   type ImageRef,
+  type LoadAttachment,
   type LoopOutcome,
   type MessageData,
   type ModelClient,
@@ -69,6 +72,14 @@ export interface RunnerState {
 const CONTINUE_AFTER_LIMIT = 'Your plan’s usage limit stopped you before you finished. It has reset now: carry on with the task where you left off.';
 /** The same, when the user wrote meanwhile: their message follows it. */
 const CONTINUE_WITH_MESSAGE = 'Your plan’s usage limit stopped you before you finished. It has reset now. The user wrote this since; take it into account as you carry on:';
+
+/** Attached text files for this run's messages, through the server (only this run's account's files). */
+function attachments(runId: string, lease: string, signal: AbortSignal): LoadAttachment {
+  return cachedLoader(async (id) => {
+    const r = await deviceJson<{ found: boolean; data?: string }>(`/api/device/runs/${runId}/artifact`, { id }, { lease, signal });
+    return r?.found && typeof r.data === 'string' ? new Uint8Array(Buffer.from(r.data, 'base64')) : null;
+  });
+}
 
 export class DeviceRunner {
   private sb: SupabaseClient | null = null;
@@ -315,7 +326,10 @@ export class DeviceRunner {
     const cursor = [...events].reverse().find((e) => e.type === 'reasoning' && typeof (e.data as { consumedSeq?: unknown }).consumedSeq === 'number');
     const cut = cursor?.data as { interrupted?: boolean; turn?: number } | undefined;
     const interrupted = cut?.interrupted === true;
-    const said = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
+    // Attached text files go in the prompt (images go with it as images).
+    const given = await withAttachedText(asks, attachments(c.run.id, store.lease, signal), signal);
+    if (signal.aborted) return { kind: 'cancelled', steps: 0 };
+    const said = given.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
     const text = !interrupted ? said : said ? `${CONTINUE_WITH_MESSAGE}\n\n${said}` : CONTINUE_AFTER_LIMIT;
     // Attached images go with the prompt; the server only hands out this run's account's images.
     // Stop or a lost lease ends the loading too, and no engine starts for a run that has ended (W-122).
@@ -444,6 +458,8 @@ export class DeviceRunner {
         maxSteps: c.run.maxSteps,
         modelRetries,
         signal,
+        // A model behind Wren's proxy gets attached text on the server, which reads the transcript itself.
+        loadAttachment: model instanceof ProxyModelClient ? undefined : attachments(c.run.id, store.lease, signal),
         log: (m, e) => console.log(`[run ${c.run.id.slice(0, 8)}] ${m}`, e ?? ''),
       });
       if (outcome.kind !== 'yield') return outcome;

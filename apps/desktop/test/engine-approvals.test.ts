@@ -252,6 +252,16 @@ describe('engine approvals on the timeline', () => {
     expect(step.data).toMatchObject({ risk: 'medium', approvalId: 'ap1', result: { output: 'Denied by the user.', isError: true } });
   });
 
+  it('passes on what the user said when they denied with a reason', async () => {
+    const store = { ...fakeStore('denied'), approvalNote: async (id: string) => (id === 'ap1' ? 'Write it to ~/Wren/out instead.' : undefined) };
+    const writer = new TimelineWriter(store as never, 'claude-code', 'Claude Code');
+    const r = await decide(run(store), writer, call, () => true);
+    expect(r).toMatchObject({ allow: false, message: expect.stringContaining('The user denied this action and said:\n\nWrite it to ~/Wren/out instead.') });
+    const step = [...store.rows.values()].find((x) => x.data?.name === 'computer.write_file')!;
+    expect(step.status).toBe('denied');
+    expect((step.data!.result as { output: string }).output).toContain('Write it to ~/Wren/out instead.');
+  });
+
   it('withdraws (denies) the approval when the asker leaves while it waits (W-129)', async () => {
     const store = { ...fakeStore('approved'), approvalState: async () => 'pending' as const, withdrawn: [] as string[], async withdrawApproval(id: string) { this.withdrawn.push(id); } };
     const writer = new TimelineWriter(store as never, 'claude-code', 'Claude Code');

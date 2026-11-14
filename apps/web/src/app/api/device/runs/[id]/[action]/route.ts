@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { createModelClient, DEFAULT_TOOLS, EFFORTS, friendlyModelError, systemPrompt, type AgentTools, type ImageRef, type LoopOutcome, type ModelRef, type ModelStreamEvent } from '@wren/core';
+import { createModelClient, DEFAULT_TOOLS, EFFORTS, friendlyModelError, isTextAttachment, systemPrompt, withAttachedText, type AgentTools, type ImageRef, type LoopOutcome, type ModelRef, type ModelStreamEvent } from '@wren/core';
 import { HttpError, requireDevice, type AuthDevice } from '@/lib/auth';
+import { attachmentLoader } from '@/lib/attachments';
 import { readArtifactBytes } from '@/lib/blob';
 import { db, type Json } from '@/lib/db';
 import { body, json, route, uuid } from '@/lib/http';
@@ -134,7 +135,10 @@ export const POST = route<Ctx>(async (req, ctx) => {
     }
     case 'approval-state': {
       const b = z.object({ id: z.string().uuid() }).parse(raw);
-      return json({ state: await storeFor(run, lease).approvalState(b.id) });
+      const s = storeFor(run, lease);
+      const state = await s.approvalState(b.id);
+      // What the user said when denying goes with the answer (desktop 0.1.49 and later read it).
+      return json({ state, note: state === 'denied' ? await s.approvalNote(b.id) : undefined });
     }
     case 'usage': {
       const b = z.object({ model: z.string(), inputTokens: z.number(), outputTokens: z.number(), cachedTokens: z.number(), source: z.string().max(30).optional() }).parse(raw);
@@ -169,10 +173,11 @@ export const POST = route<Ctx>(async (req, ctx) => {
       return json(b.op === 'add' ? { id: await s.memory.add(b.value) } : { ok: await s.memory.remove(b.value) });
     }
     case 'artifact': {
-      // Image bytes for model input (e.g. an uploaded screenshot), scoped to this run's user.
+      // Bytes for model input, scoped to this run's user: images (an uploaded screenshot) and attached text files.
       const b = z.object({ id: z.string().uuid() }).parse(raw);
-      const [a] = await sql`select blob_path, mime, size from public.artifacts where id = ${b.id} and user_id = ${run.user_id}`;
-      if (!a || !String(a.mime).startsWith('image/') || Number(a.size) > 20 * 1024 * 1024) return json({ found: false });
+      const [a] = await sql`select blob_path, name, mime, size from public.artifacts where id = ${b.id} and user_id = ${run.user_id}`;
+      const usable = a && (String(a.mime).startsWith('image/') ? Number(a.size) <= 20 * 1024 * 1024 : isTextAttachment({ name: a.name, mime: a.mime, size: Number(a.size) }));
+      if (!usable) return json({ found: false });
       const bytes = await readArtifactBytes(a.blob_path);
       return json(bytes ? { found: true, mime: a.mime, data: bytes.toString('base64') } : { found: false });
     }
@@ -269,7 +274,8 @@ async function modelProxy(req: Request, run: Record<string, unknown>): Promise<R
     return bytes ? { mime: a.mime, data: bytes.toString('base64') } : null;
   };
   const client = createModelClient({ source: b.source, credential, loadImage });
-  const events = await storeFor(run, null).events();
+  // The desktop's loop runs without the files: attached text goes to the model from here.
+  const events = await withAttachedText(await storeFor(run, null).events(), attachmentLoader(userId), req.signal);
   const enc = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {

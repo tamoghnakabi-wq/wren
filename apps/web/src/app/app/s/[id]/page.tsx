@@ -62,6 +62,17 @@ export default function SessionPage() {
     for (const e of eventsLive.rows) byId.set(e.id, e);
     return { ...eventsLive, rows: [...byId.values()].sort((a, b) => a.seq - b.seq) };
   }, [eventsLive, olderRows]);
+  // What ↑ in the empty composer brings back: the user's last message here, without the files note the server adds.
+  const lastAsked = useMemo(() => {
+    for (let i = events.rows.length - 1; i >= 0; i--) {
+      const e = events.rows[i];
+      const d = e.data as { role?: string; text?: string; attachments?: unknown[] };
+      if (e.type !== 'message' || d.role !== 'user' || typeof d.text !== 'string') continue;
+      const text = d.attachments?.length ? d.text.replace(/\n\n\[Attached files: [^\n]*\]$/, '') : d.text;
+      return text.trim() ? text : undefined;
+    }
+    return undefined;
+  }, [events.rows]);
   const hasOlder = !eventsLive.loading && eventsLive.rows.length >= PAGE && (older.session !== id || older.more);
   // The current plan is fetched on its own, so it shows even when it is older than the loaded history.
   const latestPlan = useLive<EventRow>({ table: 'events', eq: { session_id: id, type: 'plan' }, order: { column: 'seq', ascending: false }, limit: 1, realtimeFilter: { column: 'session_id', value: id } });
@@ -453,6 +464,7 @@ export default function SessionPage() {
                 <Composer
                   agent={agent}
                   sessionId={id}
+                  recall={lastAsked}
                   compact
                   placeholder={askingQuestion ? 'Answer the question…' : waitingForComputer ? 'Add to the task before it starts…' : working ? 'Add guidance while it works…' : 'Follow up or give a new instruction…'}
                   onSent={() => {

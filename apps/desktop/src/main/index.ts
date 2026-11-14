@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -13,6 +13,7 @@ import { engineProgram } from '../engines/program';
 import { closeBrowser, stopAllJobs } from './host';
 import { engineLoginScript } from './login';
 import { createPairing, type PairAnswer, type PairStart } from './pairing';
+import { KeepAwake } from './keepawake';
 import { giveBack, retryGiveBacks } from './revoke';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
@@ -254,8 +255,13 @@ let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 
-const runner = new DeviceRunner(
-  () => pushStatus(),
+// The computer stays awake while agents work on it (Settings: "Stay awake while agents work").
+const keepAwake = new KeepAwake(powerSaveBlocker);
+const runner: DeviceRunner = new DeviceRunner(
+  () => {
+    keepAwake.update(runner.state.running > 0, loadPolicy().keepAwake);
+    pushStatus();
+  },
   (sessionId) => showWindow(`/app/s/${sessionId}`),
 );
 const updater = new Updater(() => pushStatus());
@@ -475,6 +481,7 @@ let cleanedUp = false;
 let cleaning: Promise<void> | null = null;
 function shutdown(e: Electron.Event) {
   quitting = true;
+  keepAwake.stop();
   if (cleanedUp) return;
   e.preventDefault();
   cleaning ??= (async () => {
@@ -636,6 +643,7 @@ function registerIpc() {
     const { before, next } = await changedPolicy({ ...(p as Partial<Policy>) }, confirmGrants);
     savePolicy(next);
     app.setLoginItemSettings({ openAtLogin: next.launchAtLogin });
+    keepAwake.update(runner.state.running > 0, next.keepAwake);
     if (permissionsReduced(before, next)) runner.permissionsReduced();
     void runner.tick();
     return next;

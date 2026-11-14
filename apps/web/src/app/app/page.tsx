@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowRight, Check, KeyRound, Laptop, Sparkles } from 'lucide-react';
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { ApprovalCard } from '@/components/app/approval-card';
 import { Composer } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
@@ -35,12 +35,21 @@ function Home() {
   const recent = useLive<Session>({ table: 'sessions', eq: { user_id: userId }, is: { archived_at: null }, order: { column: 'last_event_at' }, limit: 15, realtimeFilter: { column: 'user_id', value: userId } });
   const connections = useLive<Connection>({ table: 'connections', eq: { user_id: userId } });
 
-  // The agent you picked, else the one named in the URL, else the most recently active one.
+  // The agent you picked, else the one named in the URL (by id or name), else the most recently active one.
   const fallback = useMemo(() => {
-    const pref = params.get('agent');
+    const pref = params.get('agent')?.trim().toLowerCase();
     const byLast = [...agents].sort((a, b) => String(b.last_active_at ?? b.created_at).localeCompare(String(a.last_active_at ?? a.created_at)));
-    return agents.find((a) => a.id === pref) ?? byLast[0];
+    return (pref && (agents.find((a) => a.id === pref) ?? agents.find((a) => a.name.trim().toLowerCase() === pref))) || byLast[0];
   }, [agents, params]);
+  // A prompt link (`/app?prompt=…&agent=…`) fills in a draft; it never runs on its own. Read once, then dropped
+  // from the address, so a reload or the back button doesn't bring it back.
+  const [linked] = useState(() => params.get('prompt') ?? undefined);
+  useEffect(() => {
+    if (!params.has('prompt')) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('prompt');
+    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+  }, [params]);
   const agent = picked && agents.some((a) => a.id === picked.id) ? picked : fallback;
 
   const name = profile?.display_name?.split(' ')[0];
@@ -59,7 +68,7 @@ function Home() {
         <p className="mt-1 text-[15px] text-muted">{agents.length ? 'Give an agent something to do — it will keep working while you are away.' : 'Create your first agent to get started.'}</p>
         <div className="mt-6">
           {agents.length ? (
-            <Composer agent={agent} onAgentChange={setAgent} autoFocus={params.get('compose') === '1'} onSent={(r) => router.push(`/app/s/${r.sessionId}`)} />
+            <Composer agent={agent} onAgentChange={setAgent} autoFocus={params.get('compose') === '1' || !!linked} initialText={linked} onSent={(r) => router.push(`/app/s/${r.sessionId}`)} />
           ) : (
             <StarterTemplates />
           )}

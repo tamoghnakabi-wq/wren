@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_MODEL_RETRIES, runLoop, type ApprovalState, type RunStore, type ToolContext, type ToolHost } from '../src/loop';
+import { deniedText, MAX_MODEL_RETRIES, runLoop, type ApprovalState, type RunStore, type ToolContext, type ToolHost } from '../src/loop';
 import { toolCatalog } from '../src/tools';
 import { assessCall, needsApproval } from '../src/policy';
 import { checkPage, pageFileName } from '../src/pages';
@@ -293,6 +293,67 @@ describe('agent loop', () => {
     expect(store.events_.find((e) => e.type === 'tool')!.status).toBe('denied');
     const turns = buildTurns(model.calls[1].events);
     expect((turns[1] as { calls: { output: string }[] }).calls[0].output).toMatch(/denied/);
+  });
+
+  it('tells the model what the user said when they denied with a reason', async () => {
+    const store = new MemStore();
+    await store.userSays('tidy the repo');
+    const model = new ScriptModel([{ calls: [{ name: 'computer.shell', args: { command: 'git reset --hard HEAD~3' } }] }, { text: 'Using the branch instead.' }]);
+    const host = new FakeHost();
+    await base(store, model, host);
+    const id = (store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).approvalId!;
+    store.approvals.set(id, 'denied');
+    const asked: string[] = [];
+    Object.assign(store, { approvalNote: async (a: string) => (asked.push(a), 'Not on main. Make a branch first.') });
+    await base(store, model, host);
+    expect(asked).toEqual([id]);
+    expect(host.ran).toEqual([]);
+    const output = (buildTurns(model.calls[1].events)[1] as { calls: { output: string }[] }).calls[0].output;
+    expect(output).toContain('The user denied this action and said:\n\nNot on main. Make a branch first.');
+    expect(output).toContain('take what they said into account');
+  });
+
+  it('gives an expired approval no reason, and a blank reason reads as none', async () => {
+    expect(deniedText('   ')).toBe(deniedText());
+    expect(deniedText('x'.repeat(900)).length).toBeLessThan(700);
+    const store = new MemStore();
+    await store.userSays('tidy the repo');
+    const model = new ScriptModel([{ calls: [{ name: 'computer.shell', args: { command: 'git reset --hard HEAD~3' } }] }, { text: 'ok' }]);
+    await base(store, model, new FakeHost());
+    store.approvals.set((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).approvalId!, 'expired');
+    let asked = 0;
+    Object.assign(store, { approvalNote: async () => (asked++, 'never read') });
+    await base(store, model, new FakeHost());
+    expect(asked).toBe(0);
+    expect((buildTurns(model.calls[1].events)[1] as { calls: { output: string }[] }).calls[0].output).toMatch(/expired/);
+  });
+
+  it('gives the model attached text files without saving their text', async () => {
+    const store = new MemStore();
+    await store.append('message', { role: 'user', text: 'Summarise this\n\n[Attached files: notes.txt]', attachments: [{ artifactId: 'a1', name: 'notes.txt', mime: 'text/plain', size: 11 }] }, 'done');
+    const model = new ScriptModel([{ text: 'It says hello.' }]);
+    const loads: string[] = [];
+    await base(store, model, new FakeHost(), { loadAttachment: async (id) => (loads.push(id), new TextEncoder().encode('hello world')) });
+    expect(loads).toEqual(['a1']);
+    const turns = buildTurns(model.calls[0].events);
+    expect(turns[0]).toMatchObject({ kind: 'user', text: expect.stringContaining('<attached-file name="notes.txt">\nhello world\n</attached-file>') });
+    expect((store.events_[0].data as { text: string }).text).toBe('Summarise this\n\n[Attached files: notes.txt]');
+  });
+
+  it('ends cancelled when Stop comes while attached files load', async () => {
+    const store = new MemStore();
+    await store.append('message', { role: 'user', text: 'Read it', attachments: [{ artifactId: 'a1', name: 'notes.txt', mime: 'text/plain', size: 11 }] }, 'done');
+    const ac = new AbortController();
+    const model = new ScriptModel([{ text: 'never' }]);
+    const out = await base(store, model, new FakeHost(), {
+      signal: ac.signal,
+      loadAttachment: async () => {
+        ac.abort();
+        throw new Error('aborted');
+      },
+    });
+    expect(out.kind).toBe('cancelled');
+    expect(model.calls).toHaveLength(0);
   });
 
   it('blocks catastrophic commands outright', async () => {

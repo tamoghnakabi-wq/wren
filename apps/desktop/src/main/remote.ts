@@ -15,6 +15,8 @@ export class RemoteStore implements RunStore {
   /** With remote approvals off, only a decision made on this computer counts. */
   /** Read when an approval is created, so turning remote approvals off applies at once. */
   localOnlyApprovals: () => boolean = () => false;
+  /** Reasons the user gave when denying, by approval id. */
+  private readonly notes = new Map<string, string>();
 
   constructor(
     private readonly runId: string,
@@ -47,7 +49,13 @@ export class RemoteStore implements RunStore {
     await this.call('decide', { id, approve: false });
   }
   async approvalState(id: string): Promise<ApprovalState> {
-    return (await this.call<{ state: ApprovalState }>('approval-state', { id })).state;
+    const r = await this.call<{ state: ApprovalState; note?: string }>('approval-state', { id });
+    if (r.state === 'denied' && typeof r.note === 'string') this.notes.set(id, r.note);
+    return r.state;
+  }
+  /** What the user said when denying, as the answer to approvalState brought it. */
+  async approvalNote(id: string): Promise<string | undefined> {
+    return this.notes.get(id);
   }
   async recordUsage(u: ModelUsage, model: string): Promise<void> {
     await this.call('usage', { ...u, model, source: this.usageSource });

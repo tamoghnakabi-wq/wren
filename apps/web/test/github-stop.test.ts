@@ -51,6 +51,7 @@ vi.mock('../src/lib/runner/store', () => ({ DbRunStore: class {} }));
 // The route imports through the app's '@/' alias, which vitest doesn't resolve: each is the module above.
 vi.mock('@/lib/auth', () => import('../src/lib/auth'));
 vi.mock('@/lib/blob', () => import('../src/lib/blob'));
+vi.mock('@/lib/attachments', () => import('../src/lib/attachments'));
 vi.mock('@/lib/db', () => import('../src/lib/db'));
 vi.mock('@/lib/http', () => import('../src/lib/http'));
 vi.mock('@/lib/mcp', () => import('../src/lib/mcp'));

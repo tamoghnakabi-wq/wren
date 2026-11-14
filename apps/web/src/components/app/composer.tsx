@@ -1,8 +1,9 @@
 'use client';
 
-import { ArrowUp, ChevronDown, Cloud, Laptop, Loader2, Paperclip, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { ArrowUp, ChevronDown, Cloud, Laptop, Link2, Loader2, Paperclip, X } from 'lucide-react';
+import { useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import { api } from '@/lib/client/api';
+import { MAX_MESSAGE_CHARS, PASTE_AS_FILE_CHARS, pastedFileName, READABLE_TEXT_BYTES } from '@/lib/client/paste';
 import { uploadFile, type Attachment } from '@/lib/client/upload';
 import { sourceInfo } from '@/lib/client/sources';
 import { isLiveDevice, type Agent } from '@/lib/client/types';
@@ -19,6 +20,8 @@ export function Composer({
   autoFocus,
   onSent,
   compact,
+  initialText,
+  recall,
 }: {
   agent?: Agent;
   onAgentChange?: (a: Agent) => void;
@@ -27,10 +30,16 @@ export function Composer({
   autoFocus?: boolean;
   onSent?: (r: { sessionId: string; runId: string }) => void;
   compact?: boolean;
+  /** A draft from a prompt link (`/app?prompt=…`): filled in, never sent until the user sends it. */
+  initialText?: string;
+  /** What ↑ in an empty box brings back: the user's last message in this task. */
+  recall?: string;
 }) {
   const { agents, devices } = useApp();
   const toast = useToast();
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => (initialText ?? '').slice(0, MAX_MESSAGE_CHARS));
+  // A draft someone else may have written (a link can come from anywhere): said so until it's sent.
+  const [fromLink, setFromLink] = useState(() => !!initialText?.trim());
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(0);
@@ -87,6 +96,26 @@ export function Composer({
   const deviceOnline = device ? isLiveDevice(device) : false;
   const usesPlan = useUsesChatGPTPlan(agent, effectiveRuntime);
 
+  // Long text pasted in becomes an attached file; an image pasted on its own (a screenshot) is attached too.
+  function paste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    if (holding || !agent) return;
+    const pasted = e.clipboardData.getData('text/plain');
+    if (!pasted) {
+      const images = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith('image/'));
+      if (!images.length) return;
+      e.preventDefault();
+      void upload(images.map((f, i) => (f.name && f.name !== 'image.png' ? f : new File([f], `Pasted image${images.length > 1 ? ` ${i + 1}` : ''}.${f.type.split('/')[1] || 'png'}`, { type: f.type }))));
+      return;
+    }
+    if (pasted.length <= PASTE_AS_FILE_CHARS) return;
+    e.preventDefault();
+    if (new TextEncoder().encode(pasted).length > READABLE_TEXT_BYTES) {
+      toast('That’s over 1 MB of text, more than an agent can read from a message. Save it in a file the agent can open instead.', 'error');
+      return;
+    }
+    void upload([new File([pasted], pastedFileName(files.map((f) => f.name)), { type: 'text/plain' })]);
+  }
+
   async function upload(list: File[]) {
     if (list.length > 10 - files.length) toast('A message can have up to 10 files.', 'error');
     for (const f of list.slice(0, 10 - files.length)) {
@@ -108,6 +137,10 @@ export function Composer({
 
   async function send() {
     if (!agent || busy || (!text.trim() && !files.length) || uploading) return;
+    if (text.length > MAX_MESSAGE_CHARS) {
+      toast(`A message can be up to ${MAX_MESSAGE_CHARS.toLocaleString()} characters. Paste longer text and it’s attached as a file.`, 'error');
+      return;
+    }
     setBusy(true);
     // What's being sent leaves the box right away, so anything typed or attached meanwhile is a new
     // draft that the answer can't wipe. If sending fails, it comes back (ahead of the new draft).
@@ -125,6 +158,7 @@ export function Composer({
         setText('');
         setFiles([]);
       }
+      setFromLink(false);
       onSent?.(r);
     } catch (e) {
       if (sessionId) {
@@ -156,6 +190,15 @@ export function Composer({
       }}
     >
       {dragging && <p className="px-2 pb-1 text-[12.5px] font-medium text-brand-ink">Drop to attach</p>}
+      {fromLink && !dragging && (
+        <p className="flex items-start gap-1.5 px-2 pb-1.5 text-[12.5px] text-muted">
+          <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="flex-1">This message came from a link. Read it before you send it.</span>
+          <button type="button" onClick={() => setFromLink(false)} className="text-faint hover:text-text" aria-label="Dismiss">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </p>
+      )}
       {!!files.length && (
         <div className="mb-2 flex flex-wrap gap-1.5 px-1">
           {files.map((f) => (
@@ -172,11 +215,23 @@ export function Composer({
       <textarea
         ref={ta}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          if (!e.target.value.trim()) setFromLink(false); // the linked draft is gone, so the warning is too
+        }}
+        onPaste={paste}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && window.matchMedia('(pointer: fine)').matches) {
             e.preventDefault();
             send();
+          }
+          // ↑ in an empty box brings back the last message, to send again or change.
+          if (e.key === 'ArrowUp' && !text && recall && !holding && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            const el = e.currentTarget;
+            setText(recall);
+            // Caret to the end, unless typing has already begun (then it's where the typing put it).
+            requestAnimationFrame(() => el.value === recall && el.setSelectionRange(recall.length, recall.length));
           }
         }}
         rows={compact ? 1 : 2}

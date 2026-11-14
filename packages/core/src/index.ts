@@ -4,6 +4,7 @@ export * from './policy';
 export * from './transcript';
 export * from './loop';
 export * from './pages';
+export * from './attachments';
 export * from './prompt';
 export * from './text';
 export * from './semver';

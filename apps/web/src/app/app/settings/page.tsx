@@ -323,6 +323,11 @@ function ThisComputer({ d }: { d: WrenDesktop }) {
       <Row title="Approve from other devices" body="Let approvals from your phone or the web unlock actions on this computer. Off means only this computer can approve.">
         <Switch label="Remote approvals" checked={policy.remoteApprovals} onChange={(v) => update({ remoteApprovals: v })} />
       </Row>
+      {typeof policy.keepAwake === 'boolean' && (
+        <Row title="Stay awake while agents work" body="Stops this computer going to sleep while a task runs on it, and for a minute after. The screen can still turn off, and closing a laptop's lid can still put it to sleep.">
+          <Switch label="Stay awake" checked={policy.keepAwake} onChange={(v) => update({ keepAwake: v })} />
+        </Row>
+      )}
       <div className="px-4 py-3.5">
         <Label htmlFor="s-local" hint="An OpenAI-compatible server such as LM Studio (http://127.0.0.1:1234/v1) or Ollama (http://127.0.0.1:11434/v1).">
           Local model server
