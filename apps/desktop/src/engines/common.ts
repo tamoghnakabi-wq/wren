@@ -5,9 +5,10 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { agentAnswerText, assessCall, describeCall, needsApproval, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
+import { agentAnswerText, assessCall, clipMiddle, describeCall, MAX_TOOL_OUTPUT, needsApproval, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
+import { APPROVAL_WAIT_MS, ASK_WAIT_MS, ENGINE_MCP_TIMEOUT_MS } from './bridge-client';
 import { dataDir } from '../main/config';
 import { allowedRoots, reachesAny } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
@@ -45,6 +46,11 @@ export interface EngineRun {
   saveResumeId: (id: string) => Promise<void>;
   /** The user's other agents this one may ask (its ask_agent tool); none for a task another agent asked. */
   askable?: AskableAgent[];
+  /**
+   * Which turn of the task this is: the first message the engine is given in it (its seq). The same after a
+   * crash (that turn is run again), new for a follow-up, so asking the same again in a later turn is a new ask.
+   */
+  turn?: number;
 }
 
 /**
@@ -179,22 +185,39 @@ function shellPrefix(): string {
 }
 
 const helpTexts = new Map<string, string>();
+/** When a program's help probe last failed: not asked again for a while (each try can block for 20 s). */
+const helpFailed = new Map<string, number>();
+const HELP_RETRY_MS = 30_000;
+function helpKey(cli: string): string {
+  // Keyed by the file the link points to: an update installs a new version and moves the link.
+  try {
+    return realpathSync(cli);
+  } catch {
+    return cli;
+  }
+}
 /** An engine CLI's help text (Grok's for agent mode), read once per program: which flags this version has. */
 function cliHelp(engine: Engine, cli: string): string {
-  // Keyed by the file the link points to: an update installs a new version and moves the link.
-  let key = cli;
-  try {
-    key = realpathSync(cli);
-  } catch {
-    /* keep the path */
-  }
-  let text = helpTexts.get(key);
-  if (text === undefined) {
-    const help = spawnSync(cli, engine === 'claude-code' ? ['--help'] : ['agent', '--help'], { encoding: 'utf8', env: engineEnv(engine), timeout: 20_000 });
-    text = `${help.stdout ?? ''}${help.stderr ?? ''}`;
+  const key = helpKey(cli);
+  const known = helpTexts.get(key);
+  if (known !== undefined) return known;
+  if (Date.now() - (helpFailed.get(key) ?? -Infinity) < HELP_RETRY_MS) return '';
+  const help = spawnSync(cli, engine === 'claude-code' ? ['--help'] : ['agent', '--help'], { encoding: 'utf8', env: engineEnv(engine), timeout: 20_000 });
+  const text = `${help.stdout ?? ''}${help.stderr ?? ''}`;
+  // Only an answer is kept: a probe that failed or ran out of time (a busy moment) is asked again a little
+  // later, rather than making this version look too old for Wren until it restarts.
+  if (!help.error && help.status === 0 && text.trim()) {
     helpTexts.set(key, text);
+    helpFailed.delete(key);
+    return text;
   }
-  return text;
+  helpFailed.set(key, Date.now());
+  return '';
+}
+
+/** Whether Wren has read this program's help text (false: its probe failed, so its flags are unknown). */
+export function cliHelpKnown(cli: string): boolean {
+  return helpTexts.has(helpKey(cli));
 }
 
 /** Whether this version of the CLI has a command-line flag (from its help text). */
@@ -231,8 +254,11 @@ export async function spawnClaude(cli: string, args: string[], run: EngineRun, h
       WREN_SHELL_SB: seatbeltProfile(allowedRoots(run.folders), dataDir(), undefined, appPaths(helper)),
     });
   }
-  // Wren's own MCP calls wait for a person (an approval) or another agent (an answer): longer than any wait.
-  if (run.askable?.length) env.MCP_TOOL_TIMEOUT = String(ASK_WAIT_MS + 5 * 60_000);
+  // Wren's own MCP calls wait for a person (an approval) or another agent (an answer), saying nothing
+  // meanwhile: longer than Wren's own waits, which end them first. Claude Code 2.1.322 otherwise ends a call
+  // to a stdio server after 30 minutes without word from it (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).
+  env.MCP_TOOL_TIMEOUT = String(ENGINE_MCP_TIMEOUT_MS);
+  env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT = String(ENGINE_MCP_TIMEOUT_MS);
   return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
 }
 
@@ -414,7 +440,7 @@ export async function decide(
   const approvalId = await run.store.createApproval({ eventId: step.id, tool: call.name, title: call.title, risk: a.risk, reason: a.reason, args: call.args });
   await writer.setStep(step, 'awaiting_approval', { approvalId });
   // Engines treat a hook timeout as "allow", so always answer well before theirs.
-  const giveUpAt = Date.now() + 50 * 60_000;
+  const giveUpAt = Date.now() + APPROVAL_WAIT_MS;
   for (;;) {
     if (over()) {
       // Nobody waits for this answer any more: the approval is withdrawn (denied), not left to be granted.
@@ -434,7 +460,7 @@ export async function decide(
       await writer.setStep(step, 'denied', { endedAt: Date.now(), result: { output: 'Denied by the user.', isError: true } });
       return { allow: false, message: 'The user denied this action. Do not retry it; continue another way or explain what you need.' };
     }
-    await new Promise((r) => setTimeout(r, 1500));
+    await pause(1500, run.signal, ...(asker ? [asker] : []));
   }
 }
 
@@ -442,14 +468,13 @@ export type BridgeHandler = (req: { tool_name: string; input: Record<string, unk
 /** An engine's ask_agent call (through Wren's MCP helper): the answer, or why there is none. */
 export type AskHandler = (req: { agent: string; question: string; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
 
-/** How long an engine waits for another agent's answer (the server stops asked tasks after an hour too). */
-export const ASK_WAIT_MS = 60 * 60_000;
+export { ASK_WAIT_MS };
 
 /**
  * An engine asks another of the user's agents (Claude Code's ask_agent tool) and waits for the answer, like
  * an approval: polling the server while the CLI's call stays open. Stop (or the CLI going away) stops the
- * asked agent too. The ask's key is the question itself, so a turn run again after a crash finds the task
- * it already started; the same question asked again in one turn (`seen`) is a new ask.
+ * asked agent too. The ask's key is the turn and the question, so a turn run again after a crash finds the
+ * task it already started; the same question asked again in one turn (`seen`) or in a later turn is a new ask.
  */
 export async function askThroughWren(
   run: EngineRun,
@@ -461,7 +486,7 @@ export async function askThroughWren(
   const agent = req.agent.trim();
   const question = req.question.trim().slice(0, 8000);
   if (!agent || !question) return { text: 'Say which agent to ask and what to ask it.', isError: true };
-  const hash = createHash('sha256').update(`${run.runId}\n${agent.toLowerCase()}\n${question}`).digest('hex').slice(0, 40);
+  const hash = createHash('sha256').update(`${run.runId}\n${run.turn ?? 0}\n${agent.toLowerCase()}\n${question}`).digest('hex').slice(0, 40);
   const n = (seen.get(hash) ?? 0) + 1;
   seen.set(hash, n);
   const key = n === 1 ? `engine:${hash}` : `engine:${hash}:${n}`;
@@ -487,15 +512,30 @@ export async function askThroughWren(
       return { text: `${started.agent} didn’t answer within ${Math.round((opts.waitMs ?? ASK_WAIT_MS) / 60_000)} minutes, so its task was stopped. Carry on without it.`, isError: true };
     }
     const a = await run.store.agentAnswer(key).catch(() => ({ state: 'pending' as const, agent: started.agent }));
-    if (a.state === 'answered') return { text: agentAnswerText(a.agent, a.answer) };
+    // As long as any other tool's output may be (an asked agent's answer has no limit of its own).
+    if (a.state === 'answered') return { text: agentAnswerText(a.agent, clipMiddle(a.answer, MAX_TOOL_OUTPUT)) };
     if (a.state === 'failed') return { text: a.error, isError: true };
-    await new Promise<void>((r) => {
-      const t = setTimeout(r, opts.pollMs ?? 2000);
-      const stop = () => (clearTimeout(t), r());
-      req.signal.addEventListener('abort', stop, { once: true });
-      run.signal.addEventListener('abort', stop, { once: true });
-    });
+    await pause(opts.pollMs ?? 2000, req.signal, run.signal);
   }
+}
+
+/**
+ * Wait `ms`, or until a signal aborts. The listeners go when the wait ends either way: an ask polls every 2 s
+ * for up to an hour, and listeners left on the run's signal would pile up (and Node warns past 10).
+ */
+export function pause(ms: number, ...signals: AbortSignal[]): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(t);
+      for (const s of signals) s.removeEventListener('abort', done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    for (const s of signals) {
+      if (s.aborted) return done();
+      s.addEventListener('abort', done, { once: true });
+    }
+  });
 }
 
 /** Localhost endpoint that engine permission hooks call back into (per-run bearer token). */

@@ -342,6 +342,8 @@ export class DeviceRunner {
       resumeId: resume?.data.resumeId,
       // Claude Code can ask the user's other agents through Wren's MCP helper; Grok Build can't yet.
       askable: engine === 'claude-code' ? c.askable : undefined,
+      // The first message of this turn: the same when a crash makes it run again, new for a follow-up.
+      turn: asks[0]?.seq ?? 0,
       plan: ([...events].reverse().find((e) => e.type === 'plan')?.data as { items?: PlanItem[] } | undefined)?.items,
       signal,
       saveResumeId: async (id: string) => {

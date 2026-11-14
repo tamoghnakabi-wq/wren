@@ -203,7 +203,8 @@ export function AgentForm({ draft, onChange, selfId }: { draft: AgentDraft; onCh
                 <Switch
                   label={`Can ask ${a.name}`}
                   checked={draft.tools.agents.includes(a.id)}
-                  onChange={(v) => set('tools', { ...draft.tools, agents: v ? [...draft.tools.agents, a.id] : draft.tools.agents.filter((x) => x !== a.id) })}
+                  // Agents removed since are dropped from the list (it holds at most 20).
+                  onChange={(v) => set('tools', { ...draft.tools, agents: [...draft.tools.agents.filter((x) => x !== a.id && others.some((o) => o.id === x)), ...(v ? [a.id] : [])] })}
                 />
               </div>
             ))}

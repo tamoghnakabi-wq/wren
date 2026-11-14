@@ -132,10 +132,11 @@ export function Timeline({ events, agent, approvals, working, waitingFor, stoppe
   const items = useMemo(() => markStopped(group(events), new Set(stoppedKey ? stoppedKey.split(',') : [])), [events, stoppedKey]);
   const last = events[events.length - 1];
   const showThinking = working && !(last?.type === 'message' && last.status === 'streaming' && String(last.data.text ?? ''));
-  // Waiting for another agent's answer (task.ask_agent): working, through that agent.
-  const askingStep = events.find((e) => e.type === 'tool' && e.status === 'awaiting_agent');
+  // Waiting for another agent's answer (task.ask_agent): working, through that agent. Only a run still going
+  // counts: a step an ended run left open isn't what this task is doing now.
+  const askingStep = events.find((e) => e.type === 'tool' && e.status === 'awaiting_agent' && !(e.run_id && ended.has(e.run_id)));
   const asking = askingStep ? String((askingStep.data as unknown as ToolData).ask?.agent || askingStep.data.args && (askingStep.data.args as Record<string, unknown>).agent || 'another agent') : undefined;
-  const toolRunning = !!asking || events.some((e) => e.type === 'tool' && e.status === 'running');
+  const toolRunning = !!asking || events.some((e) => e.type === 'tool' && e.status === 'running' && !(e.run_id && ended.has(e.run_id)));
   return (
     <EndedRuns.Provider value={ended}>
     <div className="space-y-5">
@@ -326,7 +327,9 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
   const raw = ev.status ?? 'pending';
   const runEnded = ev.run_id ? ended.get(ev.run_id) : undefined;
   // While the run's commands aren't confirmed stopped, nothing of it says "Stopped" yet (W-119).
-  const status = runEnded === 'stopping' && ['running', 'pending', 'cancelled'].includes(raw) ? 'stopping' : (raw === 'running' || raw === 'pending') && runEnded ? 'unfinished' : raw;
+  // An ask an ended run still shows as waiting gets no answer any more (nothing polls for it): not finished.
+  const unanswered = raw === 'running' || raw === 'pending' || raw === 'awaiting_agent';
+  const status = runEnded === 'stopping' && (unanswered || raw === 'cancelled') ? 'stopping' : unanswered && runEnded ? 'unfinished' : raw;
   const dur = d.startedAt && d.endedAt ? Math.max(0, Math.round((d.endedAt - d.startedAt) / 100) / 10) : null;
   const images = d.result?.images?.filter((i) => i.artifactId) ?? [];
   const artifacts = d.result?.artifacts ?? [];

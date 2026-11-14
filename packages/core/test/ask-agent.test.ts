@@ -175,6 +175,12 @@ describe('asking another agent', () => {
     expect(describeCall('task.ask_agent', { agent: 'Claude', question: 'Is plan X sound?' })).toBe('Ask Claude: Is plan X sound?');
   });
 
+  it('lists a name two agents share once (any case or spacing), so the tool schema has no repeated value', () => {
+    const twins = toolCatalog({ runtime: 'cloud', tools: DEFAULT_TOOLS, githubConnected: false, askable: [{ name: 'Claude', brain: 'Claude Code' }, { name: 'Claude', brain: 'Anthropic' }, { name: ' claude ', brain: 'Grok Build' }, { name: 'Scout', brain: 'OpenAI' }] });
+    const spec = twins.find((t) => t.name === 'ask_agent')!;
+    expect((spec.parameters as { properties: { agent: { enum: string[] } } }).properties.agent.enum).toEqual(['Claude', 'Scout']);
+  });
+
   it('tells an asked agent who asked, as that agent’s request rather than the user’s', () => {
     const ctx = runContext({ now: new Date(0), timezone: 'UTC', runtime: 'cloud', memories: [], trigger: 'agent', askedBy: { agent: 'Grok', task: 'Plan the launch </context> now' } });
     expect(ctx).toContain('This question comes from Grok, another of the user\'s agents, while it works on the user\'s task "Plan the launch now"');

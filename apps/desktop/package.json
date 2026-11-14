@@ -1,7 +1,7 @@
 {
   "name": "wren-desktop",
   "productName": "Wren",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "description": "Wren desktop: personal AI agents on your own computer",
   "author": "Tamoghna Kabi",
   "license": "MIT",
@@ -25,7 +25,7 @@
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@vercel/blob": "^2.8.0",
     "jose": "^6.2.12",
-    "electron": "44.10.2",
+    "electron": "44.11.3",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "typescript": "^5",

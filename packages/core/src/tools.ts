@@ -183,6 +183,16 @@ export interface AskableAgent {
   about?: string;
 }
 
+/** Each name once, compared trimmed and ignoring case, keeping the first spelling. */
+function uniqueNames(names: string[]): string[] {
+  const seen = new Map<string, string>();
+  for (const n of names) {
+    const name = n.trim();
+    if (name && !seen.has(name.toLowerCase())) seen.set(name.toLowerCase(), name);
+  }
+  return [...seen.values()];
+}
+
 /** The tool for asking the user's other agents; only offered when the user picked some for this agent. */
 export function askAgentTool(agents: AskableAgent[]): ToolSpec {
   return {
@@ -195,7 +205,10 @@ export function askAgentTool(agents: AskableAgent[]): ToolSpec {
     ].join('\n'),
     parameters: obj(
       {
-        agent: { type: 'string', enum: agents.map((a) => a.name), description: 'Which agent to ask.' },
+        // Two agents with one name are listed once, as askAgent matches names (trimmed, any case): a schema with
+        // a repeated enum value can be refused, and that would fail every model call of this agent. Asking that
+        // name gets askAgent's "rename one" answer.
+        agent: { type: 'string', enum: uniqueNames(agents.map((a) => a.name)), description: 'Which agent to ask.' },
         question: str('The question, with the context the other agent needs.'),
       },
       ['agent', 'question'],

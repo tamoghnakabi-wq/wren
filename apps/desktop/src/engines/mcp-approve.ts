@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { APPROVE_HELPER_MS, ASK_HELPER_MS, postToWren, uniqueNames } from './bridge-client';
 
 // The bridge's address and token come from Wren's private file (only this server's sandbox profile can
 // read it), never from the command line or the environment, which other processes can read (W-121).
@@ -25,10 +26,10 @@ server.registerTool(
     description: 'Ask Wren whether a tool call may run.',
     inputSchema: { tool_name: z.string(), input: z.record(z.string(), z.unknown()), tool_use_id: z.string().optional() },
   },
-  async (args) => {
+  async (args, extra) => {
     try {
-      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(args) });
-      const decision = await res.json();
+      // Claude Code taking its call back (`extra.signal`) ends the request, so Wren withdraws the approval (W-129).
+      const decision = decisionOf(await postToWren(url, token, args, { signal: extra.signal, timeoutMs: APPROVE_HELPER_MS }), args.input);
       return { content: [{ type: 'text' as const, text: JSON.stringify(decision) }] };
     } catch (e) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ behavior: 'deny', message: `Wren is not reachable: ${(e as Error).message}` }) }] };
@@ -36,7 +37,14 @@ server.registerTool(
   },
 );
 
-const agents = (Array.isArray(askable) ? askable : []).filter((a) => a && typeof a.name === 'string' && a.name);
+/** Only Wren's two answers pass on to Claude Code; anything else is a refusal, never an allow. */
+function decisionOf(d: unknown, input: Record<string, unknown>): { behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string } {
+  const o = (d && typeof d === 'object' ? d : {}) as { behavior?: unknown; updatedInput?: unknown; message?: unknown };
+  if (o.behavior === 'allow') return { behavior: 'allow', updatedInput: o.updatedInput && typeof o.updatedInput === 'object' && !Array.isArray(o.updatedInput) ? (o.updatedInput as Record<string, unknown>) : input };
+  return { behavior: 'deny', message: o.behavior === 'deny' && typeof o.message === 'string' && o.message ? o.message : 'Wren gave no decision.' };
+}
+
+const agents = (Array.isArray(askable) ? askable : []).filter((a) => a && typeof a.name === 'string' && a.name.trim());
 if (agents.length) {
   server.registerTool(
     'ask_agent',
@@ -46,12 +54,13 @@ if (agents.length) {
         'Agents you can ask:',
         ...agents.map((a) => `- ${a.name} (${a.brain})${a.about ? `: ${a.about}` : ''}`),
       ].join('\n'),
-      inputSchema: { agent: z.enum(agents.map((a) => a.name) as [string, ...string[]]), question: z.string().min(1).max(8000) },
+      // Each name once, as Wren matches them (trimmed, any case): two agents may share one, and asking it
+      // then gets Wren's "rename one" answer.
+      inputSchema: { agent: z.enum(uniqueNames(agents.map((a) => a.name)) as [string, ...string[]]), question: z.string().min(1).max(8000) },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ ask: args }) });
-        const out = (await res.json()) as { text?: string; isError?: boolean; message?: string };
+        const out = (await postToWren(url, token, { ask: args }, { signal: extra.signal, timeoutMs: ASK_HELPER_MS })) as { text?: string; isError?: boolean; message?: string };
         return { content: [{ type: 'text' as const, text: out.text ?? out.message ?? 'No answer.' }], isError: out.text === undefined || !!out.isError };
       } catch (e) {
         return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };

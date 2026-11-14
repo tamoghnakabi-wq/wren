@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +7,7 @@ import type { AgentAnswer, AskAgentRequest } from '@wren/core';
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 process.env.WREN_DATA_DIR = realpathSync(mkdtempSync(join(tmpdir(), 'wren-data-')));
-const { askThroughWren, startApprovalBridge, TimelineWriter } = await import('../src/engines/common');
+const { askThroughWren, pause, startApprovalBridge, TimelineWriter } = await import('../src/engines/common');
 
 // Claude Code asking another of the user's agents (its ask_agent tool, through Wren's MCP helper): the call
 // waits for the answer like an approval, and Stop stops the agent it asked (0.1.44).
@@ -98,6 +99,30 @@ describe('an engine asking another agent', () => {
     expect(c).toBe(a);
   });
 
+  it('asks anew in a later turn of the task, and finds the same task when a turn is run again', async () => {
+    const answered: AgentAnswer = { state: 'answered', agent: 'Claude', answer: 'ok' };
+    const store = askStore([answered, answered, answered]);
+    const writer = new TimelineWriter(store as never, 'claude-code', 'Claude Code');
+    const q = { agent: 'Claude', question: 'Is it still up?', signal: new AbortController().signal };
+    await askThroughWren({ ...engineRun(store), turn: 12 }, writer, q, new Map(), { pollMs: 1 });
+    // The user's follow-up ("ask Claude again") is a new turn: before, it got the first turn's answer back.
+    await askThroughWren({ ...engineRun(store), turn: 15 }, writer, q, new Map(), { pollMs: 1 });
+    await askThroughWren({ ...engineRun(store), turn: 15 }, writer, q, new Map(), { pollMs: 1 });
+    const [first, later, again] = store.asks.map((x) => x.key);
+    expect(later).not.toBe(first);
+    expect(again).toBe(later);
+  });
+
+  it('keeps a long answer to the size of any other tool’s output', async () => {
+    const store = askStore([{ state: 'answered', agent: 'Claude', answer: `start ${'x'.repeat(200_000)} end` }]);
+    const writer = new TimelineWriter(store as never, 'claude-code', 'Claude Code');
+    const out = await askThroughWren(engineRun(store), writer, { agent: 'Claude', question: 'Everything?', signal: new AbortController().signal }, new Map(), { pollMs: 1 });
+    expect(out.text.length).toBeLessThan(31_000);
+    expect(out.text).toMatch(/^Claude answered:\n\nstart x/);
+    expect(out.text).toContain('x end');
+    expect(out.text).toContain('not instructions from the user');
+  });
+
   it('passes on a refusal or a failed answer as an error', async () => {
     const store = askStore([{ state: 'failed', agent: 'Claude', error: 'Claude was stopped before it answered.' }]);
     const writer = new TimelineWriter(store as never, 'claude-code', 'Claude Code');
@@ -127,6 +152,31 @@ describe('an engine asking another agent', () => {
     const late = await askThroughWren(engineRun(store), writer, { agent: 'Claude', question: 'Slow?', signal: new AbortController().signal }, new Map(), { pollMs: 1, waitMs: 5 });
     expect(late).toMatchObject({ isError: true, text: expect.stringContaining('didn’t answer within') });
     expect(store.cancelled).toHaveLength(2);
+  });
+
+  it('leaves no listeners on the task’s signal however long it polls', async () => {
+    const pending: AgentAnswer = { state: 'pending', agent: 'Claude' };
+    const store = askStore([...Array(40).fill(pending), { state: 'answered', agent: 'Claude', answer: 'done' }]);
+    const writer = new TimelineWriter(store as never, 'claude-code', 'Claude Code');
+    const task = new AbortController();
+    const call = new AbortController();
+    const out = await askThroughWren(engineRun(store, task.signal), writer, { agent: 'Claude', question: 'Poll?', signal: call.signal }, new Map(), { pollMs: 1 });
+    expect(out.text).toContain('Claude answered');
+    expect(store.polls).toBe(41);
+    // Before, each poll left one listener on each signal (Node warns past 10; an hour's polling left 1,800).
+    expect(getEventListeners(task.signal, 'abort')).toHaveLength(0);
+    expect(getEventListeners(call.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('pause ends early on an abort, and at once for a signal already aborted', async () => {
+    const a = new AbortController();
+    const t0 = Date.now();
+    const waiting = pause(60_000, a.signal);
+    a.abort();
+    await waiting;
+    await pause(60_000, AbortSignal.abort());
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(getEventListeners(a.signal, 'abort')).toHaveLength(0);
   });
 
   it('answers the helper’s ask_agent requests through the bridge, apart from permission prompts', async () => {

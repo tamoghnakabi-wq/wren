@@ -102,6 +102,7 @@ vi.mock('../src/engines/common', () => {
   return {
     TimelineWriter,
     claudeSupportsRestricted: () => true,
+    cliHelpKnown: () => true,
     effortFlag: () => '--effort',
     decide: async () => ({ allow: true }),
     startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),

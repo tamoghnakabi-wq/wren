@@ -7,7 +7,7 @@ import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
 import { describeCall } from '@wren/core';
-import { appPaths, askThroughWren, claudeSupportsRestricted, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { appPaths, askThroughWren, claudeSupportsRestricted, cliHelpKnown, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 import { engineProgram } from './program';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
@@ -158,7 +158,11 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   if (!found) return { kind: 'failed', error: 'Claude Code isn’t installed on this computer. Install it (code.claude.com), run `claude` once and sign in with your Claude account, then try again.', code: 'engine_missing', steps: 0 };
   if ('untrusted' in found) return { kind: 'failed', error: `Wren won't start Claude Code: ${found.untrusted}. Claude Code runs outside the sandbox, so Wren starts only the program its own installer put in place (code.claude.com), where no agent can change it.`, code: 'engine_untrusted', steps: 0 };
   const cli = found.program; // the file just checked, never the name looked up again
-  if (!claudeSupportsRestricted(cli)) return { kind: 'failed', error: 'This version of Claude Code is too old for Wren. Update it (run `claude update` in Terminal), then try again.', code: 'engine_outdated', steps: 0 };
+  if (!claudeSupportsRestricted(cli)) {
+    // A probe that failed says nothing about the version (a busy moment, a slow first start after an update).
+    if (!cliHelpKnown(cli)) return { kind: 'failed', error: 'Wren couldn’t read which options this Claude Code has (`claude --help` failed or took over 20 seconds). Try again in a minute; if it keeps happening, run `claude --help` in Terminal to see what’s wrong.', code: 'engine_unreadable', steps: 0 };
+    return { kind: 'failed', error: 'This version of Claude Code is too old for Wren. Update it (run `claude update` in Terminal), then try again.', code: 'engine_outdated', steps: 0 };
+  }
 
   const writer = new TimelineWriter(run.store, 'claude-code', run.model === 'default' ? 'Claude Code' : run.model);
   run.store.usageSource = 'claude-code';
