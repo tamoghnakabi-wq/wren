@@ -273,6 +273,11 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
     await writer.endMessage();
     if (run.signal.aborted) return { kind: 'cancelled', steps };
     const msg = (e as Error).message;
+    // The plan's usage limit ("You hit your weekly limit.", "out of credits"): the task waits instead of failing.
+    // Grok Build doesn't say when the limit resets, so the user resumes it.
+    if (/hit your (?:\w+ )*limit|usage limit|out of credits/i.test(msg)) {
+      return { kind: 'paused', steps, limit: { error: `Grok Build: ${msg}`.slice(0, 1500), code: 'grok_usage_limit', midTurn: promptWork > 0 } };
+    }
     const hint = /login|auth|token|401/i.test(msg + stderr) ? ' Open a terminal and run `grok login` with your xAI account.' : '';
     return { kind: 'failed', error: `Grok Build: ${msg}${hint}`.slice(0, 1500), code: 'engine_error', steps };
   } finally {

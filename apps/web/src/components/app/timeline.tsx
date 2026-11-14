@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, Brain, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, ListChecks, Loader2, MessagesSquare, MousePointerClick, Plug, Search, Share2, Terminal, X, Bell, Monitor, Keyboard, ArrowDownUp, Camera, Undo2, Pencil } from 'lucide-react';
+import { AlertTriangle, ArrowDownUp, Bell, Brain, Camera, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, Keyboard, LayoutTemplate, ListChecks, Loader2, MessagesSquare, Monitor, MousePointerClick, Pencil, Plug, Search, Share2, Terminal, Undo2, X } from 'lucide-react';
 import Link from 'next/link';
 import { GithubMark as Github } from '../brand';
 import { createContext, useContext, useEffect, useId, useMemo, useState } from 'react';
@@ -9,6 +9,7 @@ import { AgentAvatar } from '../agent-avatar';
 import { Markdown } from '../markdown';
 import { cx, formatBytes } from '../ui';
 import { ApprovalCard } from './approval-card';
+import { PageCard } from './page-frame';
 import { CodeText } from '@/components/app/code-text';
 
 const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -35,6 +36,7 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   'task.update_plan': ListChecks,
   'task.ask_user': CircleHelp,
   'task.ask_agent': MessagesSquare,
+  'task.show_page': LayoutTemplate,
   'task.notify': Bell,
   'screen.capture': Camera,
 };
@@ -46,7 +48,7 @@ interface ToolData {
   args: Record<string, unknown>;
   risk: string;
   approvalId?: string;
-  result?: { output: string; isError?: boolean; images?: { artifactId?: string; mime: string }[]; artifacts?: { id: string; name: string }[] };
+  result?: { output: string; isError?: boolean; images?: { artifactId?: string; mime: string }[]; artifacts?: { id: string; name: string }[]; meta?: { page?: unknown } };
   startedAt?: number;
   endedAt?: number;
   turnId?: string;
@@ -222,7 +224,7 @@ function UserBubble({ ev }: { ev: EventRow }) {
   const atts = (ev.data.attachments as { artifactId: string; name: string; mime: string; size: number }[] | undefined) ?? [];
   const answered = !!ev.data.answersCallId;
   return (
-    <div className="flex justify-end">
+    <div className="flex scroll-mt-24 justify-end" data-seq={ev.seq}>
       <div className="max-w-[85%] sm:max-w-[75%]">
         {answered && <p className="mb-1 text-right text-[11.5px] text-faint">Your answer</p>}
         <div className="rounded-[20px] rounded-br-md bg-primary px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap text-primary-fg">{text}</div>
@@ -252,10 +254,16 @@ function AssistantTurn({ ev, tools, agent, approvals, thinkingEv }: { ev: EventR
   const failed = ev.status === 'failed';
   const src = thinkingEv?.status === 'streaming' ? thinkingEv : ev;
   const thinking = typeof src.data.thinking === 'string' ? (src.data.thinking as string) : '';
-  const visible = tools.filter((t) => (t.data as unknown as ToolData).name !== 'task.update_plan');
-  if (!text && !visible.length && !streaming && !failed && !thinking) return null;
+  // A page the agent showed (task.show_page) is a card of its own, after the steps, instead of a step.
+  const pages = tools.flatMap((t) => {
+    const d = t.data as unknown as ToolData;
+    const page = d.name === 'task.show_page' && t.status === 'done' ? d.result?.meta?.page : undefined;
+    return typeof page === 'string' ? [{ ev: t, id: page, title: String(d.args.title ?? '') || 'Page' }] : [];
+  });
+  const visible = tools.filter((t) => (t.data as unknown as ToolData).name !== 'task.update_plan' && !pages.some((p) => p.ev.id === t.id));
+  if (!text && !visible.length && !pages.length && !streaming && !failed && !thinking) return null;
   return (
-    <div className="flex gap-3">
+    <div className="flex scroll-mt-24 gap-3" data-seq={ev.seq}>
       <div className="w-8 shrink-0 pt-0.5">{agent && <AgentAvatar icon={agent.icon} color={agent.color} size={32} mood={streaming ? 'thinking' : 'idle'} still={!streaming} seed={agent.name} />}</div>
       <div className="min-w-0 flex-1 space-y-2.5">
         {(streaming || thinkingEv?.status === 'streaming') && thinking && <p className="line-clamp-2 text-[13px] text-faint italic">{thinking.slice(-220)}</p>}
@@ -267,6 +275,9 @@ function AssistantTurn({ ev, tools, agent, approvals, thinkingEv }: { ev: EventR
         )}
         {failed && !text && <p className="text-sm text-faint">The model call failed.</p>}
         {visible.length > 0 && <Steps tools={visible} approvals={approvals} />}
+        {pages.map((p) => (
+          <PageCard key={p.ev.id} id={p.id} title={p.title} />
+        ))}
       </div>
     </div>
   );
@@ -412,15 +423,29 @@ function StepStatus({ status }: { status: string }) {
   return <span className="flex">{sr('Failed')}<X className="h-3.5 w-3.5 text-danger" aria-hidden /></span>;
 }
 
+/** "at 3:40 pm" today, "tomorrow at 9:00 am", else "on Tue 18 Nov at 9:00 am", in this browser's time zone. */
+export function whenLabel(ms: number, now = Date.now()): string {
+  const day = (t: number) => new Date(t).toDateString();
+  const time = new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  if (day(ms) === day(now)) return `at ${time}`;
+  if (day(ms) === day(now + 86_400_000)) return `tomorrow at ${time}`;
+  return `on ${new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} at ${time}`;
+}
+
 function StatusLine({ ev }: { ev: EventRow }) {
   const level = String(ev.data.level ?? 'info');
   const Icon = level === 'error' ? AlertTriangle : level === 'warn' ? AlertTriangle : Info;
+  const code = String(ev.data.code ?? '');
+  // A usage limit's line says when the limit resets; what the task does then is on the banner above the composer.
+  const resetAt = code === 'usage_limit' ? Number(ev.data.resetAt) || 0 : 0;
+  const chatgpt = /^subscription_sharing_|^usage_limit_reached$/.test(code === 'usage_limit' ? String(ev.data.cause ?? '') : code);
   return (
     <div className={cx('mx-auto flex max-w-xl items-start justify-center gap-2 rounded-xl px-3 py-2 text-center text-[13px]', level === 'error' ? 'bg-danger-soft text-danger' : level === 'warn' ? 'bg-warning-soft text-warning' : 'text-muted')}>
       <Icon className="mt-0.5 h-4 w-4 shrink-0" />
       <span>
         {String(ev.data.text ?? '')}
-        {/^subscription_sharing_/.test(String(ev.data.code ?? '')) && (
+        {resetAt > 0 && `${/[.!?)]$/.test(String(ev.data.text ?? '').trim()) ? '' : '.'} It resets ${whenLabel(resetAt)}.`}
+        {chatgpt && (
           <>
             {' '}
             <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer" className="font-medium underline">

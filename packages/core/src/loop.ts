@@ -17,7 +17,10 @@ import type {
   ToolCallData,
   ToolResult,
   ToolSpec,
+  UsageLimit,
 } from './types';
+import { isPlanLimit } from './types';
+import { checkPage, utf8Bytes } from './pages';
 
 // The agent loop. It is written as a resumable state machine over the session's
 // event log so it can run in short "ticks" (Vercel Functions) or continuously
@@ -69,6 +72,8 @@ export interface RunStore {
   askAgent?(req: AskAgentRequest): Promise<AskAgentStart>;
   /** Whether that agent has answered yet. */
   agentAnswer?(key: string): Promise<AgentAnswer>;
+  /** Save a page the agent made (task.show_page), checked for size already, as one of the task's files. */
+  savePage?(page: { title: string; html: string }): Promise<{ id: string; name: string }>;
   memory: {
     add(fact: string): Promise<string>;
     remove(id: string): Promise<boolean>;
@@ -133,7 +138,8 @@ export type LoopOutcome =
   /** `retries`: set when yielding to retry a failing model provider (the new consecutive count). */
   | { kind: 'yield'; steps: number; wakeInMs?: number; retries?: number }
   | { kind: 'cancelled'; steps: number }
-  | { kind: 'paused'; steps: number }
+  /** `limit`: paused by a plan's usage limit rather than by the user (Wren may resume it at the reset). */
+  | { kind: 'paused'; steps: number; limit?: UsageLimit }
   | { kind: 'failed'; error: string; code?: string; steps: number };
 
 const OPEN_STATUSES = new Set(['pending', 'awaiting_approval', 'awaiting_input', 'awaiting_agent', 'running']);
@@ -292,6 +298,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
         await o.store.append<StatusData>('status', { text: `The model provider had a problem (${turn.error.slice(0, 200)}). Trying again in ${Math.round(wakeInMs / 60_000)} min.`, level: 'warn', code: 'model_retry' }, 'done');
         return { kind: 'yield', steps, wakeInMs, retries };
       }
+      if (isPlanLimit(turn.code)) return { kind: 'paused', steps, limit: { error: turn.error, code: turn.code, ...(turn.resetAt ? { resetAt: turn.resetAt } : {}), midTurn: steps > o.step } };
       return { kind: 'failed', error: turn.error, code: turn.code, steps };
     }
     steps++;
@@ -435,6 +442,22 @@ async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (
         await finish(o, ev, d, { output: 'Notification sent.' });
         return 'done';
       }
+      case 'task.show_page': {
+        const page = checkPage(d.args);
+        if ('error' in page) {
+          await finish(o, ev, d, { output: page.error, isError: true });
+          return 'done';
+        }
+        if (!o.store.savePage) {
+          await finish(o, ev, d, { output: 'Pages can’t be shown here. Describe the result in your reply instead.', isError: true });
+          return 'done';
+        }
+        const a = await o.store.savePage(page);
+        // The page is kept as a file: the step keeps only its size, not the whole document again.
+        const kept = { ...d, args: { title: page.title, html: `[${Math.ceil(utf8Bytes(page.html) / 1024)} KB of HTML, shown as page ${a.id}]` } };
+        await finish(o, ev, kept, { output: `Shown to the user as the page "${page.title}".`, artifacts: [{ id: a.id, name: a.name }], meta: { page: a.id } });
+        return 'done';
+      }
       case 'memory.remember': {
         const fact = String(d.args.fact ?? '').trim().slice(0, 600);
         if (!fact) {
@@ -486,7 +509,7 @@ async function modelTurn(
   events: SessionEvent[],
   sleep: (ms: number) => Promise<void>,
   log: (m: string, e?: unknown) => void,
-): Promise<TurnSummary | { error: string; code?: string; retryLater?: number }> {
+): Promise<TurnSummary | { error: string; code?: string; retryLater?: number; resetAt?: number }> {
   const msg = await o.store.append<MessageData>('message', { role: 'assistant', text: '', model: o.modelName, source: o.source }, 'streaming');
   let text = '';
   let lastFlush = 0;
@@ -551,14 +574,14 @@ async function modelTurn(
       if (flushing) await flushing;
       await o.store.update(msg.id, { status: 'failed', data: { role: 'assistant', text, model: o.modelName, source: o.source } });
       if (err.retryable) return { error: err.message, code: err.code, retryLater: 60_000 };
-      return { error: friendlyModelError(err), code: err.code };
+      return { error: friendlyModelError(err), code: err.code, ...(err.resetAt ? { resetAt: err.resetAt } : {}) };
     }
   }
 }
 
 export function friendlyModelError(err: { message: string; status?: number; code?: string }): string {
   const c = err.code ?? '';
-  if (c === 'subscription_sharing_usage_limit_exceeded') return 'Your ChatGPT plan usage limit for this app was reached. Review it in ChatGPT Settings → Usage, then resume.';
+  if (c === 'subscription_sharing_usage_limit_exceeded' || c === 'usage_limit_reached') return 'Your ChatGPT plan’s usage limit for this app was reached.';
   if (c === 'subscription_sharing_user_not_eligible') return 'ChatGPT plan usage is not available for this account or workspace.';
   if (c === 'insufficient_quota') return 'The API key has run out of credits or quota.';
   if (err.status === 401 || c === 'authentication_error' || c === 'invalid_api_key') return 'The model provider rejected the credentials. Reconnect the account in Connections.';

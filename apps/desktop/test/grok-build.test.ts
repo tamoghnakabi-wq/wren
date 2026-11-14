@@ -32,6 +32,11 @@ rl.on('line', (line) => {
   if (m.method === 'session/prompt') {
     const s = m.params.sessionId;
     if (m.params.prompt[0].text.includes('hang')) return; // never answers, ignores session/cancel too
+    if (m.params.prompt[0].text.startsWith('limit')) {
+      // The plan's limit, as Grok reports it (no reset time), after some work or before any.
+      if (m.params.prompt[0].text.startsWith('limit-mid')) update(s, { sessionUpdate: 'tool_call', toolCallId: 'lim-1', title: 'Read notes', kind: 'read', status: 'completed', rawInput: { path: 'notes.md' }, content: [{ type: 'content', content: { type: 'text', text: 'notes' } }] });
+      return out({ jsonrpc: '2.0', id: m.id, error: { code: -32603, message: 'You hit your weekly limit. Upgrade or wait for it to reset.' } });
+    }
     const parts = m.params.prompt.map((b) => (b.type === 'text' ? b.text : b.type + ':' + b.mimeType + ':' + b.data));
     if (parts.length > 1 || m.params.prompt[0].text.includes('[The user attached')) {
       if (m.params.prompt[0].text.includes('picky') && parts.length > 1) return out({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid params: image content is not supported' } });
@@ -176,6 +181,14 @@ describe('Grok Build follow-ups', () => {
     const outcome = await runGrokBuild(r, () => true, '/dev/null');
     expect(outcome).toMatchObject({ kind: 'completed' });
     expect((outcome as { result: string }).result).toMatch(/^picky: what is this\?\n\n\[The user attached an image, but this version of Grok Build couldn’t receive it\.\]$/);
+  });
+
+  it('pauses at the plan’s usage limit instead of failing, and says whether the turn was cut short', async () => {
+    const before = await runGrokBuild(run(undefined, 'limit now').run, () => true, '/dev/null');
+    expect(before).toEqual({ kind: 'paused', steps: 0, limit: { error: 'Grok Build: You hit your weekly limit. Upgrade or wait for it to reset.', code: 'grok_usage_limit', midTurn: false } });
+    const mid = await runGrokBuild(run(undefined, 'limit-mid please').run, () => true, '/dev/null');
+    expect(mid).toMatchObject({ kind: 'paused', limit: { code: 'grok_usage_limit', midTurn: true } });
+    expect((mid as { limit: { resetAt?: number } }).limit.resetAt).toBeUndefined(); // Grok doesn't say when
   });
 
   it('does not ask again once the prompt has done something (W-123)', async () => {

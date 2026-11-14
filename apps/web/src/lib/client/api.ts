@@ -23,12 +23,13 @@ export function outsideError(status: number): string {
   return `Request failed (${status})`;
 }
 
-export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown; form?: FormData } = {}, retried = false): Promise<T> {
+export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown; form?: FormData; signal?: AbortSignal } = {}, retried = false): Promise<T> {
   const res = await fetch(path, {
     method: opts.method ?? (opts.body || opts.form ? 'POST' : 'GET'),
     headers: opts.form ? undefined : { 'content-type': 'application/json' },
     body: opts.form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
     credentials: 'same-origin',
+    signal: opts.signal,
   });
   const text = await res.text();
   let data: unknown = null;

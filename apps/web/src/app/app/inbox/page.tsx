@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { AlertTriangle, Bell, CheckCircle2, CircleHelp, Hand } from 'lucide-react';
+import { AlertTriangle, Bell, CheckCircle2, CircleHelp, Clock, Hand } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { AgentCharacter } from '@/components/agent-character';
 import { ApprovalCard } from '@/components/app/approval-card';
@@ -30,7 +30,7 @@ function byDay(list: Notification[]): { label: string; items: Notification[] }[]
   return groups;
 }
 
-const ICON: Record<string, typeof Bell> = { run_completed: CheckCircle2, run_failed: AlertTriangle, approval: Hand, question: CircleHelp };
+const ICON: Record<string, typeof Bell> = { run_completed: CheckCircle2, run_failed: AlertTriangle, run_limited: Clock, approval: Hand, question: CircleHelp };
 
 export default function InboxPage() {
   const { approvals, notifications, unread } = useApp();

@@ -19,6 +19,7 @@ export default function SettingsPage() {
       <div className="space-y-8">
         <Profile />
         <ModelAccess />
+        <UsageLimits />
         <Notifications />
         {d && <ThisComputer d={d} />}
         <Appearance />
@@ -201,6 +202,29 @@ function ModelAccess() {
             Manage usage <ExternalLink className="h-3.5 w-3.5" />
           </Button>
         </a>
+      </Row>
+    </Section>
+  );
+}
+
+function UsageLimits() {
+  const { profile } = useApp();
+  const toast = useToast();
+  const on = profile?.settings?.resumeAfterLimits !== false;
+  return (
+    <Section title="Usage limits" subtitle="When a task stops because your ChatGPT, Claude or Grok plan reached its usage limit.">
+      <Row title="Carry on when the limit resets" body="The task waits, then carries on by itself a minute after the reset. Limits that reset more than a day later, like weekly ones, wait for you to resume.">
+        <Switch
+          label="Carry on when the limit resets"
+          checked={on}
+          onChange={async (v) => {
+            try {
+              await api('/api/account/settings', { body: { settings: { resumeAfterLimits: v } } });
+            } catch (e) {
+              toast((e as Error).message, 'error');
+            }
+          }}
+        />
       </Row>
     </Section>
   );

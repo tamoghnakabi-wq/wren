@@ -6,11 +6,12 @@ import { json, route } from '@/lib/http';
 import { notifyUser } from '@/lib/notify';
 import { runCleanups } from '@/lib/cleanup';
 import { endOrphanedRuns, revokeUnclaimedDevices } from '@/lib/devices';
-import { cleanUpCloudRun, endRemovedAgentRuns, kickRun, kickTick, startTask, tidyAsks } from '@/lib/runs';
+import { cleanUpCloudRun, endRemovedAgentRuns, kickRun, kickTick, resumeLimitedRuns, startTask, tidyAsks } from '@/lib/runs';
 import { nextRunAfter } from '@/lib/schedules';
 
 // Called every minute by pg_cron (Supabase) with the cron secret:
-//  1. re-kick cloud runs whose tick died (lease expired) or whose retry is due
+//  1. re-kick cloud runs whose tick died (lease expired) or whose retry is due, and carry on tasks that
+//     were paused by a usage limit once it has reset
 //  2. start due scheduled tasks
 //  3. expire stale approvals and tell the user
 //  4. unlink computers that never checked in with the sign-in they were handed (W-151), end the tasks
@@ -36,7 +37,7 @@ export const POST = route(async (req) => {
   const until = Date.now() + DEADLINE_MS;
   const left = () => until - Date.now();
   const sql = db();
-  const report = { kicked: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, asks: { woken: 0, stopped: 0 }, errors: [] as string[], skipped: [] as string[], late: [] as string[] };
+  const report = { kicked: 0, limits: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, asks: { woken: 0, stopped: 0 }, errors: [] as string[], skipped: [] as string[], late: [] as string[] };
   /** Wait for `work` at most `ms`, and never past the deadline: false if it was still going. */
   const inTime = async (work: Promise<unknown>, ms = Infinity): Promise<boolean> => {
     let timer: NodeJS.Timeout | undefined;
@@ -68,6 +69,10 @@ export const POST = route(async (req) => {
     // A run that was just created is kicked by the API; only old ones need help. (Each kick gives up after 15 s.)
     report.kicked = stale.length;
     await Promise.allSettled(stale.map((r) => kickTick(r.id)));
+  });
+
+  await stage('limits', async () => {
+    report.limits = await resumeLimitedRuns(until);
   });
 
   await stage('schedules', async () => {

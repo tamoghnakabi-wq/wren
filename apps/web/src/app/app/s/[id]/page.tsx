@@ -2,8 +2,8 @@
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Archive, Cloud, Download, FileText, Laptop, MoreHorizontal, PanelRightClose, PanelRightOpen, Pause, Play, Square, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, Archive, Clock, Cloud, Download, FileText, Laptop, LayoutTemplate, Maximize2, MoreHorizontal, PanelRightClose, PanelRightOpen, Pause, Play, Square, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { flushSync } from 'react-dom';
 import { AgentAvatar } from '@/components/agent-avatar';
 import type { Mood } from '@/lib/characters';
@@ -12,7 +12,7 @@ import { useApp } from '@/components/app/provider';
 import { StatusPill } from '@/components/app/status';
 import { useIsMac } from '@/components/app/shell';
 import { togglePane, usePaneCollapsed } from '@/lib/client/layout';
-import { PlanCard, Timeline } from '@/components/app/timeline';
+import { PlanCard, Timeline, whenLabel } from '@/components/app/timeline';
 import { AgentCharacter } from '@/components/agent-character';
 import { Button, ButtonLink, cx, EmptyState, formatBytes, formatTokens, Menu, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
@@ -24,6 +24,23 @@ import { isLiveDevice, type Artifact, type EventRow, type PlanItem, type Run, ty
 /** Events per page of task history. */
 const PAGE = 500;
 
+// The address's query, read as an outside store (search opens a task at one message with `?at=<seq>`).
+const subscribeUrl = (cb: () => void) => {
+  window.addEventListener('popstate', cb);
+  return () => window.removeEventListener('popstate', cb);
+};
+const urlSearch = () => window.location.search;
+
+/** Scrolls an event of the task into view and marks it for a moment; false when it isn't shown. */
+function revealEvent(container: HTMLElement | null, seq: number): boolean {
+  const el = container?.querySelector<HTMLElement>(`[data-seq="${seq}"]`);
+  if (!el) return false;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('search-hit');
+  setTimeout(() => el.classList.remove('search-hit'), 2400);
+  return true;
+}
+
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -33,6 +50,8 @@ export default function SessionPage() {
   // The newest events stay live; older history loads a page at a time on request (by seq).
   // keepAll: rows that scroll out of the newest page stay, so the timeline has no holes between
   // the live part and the older pages loaded below.
+  const scroller = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
   const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: PAGE, keepAll: true, realtimeFilter: { column: 'session_id', value: id } });
   const [older, setOlder] = useState<{ session: string; rows: EventRow[]; more: boolean }>({ session: id, rows: [], more: true });
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -60,13 +79,50 @@ export default function SessionPage() {
     flushSync(() => setOlder((o) => ({ session: id, rows: [...rows, ...(o.session === id ? o.rows : [])], more: rows.length === PAGE })));
     if (el) el.scrollTop = el.scrollHeight - fromBottom;
   };
+  // Opened from search at one message (`?at=<seq>`): history back to it is loaded, then it's scrolled to.
+  const search = useSyncExternalStore(subscribeUrl, urlSearch, () => '');
+  const atParam = Number(new URLSearchParams(search).get('at'));
+  const jumpTo = Number.isSafeInteger(atParam) && atParam > 0 ? atParam : null;
+  const jumpKey = jumpTo ? `${id}:${jumpTo}` : '';
+  const [jumpLoad, setJumpLoad] = useState<{ key: string; stage: 'loading' | 'loaded' | 'done' } | null>(null);
+  const jumpStage = jumpLoad?.key === jumpKey ? jumpLoad.stage : 'look';
+  useEffect(() => {
+    if (!jumpTo || jumpStage === 'loading' || jumpStage === 'done' || eventsLive.loading) return;
+    const first = events.rows[0];
+    const shown = revealEvent(scroller.current, jumpTo);
+    if (shown || jumpStage === 'loaded' || !first || first.seq <= jumpTo) {
+      // Found, or not in this task's history (deleted, or not a message shown): the task as it is.
+      if (shown) stick.current = false;
+      window.history.replaceState(window.history.state, '', window.location.pathname);
+      setJumpLoad({ key: jumpKey, stage: 'done' });
+      return;
+    }
+    setJumpLoad({ key: jumpKey, stage: 'loading' });
+    // Everything from just before that message up to the history already shown, a page at a time (the
+    // database answers at most 1000 rows per request), so the timeline has no hole in between.
+    void (async () => {
+      const rows: EventRow[] = [];
+      let below = first.seq;
+      for (let page = 0; page < 6; page++) {
+        const { data, error } = await supabase().from('events').select('*').eq('session_id', id).gte('seq', jumpTo - 20).lt('seq', below).order('seq', { ascending: false }).limit(1000);
+        if (error) {
+          toast(error.message, 'error');
+          break;
+        }
+        rows.push(...((data ?? []) as EventRow[]));
+        if (!data || data.length < 1000) break;
+        below = (data[data.length - 1] as EventRow).seq;
+      }
+      rows.reverse();
+      setOlder((o) => ({ session: id, rows: [...rows, ...(o.session === id ? o.rows : [])], more: true }));
+      setJumpLoad((j) => (j?.key === jumpKey ? { key: jumpKey, stage: 'loaded' } : j));
+    })();
+  }, [jumpTo, jumpKey, jumpStage, id, eventsLive.loading, events.rows, toast]);
   const runs = useLive<Run>({ table: 'runs', eq: { session_id: id }, order: { column: 'created_at' }, limit: 20, realtimeFilter: { column: 'session_id', value: id } });
   const live = useLive<RunLive>({ table: 'run_live', eq: { session_id: id }, pk: 'run_id', realtimeFilter: { column: 'session_id', value: id } });
   const files = useLive<Artifact>({ table: 'artifacts', eq: { session_id: id }, order: { column: 'created_at' }, realtimeFilter: { column: 'session_id', value: id } });
   const [panel, setPanel] = useState<'activity' | 'screen' | 'files'>('activity');
   const confirm = useConfirm();
-  const scroller = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
 
   const s = session.rows[0];
   const agent = agentById(s?.agent_id);
@@ -90,6 +146,11 @@ export default function SessionPage() {
   const shareable = files.rows.filter((f) => f.kind !== 'screenshot');
   const usage = runs.rows.reduce((n, r) => n + (r.usage?.input_tokens ?? 0) + (r.usage?.output_tokens ?? 0), 0);
   const askingQuestion = events.rows.some((e) => e.type === 'tool' && e.status === 'awaiting_input');
+  // Paused by a plan's usage limit (not by the user): the newest limit line of the run says so, and the run
+  // says whether it carries on by itself (wake_at) or waits for the user.
+  const limitLine = run?.status === 'paused' && !run.pause_requested ? events.rows.findLast((e) => e.run_id === run.id && e.type === 'status' && e.data.code === 'usage_limit') : undefined;
+  const limitWake = limitLine && run?.wake_at ? Date.parse(run.wake_at) : 0;
+  const limitReset = Number(limitLine?.data.resetAt) || 0;
   const device = devices.find((d) => d.id === s?.device_id);
   // A desktop task whose computer is offline hasn't started: say so, rather than "Thinking…".
   const waitingForComputer = !!run && run.status === 'queued' && s?.runtime === 'desktop' && !(device && isLiveDevice(device));
@@ -150,12 +211,13 @@ export default function SessionPage() {
       </div>
     );
 
-  const act = async (action: 'pause' | 'resume' | 'cancel') => {
+  const act = async (action: 'pause' | 'resume' | 'cancel' | 'hold') => {
     if (!run) return;
     try {
       const { done } = await api<{ done?: boolean }>(`/api/runs/${run.id}/${action}`, { body: {} });
       if (action === 'cancel') toast(done ? 'Stopped.' : 'Stopping…', done ? 'success' : undefined);
       else if (action === 'pause') toast(done ? 'Paused.' : 'Pausing after the current step…', done ? 'success' : undefined);
+      else if (action === 'hold') toast('It stays paused until you resume it.');
       else toast('Resuming…');
     } catch (e) {
       toast((e as Error).message, 'error');
@@ -186,12 +248,21 @@ export default function SessionPage() {
           <ul className="space-y-1">
             {shareable.map((f) => (
               <li key={f.id}>
-                <a href={`/api/files/${f.id}?download`} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13.5px] hover:bg-bg-subtle">
-                  <FileText className="h-4 w-4 shrink-0 text-faint" />
-                  <span className="min-w-0 flex-1 truncate">{f.name}</span>
-                  <span className="text-[11.5px] text-faint">{formatBytes(f.size)}</span>
-                  <Download className="h-3.5 w-3.5 text-faint" />
-                </a>
+                {f.kind === 'page' ? (
+                  <Link href={`/app/page/${f.id}`} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13.5px] hover:bg-bg-subtle">
+                    <LayoutTemplate className="h-4 w-4 shrink-0 text-faint" />
+                    <span className="min-w-0 flex-1 truncate">{f.name.replace(/\.html$/, '')}</span>
+                    <span className="text-[11.5px] text-faint">Page</span>
+                    <Maximize2 className="h-3.5 w-3.5 text-faint" />
+                  </Link>
+                ) : (
+                  <a href={`/api/files/${f.id}?download`} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13.5px] hover:bg-bg-subtle">
+                    <FileText className="h-4 w-4 shrink-0 text-faint" />
+                    <span className="min-w-0 flex-1 truncate">{f.name}</span>
+                    <span className="text-[11.5px] text-faint">{formatBytes(f.size)}</span>
+                    <Download className="h-3.5 w-3.5 text-faint" />
+                  </a>
+                )}
               </li>
             ))}
           </ul>
@@ -360,6 +431,24 @@ export default function SessionPage() {
           </div>
           <div className="border-t border-border bg-bg px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] kb-open:pb-3 sm:px-6">
             <div className="mx-auto max-w-3xl lg:details-off:max-w-4xl">
+              {limitLine && (
+                <div role="status" className={cx('mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-3.5 py-2.5 text-[13px]', limitWake ? 'bg-bg-subtle text-muted' : 'bg-warning-soft text-warning')}>
+                  <Clock className="h-4 w-4 shrink-0" aria-hidden />
+                  <span className="min-w-0 flex-1">
+                    {limitWake ? `Paused at a usage limit. It carries on ${whenLabel(limitWake)}.` : `Paused at a usage limit${limitReset ? `, which resets ${whenLabel(limitReset)}` : ''}. Resume it when you’re ready.`}
+                  </span>
+                  {limitWake ? (
+                    <span className="flex gap-2">
+                      <Button size="sm" variant="secondary" onClick={() => act('resume')}>
+                        Resume now
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => act('hold')}>
+                        Don’t resume
+                      </Button>
+                    </span>
+                  ) : null}
+                </div>
+              )}
               {agent ? (
                 <Composer
                   agent={agent}

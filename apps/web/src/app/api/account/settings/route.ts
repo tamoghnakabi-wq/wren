@@ -17,6 +17,7 @@ const Schema = z.object({
       tzChecked: z.boolean(),
       notifyOnComplete: z.boolean(),
       notifyOnApproval: z.boolean(),
+      resumeAfterLimits: z.boolean(),
     })
     .partial()
     .optional(),

@@ -859,6 +859,7 @@ export function assessCall(
     case 'task.ask_user':
     case 'task.ask_agent':
     case 'task.notify':
+    case 'task.show_page':
     case 'browser.snapshot':
     case 'browser.screenshot':
     case 'browser.scroll':

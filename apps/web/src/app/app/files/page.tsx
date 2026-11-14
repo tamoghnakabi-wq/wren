@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Download, FileText, FolderOpen, Image as ImageIcon, Trash2 } from 'lucide-react';
+import { Download, FileText, FolderOpen, Image as ImageIcon, LayoutTemplate, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
 import { useApp } from '@/components/app/provider';
@@ -11,13 +11,13 @@ import { useLive } from '@/lib/client/live';
 import type { Artifact } from '@/lib/client/types';
 
 const PAGE = 100;
-const KIND = { files: 'file', screenshots: 'screenshot', uploads: 'upload' } as const;
+const KIND = { files: 'file', pages: 'page', screenshots: 'screenshot', uploads: 'upload' } as const;
 
 export default function FilesPage() {
   const { userId, agentById } = useApp();
   const toast = useToast();
   const confirm = useConfirm();
-  const [filter, setFilter] = useState<'all' | 'files' | 'screenshots' | 'uploads'>('files');
+  const [filter, setFilter] = useState<'all' | keyof typeof KIND>('files');
   const [shown, setShown] = useState(PAGE);
   // Each view asks for its own kind. The newest 300 of every kind were loaded and filtered here before,
   // so once an agent had taken 300 screenshots (one per browser step), "From agents" came up empty.
@@ -29,9 +29,9 @@ export default function FilesPage() {
 
   return (
     <div>
-      <PageHeader title="Files" subtitle="Reports, exports and screenshots your agents produced, and files you uploaded." />
+      <PageHeader title="Files" subtitle="Reports, exports, pages and screenshots your agents produced, and files you uploaded." />
       <div className="mb-4 flex flex-wrap gap-1.5" role="group" aria-label="Show">
-        {(['files', 'screenshots', 'uploads', 'all'] as const).map((f) => (
+        {(['files', 'pages', 'screenshots', 'uploads', 'all'] as const).map((f) => (
           <button
             key={f}
             type="button"
@@ -61,10 +61,16 @@ export default function FilesPage() {
                     <img src={`/api/files/${f.id}`} alt="" loading="lazy" className="h-11 w-11 rounded-lg border border-border object-cover" />
                   </a>
                 ) : (
-                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-bg-subtle text-muted">{f.kind === 'screenshot' ? <ImageIcon className="h-5 w-5" /> : <FileText className="h-5 w-5" />}</span>
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-bg-subtle text-muted">{f.kind === 'screenshot' ? <ImageIcon className="h-5 w-5" /> : f.kind === 'page' ? <LayoutTemplate className="h-5 w-5" /> : <FileText className="h-5 w-5" />}</span>
                 )}
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{f.name}</p>
+                  {f.kind === 'page' ? (
+                    <Link href={`/app/page/${f.id}`} className="block truncate text-sm font-medium hover:underline hover:underline-offset-2">
+                      {f.name.replace(/\.html$/, '')}
+                    </Link>
+                  ) : (
+                    <p className="truncate text-sm font-medium">{f.name}</p>
+                  )}
                   <p className="flex min-w-0 items-center gap-1.5 text-[12.5px] whitespace-nowrap text-faint">
                     {a && <AgentAvatar icon={a.icon} color={a.color} size={16} still />}
                     <span className="min-w-0 truncate">{a?.name ?? (f.source === 'user' ? 'You' : 'Agent')}</span>

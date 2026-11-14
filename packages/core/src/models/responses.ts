@@ -1,6 +1,6 @@
 import { buildTurns, clipMiddle, flatName, limitImages, parseArgs, trimOutputs, unflatName, type NeutralTurn } from '../transcript';
 import type { ImageRef, ModelClient, ModelRequest, ModelStreamEvent, ModelToolCall, ModelTurn, ToolSpec } from '../types';
-import { ModelError } from '../types';
+import { isPlanLimit, ModelError } from '../types';
 import { readSse } from './sse';
 
 // OpenAI Responses API adapter. Used for:
@@ -293,10 +293,12 @@ const NAMESPACE_HINTS: Record<string, string> = {
 async function httpError(res: Response, requestId?: string): Promise<ModelError> {
   let message = `HTTP ${res.status}`;
   let code: string | undefined;
+  let body: Json | undefined;
   try {
     const raw = await res.text();
     try {
       const j = JSON.parse(raw) as Json;
+      body = j;
       const err = (j.error ?? j) as Json;
       message = String(err.message ?? j.detail ?? raw).slice(0, 600);
       code = (err.code ?? err.type) as string | undefined;
@@ -306,12 +308,35 @@ async function httpError(res: Response, requestId?: string): Promise<ModelError>
   } catch {
     /* ignore */
   }
-  return classify(message, res.status, code, requestId);
+  const e = classify(message, res.status, code, requestId);
+  if (isPlanLimit(e.code)) e.resetAt = limitReset(body, res.headers.get('retry-after'));
+  return e;
+}
+
+/**
+ * When a plan's usage limit resets, from what the provider sent: a time (`resets_at`, seconds since the
+ * epoch) or a wait (`resets_in_seconds`, or the Retry-After header in seconds or as a date). Undefined when
+ * it said nothing usable.
+ */
+export function limitReset(body: Json | undefined, retryAfter: string | null, now = Date.now()): number | undefined {
+  const err = (body?.error && typeof body.error === 'object' ? body.error : body ?? {}) as Json;
+  const num = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
+  const at = num(err.resets_at ?? body?.resets_at);
+  if (Number.isFinite(at) && at > 0) return at < 1e12 ? at * 1000 : at;
+  const wait = num(err.resets_in_seconds ?? body?.resets_in_seconds);
+  if (Number.isFinite(wait) && wait >= 0) return now + wait * 1000;
+  if (retryAfter) {
+    const s = Number(retryAfter);
+    if (Number.isFinite(s) && s >= 0) return now + s * 1000;
+    const d = Date.parse(retryAfter);
+    if (Number.isFinite(d)) return d;
+  }
+  return undefined;
 }
 
 function classify(message: string, status: number | undefined, code: string | undefined, requestId?: string): ModelError {
   const retryable =
     status === 429 || (status !== undefined && status >= 500) || code === 'subscription_sharing_usage_unavailable' || code === 'subscription_sharing_user_unavailable' || code === 'server_error' || code === 'rate_limit_exceeded';
-  const limit = code === 'subscription_sharing_usage_limit_exceeded' || code === 'insufficient_quota';
+  const limit = isPlanLimit(code) || code === 'insufficient_quota';
   return new ModelError(clipMiddle(message, 800), status, code, retryable && !limit, requestId);
 }

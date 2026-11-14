@@ -191,6 +191,7 @@ describe('the approval bridge (W-129)', () => {
     });
     const big = await ask(b, { tool_name: 'Bash', input: { command: 'x'.repeat(600 * 1024) } }).catch(() => null);
     expect(big === null || big.status === 413).toBe(true);
+    expect((await ask(b, { page: { title: 'Huge', html: 'x'.repeat(1600 * 1024) } }).catch(() => null))?.status ?? 413).toBe(413);
     expect((await fetch(b.url, { method: 'POST', headers: { authorization: 'Bearer nope' }, body: '{}' })).status).toBe(403);
     const waiting = ask(b, { tool_name: 'Bash', input: {} }).catch(() => null);
     while (!signal) await new Promise((r) => setTimeout(r, 10));
@@ -316,5 +317,33 @@ describe('engine approvals on the timeline', () => {
     const step = [...store.rows.values()].find((r) => r.data?.name === 'computer.write_file')!;
     expect(step.status).toBe('done');
     expect(step.data).toMatchObject({ risk: 'medium', approvalId: 'ap1', result: { output: 'File created', isError: false } });
+  });
+});
+
+describe('a page through the bridge (show_page)', () => {
+  const ask = (b: { url: string; token: string }, body: unknown) =>
+    fetch(b.url, { method: 'POST', headers: { authorization: `Bearer ${b.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('takes a page of up to 512 KB of HTML, and Claude Code’s permission prompt for it', async () => {
+    const pages: string[] = [];
+    const prompts: string[] = [];
+    const b = await startApprovalBridge(
+      async (r) => (prompts.push(r.tool_name), { allow: true }),
+      undefined,
+      undefined,
+      async (p) => (pages.push(String(p.title)), { text: 'Shown.' }),
+    );
+    try {
+      const html = '<p>"' + 'x'.repeat(512 * 1024 - 10) + '"</p>';
+      const shown = await ask(b, { page: { title: 'Big', html } });
+      expect(shown.status).toBe(200);
+      expect(await shown.json()).toEqual({ text: 'Shown.' });
+      const prompt = await ask(b, { tool_name: 'mcp__wren__show_page', input: { title: 'Big', html } });
+      expect((await prompt.json()).behavior).toBe('allow');
+      expect(pages).toEqual(['Big']);
+      expect(prompts).toEqual(['mcp__wren__show_page']);
+    } finally {
+      b.close();
+    }
   });
 });

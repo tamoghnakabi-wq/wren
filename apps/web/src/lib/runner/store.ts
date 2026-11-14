@@ -1,5 +1,6 @@
-import type { AgentAnswer, ApprovalRequest, ApprovalState, AskAgentRequest, AskAgentStart, ModelUsage, RunStore, SessionEvent } from '@wren/core';
+import { pageFileName, type AgentAnswer, type ApprovalRequest, type ApprovalState, type AskAgentRequest, type AskAgentStart, type ModelUsage, type RunStore, type SessionEvent } from '@wren/core';
 import { HttpError } from '../auth';
+import { saveArtifact } from '../blob';
 import { db, type Json } from '../db';
 import { notifyUser, sendPush } from '../notify';
 import { agentAnswer, askAgent } from '../runs';
@@ -98,6 +99,12 @@ export class DbRunStore implements RunStore {
             where id = ${id} and run_id = ${this.r.runId} and ${this.holds(sql)} returning id`
         : await sql`update public.events set status = ${patch.status!} where id = ${id} and run_id = ${this.r.runId} and ${this.holds(sql)} returning id`;
     if (!done.length) await this.assertLease();
+  }
+
+  /** A page the agent made (task.show_page): one of the task's files, of its own kind, shown sandboxed. */
+  async savePage(page: { title: string; html: string }): Promise<{ id: string; name: string }> {
+    const a = await saveArtifact({ userId: this.r.userId, agentId: this.r.agentId, sessionId: this.r.sessionId, runId: this.r.runId, name: pageFileName(page.title), mime: 'text/html', data: Buffer.from(page.html, 'utf8'), kind: 'page', source: 'cloud', leaseId: this.r.leaseId });
+    return { id: a.id, name: a.name };
   }
 
   async control() {

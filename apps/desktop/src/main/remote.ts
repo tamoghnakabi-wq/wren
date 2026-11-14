@@ -1,6 +1,7 @@
 import type { AgentAnswer, ApprovalRequest, ApprovalState, AskAgentRequest, AskAgentStart, ModelClient, ModelRequest, ModelStreamEvent, ModelTurn, ModelUsage, RunStore, SessionEvent } from '@wren/core';
-import { ModelError } from '@wren/core';
+import { ModelError, pageFileName } from '@wren/core';
 import { deviceFetch, deviceJson } from './api';
+import { uploadArtifact } from './upload';
 
 // RunStore over the device API: the desktop runs the loop, the server keeps
 // the durable log, approvals and notifications.
@@ -53,6 +54,11 @@ export class RemoteStore implements RunStore {
   }
   async notify(title: string, body: string, kind: string): Promise<void> {
     await this.call('notify', { title, body, kind });
+  }
+  /** A page the agent made (task.show_page), kept as one of the task's files (always small enough to go inline). */
+  async savePage(page: { title: string; html: string }): Promise<{ id: string; name: string }> {
+    const a = await uploadArtifact({ runId: this.runId, lease: this.lease, data: Buffer.from(page.html, 'utf8'), name: pageFileName(page.title), kind: 'page' });
+    return { id: a.id, name: a.name };
   }
   /** Ask another of the user's agents (the server checks this agent may). */
   async askAgent(req: AskAgentRequest): Promise<AskAgentStart> {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ResponsesClient } from '../src/models/responses';
+import { limitReset, ResponsesClient } from '../src/models/responses';
 import type { SessionEvent } from '../src/types';
 
 // A fake /responses endpoint: records the request body and streams back one
@@ -69,3 +69,17 @@ describe('unfinished output', () => {
   });
 });
 
+
+describe('usage limit resets', () => {
+  const now = 1_800_000_000_000;
+  it('reads when a plan limit resets, however the provider says it', () => {
+    expect(limitReset({ error: { code: 'usage_limit_reached', resets_at: 1_800_003_600 } }, null, now)).toBe(1_800_003_600_000);
+    expect(limitReset({ error: { resets_at: 1_800_003_600_000 } }, null, now)).toBe(1_800_003_600_000);
+    expect(limitReset({ error: { resets_in_seconds: 90 } }, null, now)).toBe(now + 90_000);
+    expect(limitReset({ resets_in_seconds: '30' }, null, now)).toBe(now + 30_000);
+    expect(limitReset(undefined, '120', now)).toBe(now + 120_000);
+    expect(limitReset(undefined, 'Wed, 21 Oct 2026 07:28:00 GMT', now)).toBe(Date.parse('Wed, 21 Oct 2026 07:28:00 GMT'));
+    expect(limitReset({ error: { message: 'no time' } }, null, now)).toBeUndefined();
+    expect(limitReset(undefined, 'soon', now)).toBeUndefined();
+  });
+});

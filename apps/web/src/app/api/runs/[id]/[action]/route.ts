@@ -1,6 +1,6 @@
 import { HttpError, requireUser } from '@/lib/auth';
 import { json, route, uuid } from '@/lib/http';
-import { cancelRun, pauseRun, resumeRun } from '@/lib/runs';
+import { cancelRun, holdRun, pauseRun, resumeRun } from '@/lib/runs';
 
 export const maxDuration = 30;
 
@@ -13,6 +13,7 @@ export const POST = route<{ params: Promise<{ id: string; action: string }> }>(a
   if (p.action === 'cancel') done = await cancelRun(user.id, id);
   else if (p.action === 'pause') done = await pauseRun(user.id, id);
   else if (p.action === 'resume') await resumeRun(user.id, id);
+  else if (p.action === 'hold') await holdRun(user.id, id); // Don't resume after a usage limit
   else throw new HttpError(404, 'Unknown action.', 'not_found');
   return json({ ok: true, done });
 });

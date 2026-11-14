@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Bell, CalendarClock, FolderOpen, Gauge, Home, Inbox, LayoutGrid, LogOut, Menu, Monitor, PanelLeftClose, PanelLeftOpen, Plug, Plus, Settings, X } from 'lucide-react';
+import { Bell, CalendarClock, FolderOpen, Gauge, Home, Inbox, LayoutGrid, LogOut, Menu, Monitor, PanelLeftClose, PanelLeftOpen, Plug, Plus, Search, Settings, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Logo, WrenMark } from '../brand';
 import { AgentAvatar } from '../agent-avatar';
@@ -14,6 +14,7 @@ import { paneShortcut, togglePane, usePaneCollapsed } from '@/lib/client/layout'
 import { forgetPushHere, PushPrompt } from './push';
 import { DesktopLinkBanner } from './desktop-link';
 import { ChatGPTWelcome } from './chatgpt-ui';
+import { CommandPalette, openPalette, usePaletteRequests } from './command-palette';
 
 const NAV = [
   { href: '/app', label: 'Home', icon: Home, exact: true },
@@ -43,8 +44,14 @@ export function Shell({ children }: { children: ReactNode }) {
     setDrawerFor(pathname);
     setDrawer(false);
   }
-  const fullBleed = pathname.startsWith('/app/s/');
+  const fullBleed = pathname.startsWith('/app/s/') || pathname.startsWith('/app/page/');
   const closeDrawer = useCallback(() => setDrawer(false), []);
+  const [palette, setPalette] = useState(false);
+  const closePalette = useCallback(() => setPalette(false), []);
+  usePaletteRequests(() => {
+    setDrawer(false);
+    setPalette(true);
+  });
 
   // ⌘\ / Ctrl+\ collapses the sidebar; ⇧ also: the task details.
   useEffect(() => {
@@ -81,6 +88,7 @@ export function Shell({ children }: { children: ReactNode }) {
       </div>
       <PushPrompt />
       <ChatGPTWelcome />
+      <CommandPalette open={palette} onClose={closePalette} />
     </div>
   );
 }
@@ -164,6 +172,24 @@ function SidebarToggle() {
   );
 }
 
+/** Opens the search palette; shows its shortcut. */
+function SearchButton() {
+  const mac = useIsMac();
+  return (
+    <button
+      type="button"
+      onClick={openPalette}
+      aria-keyshortcuts={mac ? 'Meta+K' : 'Control+K'}
+      className="group relative mt-2 flex h-9 w-full items-center gap-3 rounded-lg border border-border bg-surface/60 px-3 text-sm text-muted transition-colors hover:bg-surface hover:text-text rail:mx-auto rail:h-10 rail:w-10 rail:justify-center rail:px-0"
+    >
+      <Search className="h-4 w-4 shrink-0" aria-hidden />
+      <span className="flex-1 text-left rail:sr-only">Search</span>
+      <kbd className="font-sans text-[11px] text-faint rail:hidden">{mac ? '⌘K' : 'Ctrl K'}</kbd>
+      <RailTip>Search</RailTip>
+    </button>
+  );
+}
+
 function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -187,8 +213,9 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
           <Plus className="h-4 w-4 shrink-0" aria-hidden /> <span className="rail:sr-only">New task</span>
           <RailTip>New task</RailTip>
         </Link>
+        <SearchButton />
       </div>
-      <nav className="mt-4 space-y-0.5 px-3 rail:px-2.5" aria-label="Main">
+      <nav className="mt-3 space-y-0.5 px-3 rail:px-2.5" aria-label="Main">
         {NAV.map((n) => {
           const on = n.exact ? pathname === n.href : pathname.startsWith(n.href);
           return (
@@ -268,20 +295,27 @@ function MobileTopBar({ onMenu }: { onMenu: () => void }) {
   const inbox = useInboxCount();
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-bg/85 px-3 backdrop-blur-md lg:hidden" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
-      <button onClick={onMenu} className="rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label="Open menu">
-        <Menu className="h-5 w-5" />
-      </button>
+      <div className="flex w-20">
+        <button onClick={onMenu} className="rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label="Open menu">
+          <Menu className="h-5 w-5" />
+        </button>
+      </div>
       <Link href="/app" aria-label="Wren home">
         <Logo />
       </Link>
-      <Link href="/app/inbox" className="relative rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label={inbox ? `Inbox, ${inbox} new` : 'Inbox'}>
-        <Bell className="h-5 w-5" aria-hidden />
-        {inbox > 0 && (
-          <span aria-hidden className="absolute top-1 right-1 min-w-4 rounded-full bg-brand-solid px-1 text-center text-[10px] leading-4 font-bold text-brand-fg tabular-nums">
-            {badge(inbox)}
-          </span>
-        )}
-      </Link>
+      <div className="flex w-20 justify-end">
+        <button type="button" onClick={openPalette} className="rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label="Search">
+          <Search className="h-5 w-5" aria-hidden />
+        </button>
+        <Link href="/app/inbox" className="relative rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label={inbox ? `Inbox, ${inbox} new` : 'Inbox'}>
+          <Bell className="h-5 w-5" aria-hidden />
+          {inbox > 0 && (
+            <span aria-hidden className="absolute top-1 right-1 min-w-4 rounded-full bg-brand-solid px-1 text-center text-[10px] leading-4 font-bold text-brand-fg tabular-nums">
+              {badge(inbox)}
+            </span>
+          )}
+        </Link>
+      </div>
     </header>
   );
 }

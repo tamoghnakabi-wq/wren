@@ -65,6 +65,11 @@ export interface RunnerState {
   capabilities?: Capabilities;
 }
 
+/** The prompt that carries on a CLI engine's turn a usage limit cut short (its session has the request). */
+const CONTINUE_AFTER_LIMIT = 'Your plan’s usage limit stopped you before you finished. It has reset now: carry on with the task where you left off.';
+/** The same, when the user wrote meanwhile: their message follows it. */
+const CONTINUE_WITH_MESSAGE = 'Your plan’s usage limit stopped you before you finished. It has reset now. The user wrote this since; take it into account as you carry on:';
+
 export class DeviceRunner {
   private sb: SupabaseClient | null = null;
   private channel: RealtimeChannel | null = null;
@@ -305,7 +310,13 @@ export class DeviceRunner {
     const seenSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
     const asks = pendingAsks(events);
     const firstAsk = (asks[0]?.data ?? {}) as MessageData & { context?: string };
-    const text = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
+    // A usage limit cut the last turn short after the engine had started on it: its session holds the request,
+    // so carrying on after the reset asks it to finish rather than giving it the request again.
+    const cursor = [...events].reverse().find((e) => e.type === 'reasoning' && typeof (e.data as { consumedSeq?: unknown }).consumedSeq === 'number');
+    const cut = cursor?.data as { interrupted?: boolean; turn?: number } | undefined;
+    const interrupted = cut?.interrupted === true;
+    const said = asks.map((e) => (e.data as MessageData).text ?? '').filter(Boolean).join('\n\n');
+    const text = !interrupted ? said : said ? `${CONTINUE_WITH_MESSAGE}\n\n${said}` : CONTINUE_AFTER_LIMIT;
     // Attached images go with the prompt; the server only hands out this run's account's images.
     // Stop or a lost lease ends the loading too, and no engine starts for a run that has ended (W-122).
     const { images, skipped } = await engineImages(asks, (id) => deviceJson(`/api/device/runs/${c.run.id}/artifact`, { id }, { lease: store.lease, signal }), signal);
@@ -343,7 +354,8 @@ export class DeviceRunner {
       // Claude Code can ask the user's other agents through Wren's MCP helper; Grok Build can't yet.
       askable: engine === 'claude-code' ? c.askable : undefined,
       // The first message of this turn: the same when a crash makes it run again, new for a follow-up.
-      turn: asks[0]?.seq ?? 0,
+      // A turn carried on after a usage limit keeps its number, so a question it asks again is the same ask.
+      turn: asks[0]?.seq ?? (interrupted && typeof cut?.turn === 'number' ? cut.turn : 0),
       plan: ([...events].reverse().find((e) => e.type === 'plan')?.data as { items?: PlanItem[] } | undefined)?.items,
       signal,
       saveResumeId: async (id: string) => {
@@ -353,6 +365,7 @@ export class DeviceRunner {
     if (!policy.folders.length) return { kind: 'failed', error: 'No folders are allowed on this computer. Add one in Wren → Settings → This computer.', code: 'no_folders', steps: 0 };
     const inFolders = this.inFolders();
     const out = engine === 'claude-code' ? await runClaudeCode(run, inFolders, approveScript()) : await runGrokBuild(run, inFolders, approveScript().replace(/mcp-approve\.mjs$/, 'grok-hook.mjs'));
+    if (out.kind === 'paused' && out.limit?.midTurn) await store.append('reasoning', { engine, consumedSeq: seenSeq, interrupted: true, turn: run.turn }, 'done');
     if (out.kind !== 'completed') return out;
     // Everything up to seenSeq was given to the engine and answered: the next turn starts after it
     // (a follow-up sent while the engine worked comes before this answer, and must not be skipped).

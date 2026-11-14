@@ -1,12 +1,14 @@
 // Tiny stdio MCP server that Claude Code launches for --permission-prompt-tool.
 // It forwards each permission prompt to the Wren desktop app (localhost, with a
 // per-run token) and returns Wren's allow/deny decision. When the user picked
-// other agents this one may ask, it also offers ask_agent, answered the same way.
+// other agents this one may ask, it also offers ask_agent, answered the same way,
+// and show_page always (a page the agent made, shown in the task).
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { APPROVE_HELPER_MS, ASK_HELPER_MS, postToWren, uniqueNames } from './bridge-client';
+import { SHOW_PAGE_DESCRIPTION } from '@wren/core/tools';
+import { APPROVE_HELPER_MS, ASK_HELPER_MS, PAGE_HELPER_MS, postToWren, uniqueNames } from './bridge-client';
 
 // The bridge's address and token come from Wren's private file (only this server's sandbox profile can
 // read it), never from the command line or the environment, which other processes can read (W-121).
@@ -68,5 +70,19 @@ if (agents.length) {
     },
   );
 }
+
+// Showing the user a page (task.show_page in Wren's own agent loop): Wren checks and keeps it.
+server.registerTool(
+  'show_page',
+  { description: SHOW_PAGE_DESCRIPTION, inputSchema: { title: z.string().max(300), html: z.string().min(1) } },
+  async (args, extra) => {
+    try {
+      const out = (await postToWren(url, token, { page: args }, { signal: extra.signal, timeoutMs: PAGE_HELPER_MS })) as { text?: string; isError?: boolean };
+      return { content: [{ type: 'text' as const, text: out.text ?? 'The page wasn’t shown.' }], isError: out.text === undefined || !!out.isError };
+    } catch (e) {
+      return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };
+    }
+  },
+);
 
 await server.connect(new StdioServerTransport());

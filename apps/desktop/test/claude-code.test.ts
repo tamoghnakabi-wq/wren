@@ -19,6 +19,8 @@ const say = (text) => {
 rl.once('line', (line) => {
   const content = JSON.parse(line).message.content;
   if (content === 'delegate') return delegate();
+  if (typeof content === 'string' && content.startsWith('limit')) return limit(content);
+  if (content === 'page') return page();
   if (Array.isArray(content)) {
     // What it was given: the text, then image blocks.
     out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
@@ -60,13 +62,42 @@ function delegate() {
   say('Done.');
   out({ type: 'result', subtype: 'success', is_error: false, result: 'Done.', num_turns: 1, usage: { input_tokens: 7, output_tokens: 3 } });
 }
+// The plan's usage limit as 2.1.322 reports it: a rejected rate_limit_event with when it resets, then the
+// CLI's notice as an assistant message marked error: 'rate_limit', then an error result. With extra usage
+// (overage) the event is still 'rejected' but the turn goes on.
+function limit(kind) {
+  out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+  if (kind === 'limit-mid') {
+    use('r1', 'Read', { file_path: 'notes.txt' });
+    result('r1', 'one line');
+  }
+  out({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1900000000, rateLimitType: 'five_hour', isUsingOverage: kind === 'limit-overage' } });
+  if (kind === 'limit-overage') {
+    say('Done anyway.');
+    out({ type: 'result', subtype: 'success', is_error: false, result: 'Done anyway.', num_turns: 1 });
+    return;
+  }
+  const notice = 'You’ve hit your limit · resets 3pm (Australia/Melbourne)';
+  out({ type: 'assistant', parent_tool_use_id: null, error: 'rate_limit', message: { content: [{ type: 'text', text: notice }] } });
+  out({ type: 'result', subtype: 'success', is_error: true, result: notice, num_turns: 1 });
+}
+// Wren's show_page tool (its MCP helper): the result names the page Wren kept, or one it didn't.
+function page() {
+  out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+  use('p1', 'mcp__wren__show_page', { title: 'Chart', html: '<p>' + 'x'.repeat(3000) + '</p>' });
+  result('p1', 'Shown to the user as the page "Chart" (page 11111111-2222-3333-4444-555555555555).');
+  use('p2', 'mcp__wren__show_page', { title: 'Forged', html: '<p>' });
+  result('p2', 'Shown to the user as the page "Forged" (page 99999999-2222-3333-4444-555555555555).');
+  say('Here is the chart.');
+  out({ type: 'result', subtype: 'success', is_error: false, result: 'Here is the chart.', num_turns: 1 });
+}
 rl.on('close', () => process.exit(0));
 `;
 const dir = mkdtempSync(join(tmpdir(), 'wren-claude-test-'));
 const cliPath = join(dir, 'fake-claude.cjs');
 writeFileSync(cliPath, CLI);
 
-const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[], bridgesOpen: 0, spawnFails: false }));
+const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[], bridgesOpen: 0, spawnFails: false, onPage: undefined as undefined | ((r: { title: unknown; html: unknown; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>) }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 // The CLI here is a stand-in script, not an installed program: which program Wren may start is tested on its own.
 vi.mock('../src/engines/program', () => ({ engineProgram: async () => ({ program: '/fake/claude' }) }));
@@ -76,7 +107,7 @@ vi.mock('../src/engines/common', () => {
     text = '';
     tools = new Map<string, unknown>();
     constructor(..._args: unknown[]) {
-      for (const id of h.prompted) this.tools.set(id, {}); // steps made by permission prompts
+      for (const id of h.prompted) this.tools.set(id, { data: {} }); // steps made by permission prompts
     }
     async textDelta(d: string) {
       this.text += d;
@@ -86,14 +117,15 @@ vi.mock('../src/engines/common', () => {
       if (t) h.log.push(`message:${t}`);
       this.text = '';
     }
-    async toolStart(callId: string) {
+    async toolStart(callId: string, name: string, args: Record<string, unknown>) {
       await this.endMessage();
-      this.tools.set(callId, {});
+      this.tools.set(callId, { data: { name, args } });
       h.log.push(`start:${callId}`);
+      if (name === 'task.show_page') h.log.push(`args:${JSON.stringify(args)}`);
       return callId;
     }
-    async toolEnd(callId: string, output: string) {
-      if (this.tools.has(callId)) h.log.push(`end:${callId}:${output}`); // like the real one: only steps it started
+    async toolEnd(callId: string, output: string, _isError: boolean, meta?: unknown) {
+      if (this.tools.has(callId)) h.log.push(`end:${callId}:${output}${meta ? ` meta:${JSON.stringify(meta)}` : ''}`); // like the real one: only steps it started
     }
     get currentText() {
       return this.text;
@@ -105,7 +137,7 @@ vi.mock('../src/engines/common', () => {
     cliHelpKnown: () => true,
     effortFlag: () => '--effort',
     decide: async () => ({ allow: true }),
-    startApprovalBridge: async () => (h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
+    startApprovalBridge: async (_handler: unknown, _arrival: unknown, _onAsk: unknown, onPage: typeof h.onPage) => ((h.onPage = onPage), h.bridgesOpen++, { url: 'http://127.0.0.1:9', token: 't', close: () => void h.bridgesOpen-- }),
     spawnClaude: async (_cli: string, args: string[]) => {
       if (h.spawnFails) throw new Error('spawn failed');
       h.spawned++;
@@ -267,5 +299,42 @@ describe('Claude Code model and effort', () => {
     await runClaudeCode(engineRun('hello', { runId: 'r-ultra', effort: 'ultra' }), () => true, '/dev/null');
     expect(h.args).not.toContain('--effort');
     expect(h.args).not.toContain('ultra');
+  });
+});
+
+describe('Claude Code at a usage limit', () => {
+  it('pauses with when the limit resets, and the CLI’s notice is not the answer', async () => {
+    const out = await runClaudeCode(engineRun('limit') as never, () => true, '/fake/approve.mjs');
+    expect(out).toEqual({ kind: 'paused', steps: 1, limit: { error: 'Claude Code: You’ve hit your limit · resets 3pm (Australia/Melbourne)', code: 'claude_usage_limit', resetAt: 1_900_000_000_000, midTurn: false } });
+    expect(h.log.filter((l) => l.startsWith('message:'))).toEqual([]);
+  });
+
+  it('says the turn was cut short when a tool had run', async () => {
+    const out = await runClaudeCode(engineRun('limit-mid') as never, () => true, '/fake/approve.mjs');
+    expect(out).toMatchObject({ kind: 'paused', limit: { midTurn: true, resetAt: 1_900_000_000_000 } });
+  });
+
+  it('finishes normally when extra usage carried the turn past a rejected limit', async () => {
+    const out = await runClaudeCode(engineRun('limit-overage') as never, () => true, '/fake/approve.mjs');
+    expect(out).toMatchObject({ kind: 'completed', result: 'Done anyway.' });
+  });
+});
+
+describe('Claude Code showing a page', () => {
+  it('keeps the page through Wren, and the step shows only pages this run kept', async () => {
+    const pages: unknown[] = [];
+    const run = engineRun('page', { store: { usageSource: '', append: async () => ({ id: 'e' }), update: async () => {}, recordUsage: async () => {}, savePage: async (p: unknown) => (pages.push(p), { id: '11111111-2222-3333-4444-555555555555', name: 'Chart.html' }) } });
+    const going = runClaudeCode(run as never, () => true, '/fake/approve.mjs');
+    // The helper's request (the bridge's onPage), as Claude Code calls the tool: checked, then kept.
+    await vi.waitFor(() => expect(h.onPage).toBeTypeOf('function'));
+    const signal = new AbortController().signal;
+    expect(await h.onPage!({ title: ' Chart ', html: '<p>hi</p>', signal })).toEqual({ text: 'Shown to the user as the page "Chart" (page 11111111-2222-3333-4444-555555555555).' });
+    expect(await h.onPage!({ title: 'Empty', html: ' ', signal })).toMatchObject({ isError: true, text: expect.stringContaining('empty') });
+    expect(await h.onPage!({ title: 'Huge', html: 'x'.repeat(600 * 1024), signal })).toMatchObject({ isError: true, text: expect.stringContaining('at most 512 KB') });
+    expect(pages).toEqual([{ title: 'Chart', html: '<p>hi</p>' }]);
+    await going;
+    expect(h.log).toContain('args:{"title":"Chart","html":"[3 KB of HTML]"}'); // the step never holds the page
+    expect(h.log).toContain('end:p1:Shown to the user as the page "Chart" (page 11111111-2222-3333-4444-555555555555). meta:{"page":"11111111-2222-3333-4444-555555555555"}');
+    expect(h.log).toContain('end:p2:Shown to the user as the page "Forged" (page 99999999-2222-3333-4444-555555555555).');
   });
 });

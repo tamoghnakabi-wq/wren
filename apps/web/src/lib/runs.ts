@@ -11,6 +11,7 @@ import {
   type ModelRef,
   type Runtime,
   type StatusData,
+  type UsageLimit,
 } from '@wren/core';
 import type { TransactionSql } from 'postgres';
 import { db, type Json } from './db';
@@ -196,7 +197,8 @@ async function continueActiveRun(sessionId: string, userId: string, message: Rec
     if (!session) throw new HttpError(404, 'Task not found.', 'not_found');
     const [removed] = await tx`select 1 from public.sessions s join public.agents a on a.id = s.agent_id where s.id = ${sessionId} and a.archived_at is not null`;
     if (removed) throw new HttpError(404, 'Agent not found.', 'not_found'); // removed: its tasks take no more messages (W-158)
-    const [active] = await tx`select r.id, r.status, r.runtime, r.device_id, (r.runtime = 'desktop' and d.revoked_at is not null) as orphaned
+    const [active] = await tx`select r.id, r.status, r.runtime, r.device_id, (r.runtime = 'desktop' and d.revoked_at is not null) as orphaned,
+        (r.status = 'paused' and not r.pause_requested and r.wake_at is not null and r.wake_at > now()) as limited
       from public.runs r left join public.devices d on d.id = r.device_id
       where r.session_id = ${sessionId} and r.status in ('queued', 'running', 'waiting', 'paused') order by r.created_at desc limit 1 for no key update of r`;
     if (!active) return null;
@@ -210,6 +212,9 @@ async function continueActiveRun(sessionId: string, userId: string, message: Rec
     await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
       values (${userId}, ${sessionId}, ${active.id}, 'message', 'done', ${tx.json(message as unknown as Json)})`;
     await tx`update public.sessions set last_event_at = now() where id = ${sessionId}`;
+    // Waiting out a plan's usage limit: sending now would only hit it again, so the message goes when the
+    // task carries on (at the reset, or when the user presses Resume now).
+    if (active.limited) return { runId: active.id as string, kick: false };
     const [asked] = await tx`select 1 from public.events where run_id = ${active.id} and type = 'tool' and status = 'awaiting_input' limit 1`;
     if (active.status === 'paused' || (active.status === 'waiting' && asked)) {
       await tx`update public.runs set status = 'queued', pause_requested = false, wake_at = null where id = ${active.id}`;
@@ -334,6 +339,17 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
     const cancelledLate = run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(o.kind);
     if (cancelledLate) o = { kind: 'cancelled', steps: o.steps };
     let runStatus = o.kind === 'waiting_approval' || o.kind === 'waiting_input' || o.kind === 'waiting_agent' ? 'waiting' : o.kind === 'yield' ? 'running' : o.kind;
+    // A plan's usage limit (not the user's Pause): the task waits for the reset, and carries on by itself
+    // then when the account allows it (`limitWake`). What a computer reports is checked, not trusted.
+    const limit = o.kind === 'paused' ? cleanLimit(o.limit) : undefined;
+    let wakeAt: Date | null = null;
+    let zone = 'UTC';
+    if (limit) {
+      const [p] = await tx`select settings, timezone from public.profiles where id = ${run.user_id}`;
+      const [{ n }] = await tx`select count(*)::int as n from public.events where run_id = ${runId} and type = 'status' and data->>'code' = 'usage_limit'`;
+      zone = String(p?.timezone || 'UTC');
+      wakeAt = limitWake(limit.resetAt, { enabled: (p?.settings as { resumeAfterLimits?: unknown } | undefined)?.resumeAfterLimits !== false, userPaused: !!run.pause_requested, earlier: Number(n) });
+    }
     let resume = false;
     if (o.kind === 'waiting_approval') {
       const [a] = await tx`select status from public.approvals where id = ${o.approvalId} and run_id = ${runId}`;
@@ -367,7 +383,8 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
         error = ${o.kind === 'failed' ? o.error : null},
         result = ${o.kind === 'completed' ? o.result.slice(0, 20000) : run.result},
         ended_at = ${terminal ? new Date() : null},
-        cleanup_pending = cleanup_pending or ${terminal && run.runtime === 'cloud'}
+        cleanup_pending = cleanup_pending or ${terminal && run.runtime === 'cloud'},
+        wake_at = ${runStatus === 'paused' ? wakeAt : null}
       where id = ${runId}`;
     if (o.kind === 'cancelled') {
       // Steps and approvals the run never finished end with it.
@@ -380,10 +397,15 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
         values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${tx.json({ text: o.error, level: 'error', ...(o.code ? { code: o.code } : {}) } satisfies StatusData as unknown as Json)})`;
     }
-    return { run, o, resume, terminal };
+    if (limit) {
+      const line: LimitStatus = { text: limit.error, level: 'warn', code: 'usage_limit', ...(limit.code ? { cause: limit.code } : {}), ...(limit.resetAt ? { resetAt: limit.resetAt } : {}), ...(wakeAt ? { wakeAt: wakeAt.getTime() } : {}) };
+      await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
+        values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${tx.json(line as unknown as Json)})`;
+    }
+    return { run, o, resume, terminal, limit, wakeAt, zone };
   });
   if (typeof done === 'string') return done;
-  const { run, o, resume, terminal } = done;
+  const { run, o, resume, terminal, limit, wakeAt, zone } = done;
   if (resume) await kickRun(runId);
   if (terminal && !resume) {
     // An asked agent's answer is in: the agent that asked carries on. Agents this run asked stop with it.
@@ -400,6 +422,16 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
   } else if (o.kind === 'completed' && run.trigger !== 'agent') {
     // An asked agent's answer goes to the agent that asked, which reports to the user.
     await notifyUser({ userId: run.user_id, kind: 'run_completed', title: `${run.agent_name} finished`, body: (o.result || run.title).replace(/[#*_`>]/g, '').slice(0, 280), url, sessionId: run.session_id });
+  } else if (limit) {
+    const reset = limit.resetAt ? ` It resets ${formatWhen(limit.resetAt, zone)}.` : '';
+    await notifyUser({
+      userId: run.user_id,
+      kind: 'run_limited',
+      title: `${run.agent_name} hit a usage limit`,
+      body: `${run.title}: ${wakeAt ? `it carries on ${formatWhen(wakeAt.getTime(), zone)}, once the limit resets.` : `paused.${reset} Resume it when you're ready.`}`.slice(0, 300),
+      url,
+      sessionId: run.session_id,
+    });
   }
   // waiting_input: the question notification is sent by the loop's ask_user handler
   return resume ? 'resumed' : terminal ? 'ended' : 'paused';
@@ -485,7 +517,7 @@ export async function pauseRun(userId: string, runId: string): Promise<boolean> 
     if (!run) return null;
     // A worker holds it: it pauses after the current step. Otherwise nothing is executing it.
     if (run.leased) return { runtime: run.runtime as string, paused: false };
-    await tx`update public.runs set status = 'paused' where id = ${runId}`;
+    await tx`update public.runs set status = 'paused', wake_at = null where id = ${runId}`;
     await tx`update public.sessions set status = 'paused' where id = ${ref.session_id}`;
     return { runtime: run.runtime as string, paused: true };
   });
@@ -533,6 +565,111 @@ export async function resumeRun(userId: string, runId: string) {
     return !!run;
   });
   if (resumed) await kickRun(runId);
+}
+
+/**
+ * "Don't resume": a task paused by a usage limit stays paused at the reset, as if the user had paused it
+ * (`pause_requested`, which the cron's `limits` stage skips). Resume still carries it on.
+ */
+export async function holdRun(userId: string, runId: string): Promise<void> {
+  const [ref] = await db()`select session_id from public.runs where id = ${runId} and user_id = ${userId}`;
+  if (!ref) return;
+  await taskTx(async (tx) => {
+    await tx`select id from public.sessions where id = ${ref.session_id} for no key update`;
+    await tx`update public.runs set wake_at = null, pause_requested = true where id = ${runId} and user_id = ${userId} and status = 'paused'`;
+  });
+}
+
+// ---------------------------------------------------------------- usage limits
+
+/** How many times one run carries on by itself after a usage limit; after that it waits for the user. */
+export const MAX_LIMIT_RESUMES = 3;
+/** A reset further away than this (a weekly limit) waits for the user: the task would act on old intent. */
+export const LIMIT_HORIZON_MS = 24 * 3_600_000;
+
+/** A usage-limit status line in the timeline (`code: 'usage_limit'`). */
+export type LimitStatus = StatusData & { cause?: string; resetAt?: number; wakeAt?: number };
+
+/** A limit as a computer reported it, checked: text clipped, the reset a time within the next 8 days. */
+export function cleanLimit(l: unknown): UsageLimit | undefined {
+  if (!l || typeof l !== 'object') return undefined;
+  const v = l as Record<string, unknown>;
+  const reset = Number(v.resetAt);
+  const now = Date.now();
+  return {
+    error: String(v.error ?? '').slice(0, 1500) || 'A usage limit was reached.',
+    ...(typeof v.code === 'string' ? { code: v.code.slice(0, 80) } : {}),
+    ...(Number.isFinite(reset) && reset > now - 3_600_000 && reset < now + 8 * 86_400_000 ? { resetAt: Math.round(reset) } : {}),
+    ...(v.midTurn === true ? { midTurn: true } : {}),
+  };
+}
+
+/**
+ * When a task paused by a usage limit carries on by itself: a minute after the reset (at least five minutes
+ * from now, plus up to a minute so tasks paused together don't all start at once), or never (null) when the
+ * account turned it off, the user paused the task, the reset is unknown or more than a day away, or this run
+ * already carried on MAX_LIMIT_RESUMES times.
+ */
+export function limitWake(resetAt: number | undefined, o: { enabled: boolean; userPaused: boolean; earlier: number; now?: number; jitter?: number }): Date | null {
+  const now = o.now ?? Date.now();
+  if (!o.enabled || o.userPaused || !resetAt || o.earlier >= MAX_LIMIT_RESUMES || resetAt - now > LIMIT_HORIZON_MS) return null;
+  const jitter = o.jitter ?? Math.floor(Math.random() * 60_000);
+  return new Date(Math.max(resetAt + 60_000, now + 5 * 60_000) + jitter);
+}
+
+/** "at 3:40 pm" today, "tomorrow at 9:00 am", else "on Tue 18 Nov at 9:00 am", in the account's time zone. */
+export function formatWhen(ms: number, zone: string, now = Date.now()): string {
+  const tz = (() => {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: zone });
+      return zone;
+    } catch {
+      return 'UTC';
+    }
+  })();
+  const day = (t: number) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
+  const time = new Intl.DateTimeFormat('en', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(ms).toLowerCase().replace(/\s+/g, ' ');
+  if (day(ms) === day(now)) return `at ${time}`;
+  if (day(ms) === day(now + 86_400_000)) return `tomorrow at ${time}`;
+  return `on ${new Intl.DateTimeFormat('en-GB', { timeZone: tz, weekday: 'short', day: 'numeric', month: 'short' }).format(ms)} at ${time}`;
+}
+
+/**
+ * The cron's `limits` stage: tasks paused by a usage limit whose reset has come carry on. The account's
+ * setting is read again now (turned off meanwhile: the task just stays paused for the user). Runs of removed
+ * agents are left to endRemovedAgentRuns. How many carried on.
+ */
+export async function resumeLimitedRuns(until = Infinity): Promise<number> {
+  const due = await db()`
+    select r.id, r.session_id, (p.settings->'resumeAfterLimits') is distinct from 'false'::jsonb as enabled
+    from public.runs r join public.profiles p on p.id = r.user_id
+    where r.status = 'paused' and r.wake_at is not null and r.wake_at <= now() and not r.pause_requested
+    order by r.wake_at limit 20`;
+  let woken = 0;
+  for (const r of due) {
+    if (Date.now() > until) break; // the cron's time is up
+    const woke = await taskTx(async (tx) => {
+      await tx`select id from public.sessions where id = ${r.session_id} for no key update`;
+      if (!r.enabled) {
+        await tx`update public.runs set wake_at = null where id = ${r.id} and status = 'paused'`;
+        return false;
+      }
+      const [run] = await tx`update public.runs set status = 'queued', wake_at = null
+        where id = ${r.id} and status = 'paused' and wake_at is not null and wake_at <= now() and not pause_requested
+          and exists (select 1 from public.agents a where a.id = runs.agent_id and a.archived_at is null)
+        returning user_id`;
+      if (!run) return false;
+      await tx`update public.sessions set status = 'queued' where id = ${r.session_id}`;
+      await tx`insert into public.events (user_id, session_id, run_id, type, status, data)
+        values (${run.user_id}, ${r.session_id}, ${r.id}, 'status', 'done', ${tx.json({ text: 'The usage limit has reset, so the task carries on.', level: 'info', code: 'limit_reset' } satisfies StatusData as unknown as Json)})`;
+      return true;
+    });
+    if (woke) {
+      woken++;
+      await kickRun(r.id);
+    }
+  }
+  return woken;
 }
 
 // ---------------------------------------------------------------- agents asking agents (task.ask_agent)

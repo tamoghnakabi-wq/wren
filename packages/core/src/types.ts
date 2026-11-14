@@ -159,6 +159,11 @@ export interface ToolResult {
   meta?: Record<string, unknown>;
 }
 
+/** The most HTML one page an agent shows (task.show_page) may be, in bytes (UTF-8). */
+export const PAGE_MAX_BYTES = 512 * 1024;
+/** The longest title of a page an agent shows. */
+export const PAGE_TITLE_MAX = 120;
+
 export interface StatusData {
   text: string;
   level?: 'info' | 'warn' | 'error' | 'success';
@@ -241,6 +246,8 @@ export interface ModelClient {
 }
 
 export class ModelError extends Error {
+  /** For a plan's usage limit (`isPlanLimit`): when it resets (ms since the epoch), when the provider said. */
+  resetAt?: number;
   constructor(
     message: string,
     public readonly status: number | undefined,
@@ -251,6 +258,25 @@ export class ModelError extends Error {
     super(message);
     this.name = 'ModelError';
   }
+}
+
+/**
+ * A subscription plan's usage limit (not an API key's credits): it lifts by itself at a reset time, so the
+ * task pauses until then instead of failing (`LoopOutcome` paused with `limit`).
+ */
+export function isPlanLimit(code: string | undefined): boolean {
+  return code === 'subscription_sharing_usage_limit_exceeded' || code === 'usage_limit_reached';
+}
+
+/** Why a task paused by itself: a plan's usage limit was reached. */
+export interface UsageLimit {
+  /** What the provider or engine said. */
+  error: string;
+  code?: string;
+  /** When the limit resets (ms since the epoch), when known. */
+  resetAt?: number;
+  /** The turn had already started working (an engine is told to carry on rather than given the request again). */
+  midTurn?: boolean;
 }
 
 // ------------------------------------------------------------------ OpenAI access preference

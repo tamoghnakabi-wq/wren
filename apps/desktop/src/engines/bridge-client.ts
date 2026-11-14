@@ -19,6 +19,8 @@ export const ASK_WAIT_MS = 60 * 60_000;
 export const APPROVE_HELPER_MS = 55 * 60_000;
 /** The MCP helper's own deadline for an ask_agent call. */
 export const ASK_HELPER_MS = 62 * 60_000;
+/** The MCP helper's own deadline for showing a page (saving it takes seconds). */
+export const PAGE_HELPER_MS = 2 * 60_000;
 /**
  * Claude Code's limits on a call to Wren's MCP helper, total (`MCP_TOOL_TIMEOUT`) and without word from it
  * (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, 30 minutes for a stdio server by default in 2.1.322).

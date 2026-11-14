@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_MODEL_RETRIES, runLoop, type ApprovalState, type RunStore, type ToolContext, type ToolHost } from '../src/loop';
 import { toolCatalog } from '../src/tools';
-import { DEFAULT_TOOLS, ModelError, type ModelClient, type ModelRequest, type ModelTurn, type SessionEvent, type ToolCallData } from '../src/types';
+import { assessCall, needsApproval } from '../src/policy';
+import { checkPage, pageFileName } from '../src/pages';
+import { DEFAULT_TOOLS, ModelError, PAGE_MAX_BYTES, type ModelClient, type ModelRequest, type ModelTurn, type SessionEvent, type ToolCallData } from '../src/types';
 import { buildTurns } from '../src/transcript';
 
 class MemStore implements RunStore {
@@ -522,5 +524,119 @@ describe('agent loop', () => {
     const last = await base(store, new Failing(), new FakeHost(), { sleep, modelRetries: MAX_MODEL_RETRIES - 1 });
     expect(last.kind).toBe('failed');
     expect(last.kind === 'failed' && last.error).toMatch(/kept failing/);
+  });
+});
+
+describe('usage limits (resume after the reset)', () => {
+  class Limited implements ModelClient {
+    label = 'limited';
+    constructor(private resetAt?: number) {}
+    async stream(): Promise<ModelTurn> {
+      const e = new ModelError('You have hit your usage limit.', 429, 'usage_limit_reached', false);
+      if (this.resetAt) e.resetAt = this.resetAt;
+      throw e;
+    }
+  }
+
+  it("pauses with the limit and its reset instead of failing", async () => {
+    const store = new MemStore();
+    await store.userSays('hello');
+    const out = await base(store, new Limited(1_900_000_000_000), new FakeHost());
+    expect(out).toMatchObject({ kind: 'paused', limit: { code: 'usage_limit_reached', resetAt: 1_900_000_000_000, midTurn: false } });
+    expect(out.kind === 'paused' && out.limit?.error).toMatch(/usage limit/);
+  });
+
+  it('says the turn was cut short when steps were done in this tick', async () => {
+    const store = new MemStore();
+    await store.userSays('list files');
+    let n = 0;
+    const model: ModelClient = {
+      label: 'then-limited',
+      async stream(req, on) {
+        if (n++ === 0) return new ScriptModel([{ calls: [{ name: 'computer.list_files', args: { path: '/workspace' } }] }]).stream(req, on);
+        throw new ModelError('limit', 429, 'subscription_sharing_usage_limit_exceeded', false);
+      },
+    };
+    const out = await base(store, model, new FakeHost());
+    expect(out).toMatchObject({ kind: 'paused', limit: { midTurn: true } });
+    expect(out.kind === 'paused' && out.limit?.resetAt).toBeUndefined();
+  });
+
+  it('still fails on other errors that are not retried', async () => {
+    const store = new MemStore();
+    await store.userSays('hello');
+    const model: ModelClient = {
+      label: 'bad',
+      async stream() {
+        throw new ModelError('bad key', 401, 'invalid_api_key', false);
+      },
+    };
+    expect((await base(store, model, new FakeHost())).kind).toBe('failed');
+  });
+});
+
+describe('task.show_page', () => {
+  class PageStore extends MemStore {
+    pages: { title: string; html: string }[] = [];
+    async savePage(p: { title: string; html: string }) {
+      this.pages.push(p);
+      return { id: '11111111-2222-3333-4444-555555555555', name: `${p.title}.html` };
+    }
+  }
+
+  it('keeps the page as a file and the step only its size', async () => {
+    const store = new PageStore();
+    await store.userSays('chart it');
+    const html = `<!doctype html><title>x</title><body>${'<p>row</p>'.repeat(300)}</body>`;
+    const model = new ScriptModel([{ calls: [{ name: 'task.show_page', args: { title: '  Sales\nby month ', html } }] }, { text: 'Here it is.' }]);
+    const host = new FakeHost();
+    const out = await base(store, model, host);
+    expect(out.kind).toBe('completed');
+    expect(host.ran).toEqual([]); // a built-in: never sent to the computer
+    expect(store.pages).toEqual([{ title: 'Sales by month', html }]);
+    const step = store.events_.find((e) => e.type === 'tool')!;
+    const d = step.data as ToolCallData;
+    expect(step.status).toBe('done');
+    expect(d.result).toMatchObject({ artifacts: [{ id: '11111111-2222-3333-4444-555555555555' }], meta: { page: '11111111-2222-3333-4444-555555555555' } });
+    expect(String(d.args.html)).toMatch(/^\[3 KB of HTML, shown as page 1111/);
+    expect(JSON.stringify(d)).not.toContain('<p>row</p>');
+  });
+
+  it('refuses an empty or oversized page, and says why', async () => {
+    for (const [html, why] of [
+      ['   ', /empty/],
+      ['x'.repeat(PAGE_MAX_BYTES + 1), /at most 512 KB/],
+    ] as const) {
+      const store = new PageStore();
+      await store.userSays('show');
+      const model = new ScriptModel([{ calls: [{ name: 'task.show_page', args: { title: 't', html } }] }, { text: 'ok' }]);
+      await base(store, model, new FakeHost());
+      const step = store.events_.find((e) => e.type === 'tool')!;
+      expect(step.status).toBe('error');
+      expect((step.data as ToolCallData).result?.output).toMatch(why);
+      expect(store.pages).toEqual([]);
+    }
+  });
+
+  it('tells the agent when the store keeps no pages', async () => {
+    const store = new MemStore();
+    await store.userSays('show');
+    const model = new ScriptModel([{ calls: [{ name: 'task.show_page', args: { title: 't', html: '<p>hi</p>' } }] }, { text: 'ok' }]);
+    await base(store, model, new FakeHost());
+    expect((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).result?.output).toMatch(/can’t be shown here/);
+  });
+
+  it('is offered to every agent and needs no approval', () => {
+    const t = toolCatalog({ runtime: 'cloud', tools: { ...DEFAULT_TOOLS, computer: false, browser: false, web: false, memory: false, notify: false }, githubConnected: false });
+    expect(t.some((x) => x.namespace === 'task' && x.name === 'show_page')).toBe(true);
+    const risk = assessCall('task.show_page', { title: 't', html: '<p>' }, 'cloud', {}).risk;
+    expect(risk).toBe('low');
+    expect(needsApproval(risk, 'careful')).toBe(false);
+  });
+
+  it('names its file after the title', () => {
+    expect(pageFileName('Q3: sales / costs?')).toBe('Q3 sales costs.html');
+    expect(pageFileName('***')).toBe('page.html');
+    expect(checkPage({ html: '<p>' })).toEqual({ title: 'Page', html: '<p>' });
   });
 });

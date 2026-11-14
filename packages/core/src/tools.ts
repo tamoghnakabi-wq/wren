@@ -216,6 +216,10 @@ export function askAgentTool(agents: AskableAgent[]): ToolSpec {
   };
 }
 
+/** task.show_page, as the agent loop and Claude Code (through Wren's MCP helper) describe it. */
+export const SHOW_PAGE_DESCRIPTION =
+  "Show the user a page you made, inside this task: one self-contained HTML document for a chart, table, diagram, dashboard, timeline, comparison or small interactive tool, when seeing it beats reading it. The page runs in a sandbox with no network access, so put all its data in it. Scripts may come from cdn.jsdelivr.net, cdnjs.cloudflare.com or unpkg.com (pin exact versions) and fonts from Google Fonts; images must be inline (data: URIs or SVG). Match the app with the CSS variables --wren-bg, --wren-surface, --wren-text, --wren-muted, --wren-border, --wren-accent, --wren-success, --wren-warning and --wren-danger (set for the user's light or dark theme), and lay it out for any width from a phone to a wide screen. At most 500 KB. Still say in your reply what the page shows.";
+
 const taskTools = (notify: boolean, askable?: AskableAgent[]): ToolSpec[] => [
   {
     namespace: 'task',
@@ -236,6 +240,12 @@ const taskTools = (notify: boolean, askable?: AskableAgent[]): ToolSpec[] => [
     name: 'ask_user',
     description: 'Pause and ask the user a question when you genuinely need a decision or information. The run resumes when they answer.',
     parameters: obj({ question: str('The question.') }, ['question']),
+  },
+  {
+    namespace: 'task',
+    name: 'show_page',
+    description: SHOW_PAGE_DESCRIPTION,
+    parameters: obj({ title: str('A short title for the page.'), html: str('The complete HTML document.') }, ['title', 'html']),
   },
   ...(notify
     ? [
@@ -332,6 +342,8 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
       return `Ask: ${clip(a('question'))}`;
     case 'task.notify':
       return `Notify: ${clip(a('title'))}`;
+    case 'task.show_page':
+      return `Show page: ${clip(a('title'))}`;
     case 'task.ask_agent':
       return `Ask ${clip(a('agent'), 40) || 'another agent'}: ${clip(a('question'))}`;
     case 'screen.capture':

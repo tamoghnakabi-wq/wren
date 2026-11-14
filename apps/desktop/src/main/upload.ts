@@ -17,7 +17,7 @@ export interface Saved {
 /** `put` of @vercel/blob/client (a stand-in in tests). */
 export type PutFile = (pathname: string, body: Buffer, options: { access: 'private'; token: string }) => Promise<unknown>;
 
-export async function uploadArtifact(u: { runId: string; lease: string; data: Buffer; name: string; kind: 'file' | 'screenshot' }, put?: PutFile): Promise<Saved> {
+export async function uploadArtifact(u: { runId: string; lease: string; data: Buffer; name: string; kind: 'file' | 'screenshot' | 'page' }, put?: PutFile): Promise<Saved> {
   if (u.data.length <= INLINE_UPLOAD_BYTES) {
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(u.data)]), u.name);

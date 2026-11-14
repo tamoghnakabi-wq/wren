@@ -5,7 +5,7 @@ export interface Profile {
   display_name: string | null;
   email: string | null;
   timezone: string;
-  settings: { openaiAccess?: "chatgpt" | "api"; openaiAllowFallback?: boolean; chatgptWelcomed?: boolean; tzChecked?: boolean; notifyOnComplete?: boolean; notifyOnApproval?: boolean };
+  settings: { openaiAccess?: "chatgpt" | "api"; openaiAllowFallback?: boolean; chatgptWelcomed?: boolean; tzChecked?: boolean; notifyOnComplete?: boolean; notifyOnApproval?: boolean; resumeAfterLimits?: boolean };
   onboarded_at: string | null;
 }
 
@@ -58,6 +58,8 @@ export interface Run {
   usage: { input_tokens?: number; output_tokens?: number; cached_tokens?: number; requests?: number };
   cancel_requested: boolean;
   pause_requested: boolean;
+  /** Paused by a usage limit: when it carries on by itself (null: it waits for the user). */
+  wake_at?: string | null;
   /** A cloud run ended, but its commands and browser tab aren't confirmed stopped yet (the cron retries). */
   cleanup_pending?: boolean;
   started_at: string | null;
@@ -99,7 +101,7 @@ export interface Artifact {
   name: string;
   mime: string;
   size: number;
-  kind: 'file' | 'screenshot' | 'upload';
+  kind: 'file' | 'screenshot' | 'upload' | 'page';
   source: string;
   created_at: string;
 }

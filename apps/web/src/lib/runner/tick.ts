@@ -174,8 +174,9 @@ export async function runTick(runId: string): Promise<string> {
   // The computers stop only when this run really ended (not when finishing queued it again for a
   // late message, or another worker owns it now) and no run of this agent, this one included,
   // is still active as recorded now.
+  // A usage limit's pause counts as an end here: the task waits for the reset, maybe hours.
   const finished = await finishRun(runId, outcome, lease);
-  if (finished === 'ended') await stopComputersIfIdle(agent.id, host);
+  if (finished === 'ended' || (finished === 'paused' && outcome.kind === 'paused' && outcome.limit)) await stopComputersIfIdle(agent.id, host);
   return outcome.kind;
 }
 

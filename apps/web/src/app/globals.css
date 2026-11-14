@@ -413,6 +413,25 @@ dialog[open].dialog-in::backdrop {
 .fade-in {
   animation: wren-fade 0.2s ease-out both;
 }
+/* A message opened from search: a ring that fades, so the eye finds it. */
+@keyframes wren-search-hit {
+  from {
+    box-shadow: 0 0 0 2px var(--color-text);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+.search-hit {
+  border-radius: 16px;
+  animation: wren-search-hit 2.4s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .search-hit {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--color-text);
+  }
+}
 
 /* The landing page's task replay (components/landing/hero-run.tsx). */
 @keyframes hero-step {

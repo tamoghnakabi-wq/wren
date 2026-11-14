@@ -16,7 +16,7 @@ export interface ArtifactInput {
   name: string;
   mime: string;
   data: Buffer | Uint8Array;
-  kind?: 'file' | 'screenshot' | 'upload';
+  kind?: 'file' | 'screenshot' | 'upload' | 'page';
   source?: 'cloud' | 'desktop' | 'user';
   /** For files a run produces: saved only while this lease still holds the run. */
   leaseId?: string;

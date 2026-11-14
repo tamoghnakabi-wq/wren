@@ -6,7 +6,7 @@ import { dataDir } from '../main/config';
 import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
-import { describeCall } from '@wren/core';
+import { checkPage, describeCall } from '@wren/core';
 import { appPaths, askThroughWren, claudeSupportsRestricted, cliHelpKnown, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 import { engineProgram } from './program';
 
@@ -17,6 +17,8 @@ import { engineProgram } from './program';
 
 /** Wren's ask_agent tool as Claude Code names it. */
 export const ASK_TOOL = 'mcp__wren__ask_agent';
+/** Wren's show_page tool as Claude Code names it. */
+export const PAGE_TOOL = 'mcp__wren__show_page';
 
 const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: string; args: Record<string, unknown>; paths: string[] }> = {
   Bash: (i) => ({ name: 'computer.shell', args: { command: String(i.command ?? '') }, paths: [] }),
@@ -31,6 +33,8 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
   WebSearch: (i) => ({ name: 'web.fetch', args: { url: `search: ${String(i.query ?? '')}` }, paths: [] }),
   // Wren's own tool (its MCP helper): asking another of the user's agents, shown like the agent loop's.
   [ASK_TOOL]: (i) => ({ name: 'task.ask_agent', args: { agent: String(i.agent ?? ''), question: String(i.question ?? '') }, paths: [] }),
+  // Showing a page: the step keeps the title and the page's size; the page itself is kept as a file.
+  [PAGE_TOOL]: (i) => ({ name: 'task.show_page', args: { title: String(i.title ?? '').slice(0, 120), html: `[${Math.ceil(String(i.html ?? '').length / 1024)} KB of HTML]` }, paths: [] }),
 };
 
 /**
@@ -99,6 +103,8 @@ function titleFor(name: string, input: Record<string, unknown>): string {
       return `Delegate: ${String(input.description ?? '').slice(0, 80)}`;
     case ASK_TOOL:
       return describeCall('task.ask_agent', { agent: String(input.agent ?? ''), question: String(input.question ?? '') });
+    case PAGE_TOOL:
+      return describeCall('task.show_page', { title: String(input.title ?? '') });
     default:
       return name;
   }
@@ -167,17 +173,32 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   const writer = new TimelineWriter(run.store, 'claude-code', run.model === 'default' ? 'Claude Code' : run.model);
   run.store.usageSource = 'claude-code';
 
-  // Local endpoint the MCP approval tool (and ask_agent) calls back into.
+  // Local endpoint the MCP approval tool (and ask_agent and show_page) calls back into.
   const asked = new Map<string, number>();
+  // Pages kept in this run: a show_page result names one, and only these are shown as pages in the timeline.
+  const shownPages = new Set<string>();
   const bridge = await startApprovalBridge(
     async ({ tool_name, input, tool_use_id, signal }) => {
       // Wren's own ask_agent needs no approval: the server decides which agents this one may ask.
       if (tool_name === ASK_TOOL) return run.askable?.length ? { allow: true } : { allow: false, message: 'Asking other agents isn’t available here.' };
+      // Showing a page needs none either: it runs sandboxed in Wren, with nothing of the user's.
+      if (tool_name === PAGE_TOOL) return { allow: true };
       const m = mapTool(tool_name, input);
       return decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders, signal);
     },
     undefined,
     run.askable?.length ? (req) => askThroughWren(run, writer, req, asked) : undefined,
+    async ({ title, html }) => {
+      const page = checkPage({ title, html });
+      if ('error' in page) return { text: page.error, isError: true };
+      try {
+        const a = await run.store.savePage(page);
+        shownPages.add(a.id);
+        return { text: `Shown to the user as the page "${page.title}" (page ${a.id}).` };
+      } catch (e) {
+        return { text: `The page couldn’t be kept: ${(e as Error).message}`, isError: true };
+      }
+    },
   );
 
   // Everything acquired from here on (the bridge, the private folder, the CLI and its Stop handler) is
@@ -266,6 +287,12 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     let turns = 0;
     let savedSession = run.resumeId;
     let turnText = false; // this turn's answer has been written (streamed)
+    // The plan's usage limit: Claude Code reports it as a rejected rate_limit_event (with when it resets) and
+    // an assistant message marked `error: 'rate_limit'` whose text is the CLI's notice, not an answer.
+    let limitHit = false;
+    let limitText = '';
+    let limitReset: number | undefined;
+    let progressed = false; // a tool ran or an answer was written in this run, so the session holds the prompt
     let buf = '';
     let chain = Promise.resolve();
     const handle = async (line: string) => {
@@ -282,15 +309,27 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
           savedSession = ev.session_id;
           await run.saveResumeId(ev.session_id);
         }
+      } else if (type === 'rate_limit_event') {
+        const info = ev.rate_limit_info as { status?: string; resetsAt?: unknown } | undefined;
+        if (info?.status === 'rejected') {
+          const at = Number(info.resetsAt);
+          if (Number.isFinite(at) && at > 0) limitReset = at < 1e12 ? at * 1000 : at; // seconds (as sent) or ms
+        }
       } else if (type === 'stream_event') {
         const e = ev.event as { type?: string; delta?: { type?: string; text?: string } };
         if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && !ev.parent_tool_use_id && e.delta.text) {
           turnText = true;
+          progressed = true;
           await writer.textDelta(e.delta.text);
         }
+      } else if (type === 'assistant' && !ev.parent_tool_use_id && ev.error === 'rate_limit') {
+        limitHit = true;
+        const content = ((ev.message as { content?: unknown[] })?.content ?? []) as { type: string; text?: string }[];
+        limitText = content.filter((b) => b.type === 'text' && b.text).map((b) => b.text).join(' ').trim().slice(0, 300);
       } else if (type === 'assistant' && !ev.parent_tool_use_id) {
         const content = ((ev.message as { content?: unknown[] })?.content ?? []) as { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[];
         for (const b of content) {
+          if (b.type === 'tool_use' || (b.type === 'text' && b.text)) progressed = true;
           if (b.type === 'text' && b.text && !writer.currentText) {
             turnText = true;
             await writer.textDelta(b.text);
@@ -310,7 +349,8 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
               await run.store.append('plan', { items }, 'done');
             }
             const m = mapTool(b.name, b.input ?? {});
-            await writer.toolStart(b.id, m.name, b.input ?? {}, titleFor(b.name, b.input ?? {}));
+            // A page's step names its size only: the page itself is kept as a file, never in the timeline.
+            await writer.toolStart(b.id, m.name, b.name === PAGE_TOOL ? m.args : (b.input ?? {}), titleFor(b.name, b.input ?? {}));
           }
         }
       } else if (type === 'user') {
@@ -325,7 +365,9 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
             if (!b.is_error && applyPlanResult(todo, call, ev.tool_use_result as PlanResult | undefined, resultText(b.content))) await showPlan();
             continue;
           }
-          await writer.toolEnd(b.tool_use_id, resultText(b.content), !!b.is_error);
+          const text = resultText(b.content);
+          const page = !b.is_error && writer.tools.get(b.tool_use_id)?.data.name === 'task.show_page' ? /\(page ([0-9a-f-]{36})\)/.exec(text)?.[1] : undefined;
+          await writer.toolEnd(b.tool_use_id, text, !!b.is_error, page && shownPages.has(page) ? { page } : undefined);
         }
       } else if (type === 'result') {
         result = ev as typeof result;
@@ -333,7 +375,7 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
         turns += result?.num_turns ?? 0;
         // Each turn's answer is its own message (a sub-agent reporting back starts another turn); one
         // that wasn't streamed comes from the result.
-        const answer = result && !result.is_error && result.subtype === 'success' && !turnText ? (result.result ?? '') : undefined;
+        const answer = result && !result.is_error && result.subtype === 'success' && !turnText && !limitHit ? (result.result ?? '') : undefined;
         await writer.endMessage(answer);
         turnText = false;
         proc.stdin.end();
@@ -360,6 +402,12 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     if (run.signal.aborted) {
       await writer.endMessage();
       return { kind: 'cancelled', steps: turns };
+    }
+    // A rejected limit with a turn that still succeeded was carried by extra usage: only an unfinished turn pauses.
+    if (limitHit || (limitReset && !(r && !r.is_error && r.subtype === 'success'))) {
+      await writer.endMessage();
+      const error = `Claude Code: ${limitText || 'your Claude plan’s usage limit was reached.'}`.slice(0, 1500);
+      return { kind: 'paused', steps: turns, limit: { error, code: 'claude_usage_limit', ...(limitReset ? { resetAt: limitReset } : {}), midTurn: progressed } };
     }
     if (r && !r.is_error && r.subtype === 'success') {
       await writer.endMessage();

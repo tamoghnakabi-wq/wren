@@ -368,11 +368,11 @@ export class TimelineWriter {
     await this.store.update(t.id, { status, data: t.data });
   }
 
-  async toolEnd(callId: string, output: string, isError: boolean) {
+  async toolEnd(callId: string, output: string, isError: boolean, meta?: Record<string, unknown>) {
     const t = this.tools.get(callId);
     // A denied or withdrawn step has already ended: the engine's refusal mustn't turn it into a failure.
     if (!t || t.status === 'denied' || t.status === 'cancelled') return;
-    t.data = { ...t.data, endedAt: Date.now(), result: { output: output.slice(0, 30000), isError } };
+    t.data = { ...t.data, endedAt: Date.now(), result: { output: output.slice(0, 30000), isError, ...(meta ? { meta } : {}) } };
     await this.store.update(t.id, { status: isError ? 'error' : 'done', data: t.data });
   }
 
@@ -467,6 +467,8 @@ export async function decide(
 export type BridgeHandler = (req: { tool_name: string; input: Record<string, unknown>; tool_use_id?: string; signal: AbortSignal }) => Promise<{ allow: boolean; message?: string }>;
 /** An engine's ask_agent call (through Wren's MCP helper): the answer, or why there is none. */
 export type AskHandler = (req: { agent: string; question: string; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
+/** An engine showing the user a page it made (Claude Code's show_page tool): what to tell the engine. */
+export type PageHandler = (req: { title: unknown; html: unknown; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
 
 export { ASK_WAIT_MS };
 
@@ -541,7 +543,14 @@ export function pause(ms: number, ...signals: AbortSignal[]): Promise<void> {
 /** Localhost endpoint that engine permission hooks call back into (per-run bearer token). */
 /** Requests being decided at once: an engine runs several tools in parallel, background sub-agents too. */
 const MAX_OPEN_PROMPTS = 32;
+/** A request's most (W-129). */
 const MAX_PROMPT_BYTES = 512 * 1024;
+/**
+ * A page's (show_page, and Claude Code's permission prompt for it, `PAGE_TOOL` in claude-code.ts): up to
+ * 512 KB of HTML, which JSON escaping can make larger.
+ */
+const MAX_PAGE_BYTES = 1536 * 1024;
+const PAGE_PROMPT_TOOL = 'mcp__wren__show_page';
 
 /**
  * The local endpoint an engine's permission prompts call (W-121, W-129). A request holds its place until
@@ -551,7 +560,7 @@ const MAX_PROMPT_BYTES = 512 * 1024;
 /** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks (its default is 30 s). */
 const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 5_000 };
 
-export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL, onAsk?: AskHandler): Promise<{ url: string; token: string; close: () => void }> {
+export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL, onAsk?: AskHandler, onPage?: PageHandler): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
   // Every admitted request, from admission (still sending its body) until its decision ends (W-135).
@@ -602,7 +611,7 @@ export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRI
     let bytes = 0;
     req.on('data', (c: Buffer) => {
       bytes += c.length;
-      if (bytes > MAX_PROMPT_BYTES) {
+      if (bytes > MAX_PAGE_BYTES) {
         res.statusCode = 413;
         res.end(JSON.stringify({ behavior: 'deny', message: 'Permission request too large.' }));
         req.destroy();
@@ -616,6 +625,18 @@ export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRI
       res.setHeader('content-type', 'application/json');
       try {
         const r = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const isPage = !!r && ((typeof r.page === 'object' && !!r.page) || r.tool_name === PAGE_PROMPT_TOOL);
+        if (bytes > MAX_PROMPT_BYTES && !isPage) {
+          res.statusCode = 413;
+          res.end(JSON.stringify({ behavior: 'deny', message: 'Permission request too large.' }));
+          return;
+        }
+        if (r && typeof r.page === 'object' && r.page) {
+          // The helper's show_page tool: the page is kept and shown in the task.
+          const out = onPage && !gone.signal.aborted ? await onPage({ title: r.page.title, html: r.page.html, signal: gone.signal }) : { text: 'Pages can’t be shown here.', isError: true };
+          res.end(JSON.stringify(out));
+          return;
+        }
         if (r && typeof r.ask === 'object' && r.ask) {
           // The helper's ask_agent tool: answered with the other agent's answer (or why there is none).
           const out = onAsk && !gone.signal.aborted ? await onAsk({ agent: String(r.ask.agent ?? ''), question: String(r.ask.question ?? ''), signal: gone.signal }) : { text: 'Asking other agents isn’t available here.', isError: true };
