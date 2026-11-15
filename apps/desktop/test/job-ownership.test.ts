@@ -27,4 +27,18 @@ describe("one task's shell jobs (W-186)", () => {
     const own = await mine.execute('computer.shell_status', { job_id: id, wait_sec: 5 }, ctx);
     expect((own as { output: string }).output).toMatch(/secret-output/);
   }, 30_000);
+
+  // The fix review (0.1.50): a task stops its own server without kill (high), and only its own.
+  it('can be stopped by the task that started it, with everything it started, and by no other', async () => {
+    const mine = new LocalHost(policy, 'run-c', 'lease-c');
+    const other = new LocalHost(policy, 'run-d', 'lease-d');
+    const started = await mine.execute('computer.shell', { command: 'sleep 300 & sleep 300; echo never', background: true }, ctx);
+    const id = (started as { meta?: { job?: string } }).meta?.job;
+    expect(await other.execute('computer.shell_stop', { job_id: id }, ctx)).toMatchObject({ isError: true, output: 'Unknown or finished job id.' });
+    expect((await mine.execute('computer.shell_status', { job_id: id }, ctx)) as { output: string }).toMatchObject({ output: expect.stringMatching(/still running/) });
+    const stopped = await mine.execute('computer.shell_stop', { job_id: id }, ctx);
+    expect(stopped).toMatchObject({ output: expect.stringMatching(/^Stopped job/) });
+    expect((stopped as { isError?: boolean }).isError).toBeFalsy();
+    expect(await mine.execute('computer.shell_status', { job_id: id }, ctx)).toMatchObject({ isError: true });
+  }, 30_000);
 });

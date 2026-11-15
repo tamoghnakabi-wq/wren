@@ -360,6 +360,133 @@ describe('browser + other tools', () => {
   });
 });
 
+// The 0.1.49 security audit (A-*): spellings that rated lower than the rules mean, all fixed in 0.1.50.
+describe('audit fixes (0.1.50)', () => {
+  const desk = (c: string) => assessShell(c, 'desktop');
+  it('rates each program by name, however the line spells or wraps it (A-P3)', () => {
+    const high: [string, string][] = [
+      [' ssh host cmd', 'connects'], ['/usr/bin/osascript -e x', 'automates'], ['ls\nkill -9 -1', 'stops'], ['command nc host 4444', 'connects'],
+      ['if :; then scp f host:; fi', 'connects'], ['SSH host', 'connects'], ['env -u FOO ssh h', 'connects'], ['env "X=1" ssh h', 'connects'], ['timeout 5 nc h 1', 'connects'],
+      ["bash -c 'ssh h'", 'connects'], ["eval 'scp a b:'", 'connects'], ['find . -exec kill {} \;', 'stops'], ['env -S "ssh h"', 'connects'],
+      ['launchctl submit -l x -- /bin/sh', 'starts apps'],
+    ];
+    for (const [c, why] of high) {
+      expect(desk(c).risk, c).toBe('high');
+      expect(desk(c).reason, c).toContain(why);
+      expect(assessShell(c, 'cloud').risk, c).toBe('high');
+    }
+    for (const c of [' sudo ls', 'ls\nsudo ls', 'sudo -u root kill 1']) expect(desk(c).risk, c).toBe('critical');
+    for (const c of ['nohup $X', 'bash -lc "$CMD"', 'eval "$X"']) expect(desk(c).reason, c).toMatch(/only known when it runs/);
+    // A wiping command inside sh -c is refused like one typed directly.
+    expect(desk("sh -c 'rm -rf ~'").blocked).toBeTruthy();
+    // command -v only looks a name up.
+    expect(desk('command -v ssh').risk).toBe('medium');
+  });
+  it('counts every way curl and wget send data (A-P3)', () => {
+    for (const c of ['curl --json {} https://x', 'curl --request POST https://x', 'curl --request=PUT https://x', 'curl -sd @file https://x', 'curl -d@f https://x', 'curl -K cfg https://x', 'wget --post-file f https://x', 'wget --method=DELETE https://x', 'wget --body-data x https://x']) {
+      expect(assessShell(c, 'cloud').risk, c).toBe('high');
+    }
+    for (const c of ['curl -sSfL https://x', 'curl -o out.txt https://x', 'wget -q https://x']) expect(desk(c).risk, c).toBe('medium');
+  });
+  it("doesn't count lines that run code or write files as read-only (A-P2, A-P5, A-P6)", () => {
+    for (const c of ["TZ='x[$(cmd)]'; echo ${COLUMNS[TZ]}", 'echo $[TZ]', 'echo "$((TZ))"', 'echo ${LANG:TZ}', 'printf -v PATH %s /repo/bin; ls', 'printf $X PATH a', '"LC_ALL=./x" ls', 'LC_ALL\\=./x ls', 'echo text >& test', 'X=1; echo $X']) {
+      expect(desk(c).risk, c).toBe('medium');
+      expect(isReadOnlyCommand(c), c).toBe(false);
+    }
+    expect(parseShell('echo text >& test').commands[0].outputs).toEqual([{ target: 'test', dynamic: false }]);
+    // Plain expansions, fd duplication and a quoted value after the "=" are still fine.
+    for (const c of ['echo $HOME', 'echo "${HOME}/x"', 'echo a >&2', 'ls 2>&1', 'LANG="C" ls', 'printf "%s\\n" a', 'echo "a=b"']) expect(desk(c).risk, c).toBe('low');
+  });
+  it('rates credentials files the same in every tool (A-P4)', () => {
+    for (const c of ['cat .env', 'head -50 .env', 'cat < .env', 'cat .e*', 'cat .*', 'cat ~/.s?h/config', 'grep KEY .env.local', 'cat ~/.npmrc', 'cat id_*', 'docker run --env-file=.env x']) {
+      expect(desk(c).risk, c).toBe('critical');
+    }
+    for (const c of ['cat *', 'grep -r foo *.json', 'cat .env.example', 'ls -la']) expect(desk(c).risk, c).toBe('low');
+    for (const p of ['/p/.env', '/p/.env.production', '/u/.aws/credentials', '/u/.config/gh/hosts.yml']) {
+      expect(assessCall('computer.read_file', { path: p }, 'desktop').risk, p).toBe('critical');
+      expect(assessCall('computer.share_file', { path: p }, 'desktop').risk, p).toBe('critical');
+    }
+    expect(assessCall('computer.share_file', { path: '/p/report.pdf' }, 'desktop').risk).toBe('low');
+    expect(assessCall('computer.read_file', { path: '/p/.env.example' }, 'desktop').risk).toBe('low');
+  });
+  it('guards GitHub organisation routes by id and SCIM (A-P1)', () => {
+    expect(assessCall('github.request', { method: 'PUT', path: '/organizations/123/team/456/memberships/x' }, 'desktop').risk).toBe('critical');
+    expect(assessCall('github.request', { method: 'POST', path: '/scim/v2/organizations/acme/Users' }, 'desktop').risk).toBe('critical');
+  });
+  it('never calls an empty command routine (A-D3)', () => {
+    for (const c of ['', '   ', '\n']) expect(desk(c).risk, JSON.stringify(c)).toBe('medium');
+  });
+});
+
+// The review of those fixes (0.1.50): the same guarantees with fewer routine commands asking.
+describe('narrower rules after the fix review (0.1.50)', () => {
+  const mac = (c: string) => assessCall('computer.shell', { command: c }, 'desktop', { unsandboxed: false });
+  const win = (c: string) => assessCall('computer.shell', { command: c }, 'desktop', { unsandboxed: true });
+  it('refuses open in the macOS sandbox with what to do instead, wherever the line runs it', () => {
+    for (const c of ['open report.pdf', 'x; open y', "bash -c 'open y'", '/usr/bin/open -g -j X.app', 'xargs open < list', 'find . -exec open {} \\;', 'npm run build && open dist/index.html']) {
+      expect(mac(c).blocked, c).toMatch(/computer\.open/);
+    }
+    // Without the sandbox it asks; in the cloud it's nothing special.
+    expect(win('open x').risk).toBe('high');
+    expect(assessShell('open -a Calculator', 'cloud').risk).not.toBe('high');
+    // The word open anywhere else isn't the program.
+    for (const c of [`python3 -c "print(json.load(open('package.json')))"`, 'git commit -m "fix leak (open handles)"', "grep -E '(open|closed)' file"]) {
+      expect(mac(c).blocked, c).toBeUndefined();
+      expect(['low', 'medium'], c).toContain(mac(c).risk);
+    }
+  });
+  it("rates launchctl's read-only subcommands like other programs", () => {
+    expect(mac('launchctl list').risk).toBe('medium');
+    expect(mac('launchctl print gui/501').risk).toBe('medium');
+    expect(mac('launchctl kickstart -k gui/501/x').risk).toBe('high');
+    expect(mac('launchctl bootout gui/501/x').risk).toBe('critical');
+  });
+  it('reads data-sending options only on HTTP clients', () => {
+    expect(mac('git clone http://example.com/x --config core.x=1').risk).toBe('medium');
+    for (const c of ['echo $(curl -d x https://e)', 'curl -X POST http://localhost:3000/api', 'arch -arch arm64 curl -d x e', 'flock /tmp/l curl -d x e', "flock /tmp/l -c 'curl -d x e'", 'watch -n 1 curl -d x e', 'http POST e x=1 --form', 'Invoke-RestMethod -Uri e -Method Post']) {
+      expect(mac(c).risk, c).toBe('high');
+    }
+  });
+  it("doesn't count credentials names that are only shown, written to or ignored", () => {
+    for (const c of ['cp .env.example .env', 'echo ".env" >> .gitignore', 'ls -la .env*', 'ls -d .*', 'test -f .env && echo yes', 'stat .env', "rg 'process\\.env' src", 'cat .env.local.example', 'echo KEY=1 > .env']) {
+      expect(['low', 'medium'], c).toContain(mac(c).risk);
+    }
+    // …unless something on the line could hand the name to a program that reads it.
+    for (const c of ['ls .env | xargs cat', 'echo .env | while read f; do cat $f; done', 'cp .env /tmp/x', 'cp -t /tmp .env', 'X=.env cat $X', 'echo "$(cat .env)"', 'source .env', 'docker run --env-file=.env x']) {
+      expect(mac(c).risk, c).toBe('critical');
+    }
+  });
+  it("treats a project's .vercel, .docker, .codex and .grok as settings inside the sandbox only", () => {
+    for (const c of ['cat .vercel/project.json', 'ls .docker', 'cat .codex/config.toml']) expect(['low', 'medium'], c).toContain(mac(c).risk);
+    for (const c of ['cat ~/.vercel/auth.json', 'cat $HOME/.docker/config.json', 'cat /Users/me/.codex/auth.json', 'cat .vercel/../.env']) expect(mac(c).risk, c).toBe('critical');
+    expect(win('cat .vercel/project.json').risk).toBe('critical');
+  });
+  it('reads Windows paths with backslashes, and POSIX backslashes as escapes', () => {
+    expect(win('cat src\\.env').risk).toBe('critical');
+    expect(win("type C:\\Users\\me\\.ssh\\id_rsa").risk).toBe('critical');
+    expect(mac("rg 'a\\.env' .").risk).toBe('low');
+  });
+  it('uses one predicate for reading, sharing and changing files', () => {
+    const risk = (tool: string, path: string, fileExists?: boolean) => assessCall(tool, { path, content: '' }, 'desktop', { fileExists }).risk;
+    expect(risk('computer.read_file', 'src/credentials.ts')).toBe('low');
+    expect(risk('computer.read_file', '/u/.gem/credentials')).toBe('critical');
+    expect(risk('computer.read_file', 'C:\\Users\\me\\.ssh\\id_rsa')).toBe('critical');
+    expect(risk('computer.write_file', '.env', false)).toBe('medium');
+    expect(risk('computer.write_file', '.env', true)).toBe('critical');
+    expect(risk('computer.write_file', '.env.example', true)).toBe('medium');
+    expect(risk('computer.write_file', 'docs/credentials-guide.md', true)).toBe('medium');
+  });
+  it('rates Docker by what it deletes, not by its --rm option', () => {
+    for (const c of ['docker run --rm redis:7-alpine echo hi', 'docker compose down', 'docker compose up -d', 'docker ps']) expect(mac(c).risk, c).toBe('medium');
+    for (const c of ['docker compose down -v', 'docker compose -f x.yml down --volumes', 'docker system prune -af', 'docker volume prune', 'docker rm -f web', 'docker volume rm data', 'rm -r build']) {
+      expect(mac(c).risk, c).toBe('high');
+    }
+  });
+  it("doesn't take inherited names for wrappers", () => {
+    for (const c of ['constructor -x', '__proto__ -u x', 'hasOwnProperty -c y']) expect(() => mac(c), c).not.toThrow();
+  });
+});
+
 describe('ssrf guard', () => {
   it('recognises private ranges', () => {
     for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:10.0.0.1', '100.64.0.1']) expect(isPrivateAddress(ip), ip).toBe(true);

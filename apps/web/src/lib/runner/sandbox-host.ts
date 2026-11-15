@@ -314,6 +314,15 @@ export class SandboxHost implements ToolHost {
         return this.shell(s('command'), s('cwd'), Number(args.timeout_sec) || 120, !!args.background, ctx, resume);
       case 'computer.shell_status':
         return this.jobStatus(s('job_id'), Math.min(Number(args.wait_sec) || 0, 600), ctx);
+      case 'computer.shell_stop': {
+        // The agent's own VM (it could stop anything there with kill); the job's whole session goes.
+        const id = s('job_id');
+        if (!/^[a-f0-9-]{4,40}$/i.test(id)) return { output: 'Unknown job id.', isError: true };
+        await this.stopJob(id);
+        const st = await this.readJob(id, ctx);
+        if (st.alive) return { output: `Job ${id} was told to stop, but part of it is still running. Check again with computer.shell_status.\n${tail(st.log)}`, isError: true };
+        return { output: `Stopped job ${id} and everything it started.\n${tail(st.log)}` };
+      }
       case 'computer.read_file':
         return this.readFile(s('path'), Number(args.offset) || 1, Number(args.limit) || 400, ctx);
       case 'computer.write_file': {

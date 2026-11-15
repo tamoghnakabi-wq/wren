@@ -97,7 +97,7 @@ const dir = mkdtempSync(join(tmpdir(), 'wren-claude-test-'));
 const cliPath = join(dir, 'fake-claude.cjs');
 writeFileSync(cliPath, CLI);
 
-const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[], bridgesOpen: 0, spawnFails: false, onPage: undefined as undefined | ((r: { title: unknown; html: unknown; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>) }));
+const h = vi.hoisted(() => ({ log: [] as string[], plans: [] as unknown[], prompted: [] as string[], spawned: 0, args: [] as string[], settings: '', bridgesOpen: 0, spawnFails: false, onPage: undefined as undefined | ((r: { title: unknown; html: unknown; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>) }));
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
 // The CLI here is a stand-in script, not an installed program: which program Wren may start is tested on its own.
 vi.mock('../src/engines/program', () => ({ engineProgram: async () => ({ program: '/fake/claude' }) }));
@@ -142,6 +142,7 @@ vi.mock('../src/engines/common', () => {
       if (h.spawnFails) throw new Error('spawn failed');
       h.spawned++;
       h.args = args;
+      h.settings = (await import('node:fs')).readFileSync(args[args.indexOf('--settings') + 1], 'utf8');
       return spawn(process.execPath, [cliPath], { stdio: ['pipe', 'pipe', 'pipe'] });
     },
     appPaths: () => [],
@@ -150,6 +151,7 @@ vi.mock('../src/engines/common', () => {
   };
 });
 const { runClaudeCode } = await import('../src/engines/claude-code');
+const { assessCall } = await import('@wren/core');
 
 beforeEach(() => {
   h.log = [];
@@ -278,6 +280,40 @@ describe('Claude Code to-do list', () => {
       ],
     });
     expect(h.plans[0]).toEqual({ items: [{ id: '7', text: 'Earlier task', status: 'in_progress' }, { id: '1', text: 'Count lines', status: 'pending' }] });
+  });
+});
+
+// A-D6 (0.1.50): Claude Code runs commands it counts as read-only without asking Wren, so terminal access off
+// means no Bash tool at all (checked with the real CLI 2.1.325: Bash isn't offered, and `ls` can't run).
+describe('Claude Code with terminal access off', () => {
+  it('gets no Bash tool, and a deny rule for it besides; with it on, Bash is there', async () => {
+    await runClaudeCode(engineRun('hello', { runId: 'r-noshell', allow: { shell: false, browser: true, screen: true } }), () => true, '/dev/null');
+    const tools = h.args[h.args.indexOf('--tools') + 1].split(',');
+    expect(tools).not.toContain('Bash');
+    expect(tools).toContain('Read');
+    expect(JSON.parse(h.settings).permissions.deny).toContain('Bash');
+    await runClaudeCode(engineRun('hello', { runId: 'r-shell' }), () => true, '/dev/null');
+    expect(h.args[h.args.indexOf('--tools') + 1].split(',')).toContain('Bash');
+    expect(JSON.parse(h.settings).permissions.deny).not.toContain('Bash');
+  });
+  it('is told so, and where to show the user things instead', async () => {
+    await runClaudeCode(engineRun('hello', { runId: 'r-noshell2', allow: { shell: false, browser: true, screen: true } }), () => true, '/dev/null');
+    const prompt = h.args[h.args.indexOf('--append-system-prompt') + 1];
+    expect(prompt).toMatch(/no Bash tool/);
+    expect(prompt).toMatch(/mcp__wren__open/);
+  });
+});
+
+// The fix review (0.1.50): Claude Code's own Read opens a project's .env without asking (checked with 2.1.322);
+// ask rules send such reads to Wren's check, which rates them as read_file does.
+describe('Claude Code and credentials files', () => {
+  it('asks Wren before reading .env and similar files, not before a .env.example', async () => {
+    await runClaudeCode(engineRun('hello', { runId: 'r-ask' }), () => true, '/dev/null');
+    const ask: string[] = JSON.parse(h.settings).permissions.ask;
+    for (const r of ['Read(**/.env)', 'Read(**/.env.*)', 'Read(**/.npmrc)', 'Read(**/id_ed25519)']) expect(ask).toContain(r);
+    // The prompt then reaches Wren's own rating: the template is routine, the real file is critical.
+    expect(assessCall('computer.read_file', { path: '/p/.env.example' }, 'desktop').risk).toBe('low');
+    expect(assessCall('computer.read_file', { path: '/p/.env' }, 'desktop').risk).toBe('critical');
   });
 });
 

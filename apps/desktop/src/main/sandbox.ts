@@ -1,7 +1,8 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, unlinkSync, type Dirent } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { userPathDirs } from './shellenv';
 
 // macOS Seatbelt profiles (sandbox-exec) for everything an agent runs on this
@@ -87,6 +88,13 @@ const SECRETS = [
   'Library/Keychains', 'Library/Cookies', 'Library/Messages', 'Library/Mail', 'Library/Safari', 'Library/Application Support/Google/Chrome',
   'Library/Application Support/Firefox', 'Library/Application Support/com.vercel.cli',
 ];
+/** Where the same kinds of sign-ins live on Windows (no profile there: Wren's own checks are all there is, A-D4). */
+const WINDOWS_SECRETS = [
+  'AppData/Roaming/GitHub CLI', 'AppData/Roaming/Microsoft/Credentials', 'AppData/Local/Microsoft/Credentials', 'AppData/Roaming/Microsoft/Protect',
+  'AppData/Local/Google/Chrome/User Data', 'AppData/Local/Microsoft/Edge/User Data', 'AppData/Roaming/Mozilla/Firefox', 'AppData/Roaming/com.vercel.cli',
+  'AppData/Roaming/gcloud', 'AppData/Roaming/npm-cache/_cacache/index-v5', 'AppData/Roaming/NuGet/NuGet.Config',
+];
+const secretsHere = () => (process.platform === 'win32' ? [...SECRETS, ...WINDOWS_SECRETS] : SECRETS);
 /**
  * The CLIs' own state. Every other profile denies it. Grok Build runs inside its profile and may
  * use its state, except what would let a command change how Grok behaves later (hooks, settings,
@@ -287,8 +295,118 @@ export function enginePrivatePaths(engine: Engine, dataDir: string, home = homed
   const h = (p: string) => join(home, p);
   const own = new Set(ENGINE_STATE[engine].dirs.map(h));
   const others = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== engine).flatMap((e) => [...ENGINE_STATE[e].dirs, ...ENGINE_STATE[e].prefixes].map(h));
-  const paths = [dataDir, ...appDirs(), ...SECRETS.map(h).filter((p) => !own.has(p)), ...others];
+  const paths = [dataDir, ...appDirs(), ...secretsHere().map(h).filter((p) => !own.has(p)), ...others];
   return [...new Set(paths.flatMap((p) => [p, realpathOr(p)]))];
+}
+
+/**
+ * Every credential store and every engine's state (~/.ssh, ~/.aws, ~/.npmrc, ~/.config/gh, ~/.claude, ~/.grok…):
+ * what Wren's own file tools never read, write or list. The file helper's profile denies the same on macOS;
+ * on Windows this list is all there is (A-D4, 0.1.50).
+ */
+export function credentialStores(home = homedir()): string[] {
+  const h = (p: string) => join(home, p);
+  const all = [...secretsHere(), ...Object.values(ENGINE_STATE).flatMap((e) => [...e.dirs, ...e.prefixes])].map(h);
+  return [...new Set(all.flatMap((p) => [p, realpathOr(p)]))];
+}
+
+// ------------------------------------------------------------------ unix sockets
+//
+// A unix socket is a door into whatever program listens on it, and the program runs outside the profile:
+// Docker's (a container can mount the whole home folder), tmux's (`send-keys` runs commands), an editor's
+// or a browser's (open, run), Claude Code's own sessions. Commands may only connect to sockets in the allowed
+// folders, their own temp area and the default database sockets (the same servers answer on loopback TCP).
+// A path rule alone isn't enough: a command could move or hard-link another program's socket (or the folder
+// holding it) to where it may connect (tested), so those moves are refused too (0.1.50 review).
+
+/** Where agent commands' own temporary files and sockets go: each run gets a folder here as TMPDIR. */
+export function agentTempRoot(): string {
+  return join(realpathOr(tmpdir()), 'wren-a');
+}
+
+/**
+ * A run's own temp folder (its commands' TMPDIR and TMUX_TMPDIR). Short: a socket's path may be at most 104
+ * bytes on macOS, and this one is about 74, which leaves room for a tool's own folder and socket name.
+ */
+export function runTempDir(runId: string): string {
+  return join(agentTempRoot(), createHash('sha256').update(runId).digest('hex').slice(0, 10));
+}
+
+/**
+ * Make a run's temp folder, and the area itself if needed. Agents may write the temp folder, so whatever is at
+ * the area's name and isn't a real folder (a link somewhere else) is removed first; sockets are matched by
+ * their real path anyway, so a link could never widen what's reachable.
+ */
+export function makeRunTemp(runId: string): string {
+  const root = agentTempRoot();
+  try {
+    if (!lstatSync(root).isDirectory()) unlinkSync(root);
+  } catch {
+    // nothing there yet
+  }
+  const dir = runTempDir(runId);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+/** Remove a finished run's temp folder (best effort). */
+export function removeRunTemp(runId: string): void {
+  try {
+    rmSync(runTempDir(runId), { recursive: true, force: true, maxRetries: 2 });
+  } catch {
+    // left for the next start's clean-up
+  }
+}
+
+/** At start: whatever runs that ended without cleaning up left in the area. */
+export function clearAgentTemp(): void {
+  try {
+    rmSync(agentTempRoot(), { recursive: true, force: true, maxRetries: 2 });
+  } catch {
+    // best effort
+  }
+}
+
+/** Where other programs keep sockets: no command may connect there, except in the places below. */
+const SOCKET_ZONES = ['/Users', '/Volumes', '/private/tmp', '/private/var/folders', '/private/var/tmp'];
+/** The default PostgreSQL and MySQL sockets (the same servers answer on loopback TCP). */
+const DB_SOCKETS = [String.raw`(regex #"^/private/tmp/\.s\.PGSQL\.[0-9]+$")`, String.raw`(regex #"^/private/tmp/mysqlx?\.sock$")`];
+/**
+ * Folders well-known programs keep their sockets in, in the temp folders: tmux, Chromium and Electron apps'
+ * single-instance sockets, reverse-DNS app folders, editors' servers, Podman, X11. Covers ones made after a
+ * profile was built; `socketHolders` covers whatever exists when it's built.
+ */
+const SOCKET_FAMILIES = String.raw`(tmux-[0-9]+|cc-socks|scoped_dir[^/]*|\.com\.google\.Chrome\.[^/]*|\.org\.chromium\.[^/]*|com\.[^/]+\.[^/]+|t3[^/]*|nvim[^/]*|emacs[^/]*|vscode[^/]*|podman[^/]*|containers[^/]*|\.X11-unix|\.ICE-unix)`;
+
+let holders: { at: number; dirs: string[] } | undefined;
+/**
+ * The folders (from the temp folder down) that hold a socket of a program running now, at most three levels
+ * deep: none of them may be moved or removed from inside a profile, or the socket could be carried to where
+ * connecting is allowed. Read again at most every 5 s (a profile is built for every command).
+ */
+export function socketHolders(now = Date.now()): string[] {
+  if (holders && now - holders.at < 5000) return holders.dirs;
+  const area = agentTempRoot();
+  const out = new Set<string>();
+  let budget = 20_000;
+  const walk = (dir: string, depth: number, chain: string[]) => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (--budget < 0) return;
+      const p = join(dir, e.name);
+      if (p === area) continue;
+      if (e.isSocket()) for (const c of chain) out.add(c);
+      else if (e.isDirectory() && depth < 3) walk(p, depth + 1, [...chain, p]);
+    }
+  };
+  for (const root of new Set([realpathOr(tmpdir()), '/private/tmp'])) walk(root, 0, []);
+  holders = { at: now, dirs: [...out] };
+  return holders.dirs;
 }
 
 /** Everything agent shell commands may write (besides /dev): the allowed folders, temp and package caches. */
@@ -313,10 +431,47 @@ function build(s: Spec): string {
   const otherEngines = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== s.engine);
   for (const e of otherEngines) for (const d of ENGINE_STATE[e].dirs) secrets.push(h(d));
   const secretPrefixes = otherEngines.flatMap((e) => ENGINE_STATE[e].prefixes.map((p) => prefix(h(p)))).join(' ');
+  // Unix sockets (see "unix sockets" above). Each path is its own `(remote unix-socket …)`: given several,
+  // Seatbelt reads only the first (tested), so 0.1.50's first version refused nothing under /Volumes and
+  // allowed sockets in the first allowed folder only.
+  const socket = (filters: string[]) => `(require-any ${filters.map((f) => `(remote unix-socket ${f})`).join(' ')})`;
+  const any = (filters: string[]) => (filters.length ? `(require-any ${filters.join(' ')})` : '(require-any (literal "/dev/null/none"))');
+  const area = agentTempRoot();
+  // The Library folder and the home folder's dot-folders are where apps keep theirs (Docker, Colima, OrbStack,
+  // Lima, 1Password, VS Code); an allowed folder inside one (an iCloud Drive project) is still the user's.
+  const homeZones = [`(subpath ${q(h('Library'))})`, `(regex #"^${reEscape(home)}/\\.")`];
+  const inHomeZones = (p: string) => p.startsWith(h('Library') + sep) || p.startsWith(home + sep + '.');
+  const rootsInZones = s.roots.filter(inHomeZones);
+  const rootsOutside = s.roots.filter((p) => !inHomeZones(p));
+  const reachable = [...rootsOutside, ...rootsInZones, area, ...engineDirs].map((p) => `(subpath ${q(p)})`);
+  const sockets = [
+    `(deny network-outbound ${socket(SOCKET_ZONES.map((z) => `(subpath ${q(z)})`))})`,
+    `(allow network-outbound ${socket([...rootsOutside, area].map((p) => `(subpath ${q(p)})`).concat(s.tools ? DB_SOCKETS : []))})`,
+    `(deny network-outbound ${socket(homeZones)})`,
+    ...(rootsInZones.length || engineDirs.length ? [`(allow network-outbound ${socket([...rootsInZones, ...engineDirs].map((p) => `(subpath ${q(p)})`))})`] : []),
+  ];
+  // …and nothing may be carried to where it could be reached: no hard link to a socket; no socket moved (or
+  // removed) from a place where it can't be reached; no folder holding another program's socket moved or
+  // removed from the temp folders; and, where the home folder itself is allowed, no folder in Library or a
+  // dot-folder moved or removed (package caches and the allowed folders inside them aside).
+  const tempRoots = [realpathOr(tmpdir()), '/private/tmp'].map(reEscape).join('|');
+  const moves = [
+    '(deny file-link (vnode-type SOCKET))',
+    `(deny file-write-unlink (require-all (vnode-type SOCKET) (require-not ${any(reachable)})))`,
+    `(deny file-write-unlink (require-all (vnode-type DIRECTORY) ${any([...socketHolders().map((p) => `(literal ${q(p)})`), `(regex #"^(${tempRoots})/${SOCKET_FAMILIES}(/|$)")`])}))`,
+    `(deny file-write-unlink (require-all (vnode-type DIRECTORY) ${any(homeZones)} (require-not ${any([...CACHES.map(h), ...engineDirs, ...rootsInZones].map((p) => `(subpath ${q(p)})`))})))`,
+  ];
 
   return [
     '(version 1)',
     '(allow default)',
+    // What runs here can't start anything outside it: LaunchServices (`open`) and launchd start apps and
+    // helpers with the user's full access, and Apple Events tell apps already running (Terminal, Finder) to
+    // run commands (A-D2, 0.1.50). launchctl submit/bootstrap are already refused inside a profile.
+    '(deny lsopen)',
+    '(deny appleevent-send)',
+    // Sockets are matched by their real path, so a link elsewhere (/var/run/docker.sock) is covered too.
+    ...sockets,
     '(deny file-write*)',
     `(allow file-write* ${sub(writable)} ${enginePrefixes} (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty") (regex #"^/dev/fd/") (regex #"^/dev/ttys"))`,
     // Commands may read system locations (toolchains live there); Wren's file helpers only the
@@ -325,6 +480,7 @@ function build(s: Spec): string {
     `(allow file-read-data ${sub(readable)} ${enginePrefixes} ${s.tools ? lit(HOME_FILES.map(h)) : `${sub(SYSTEM_RUNTIME)} ${lit(HELPER_PROGRAMS)} (literal "/")`})`,
     ...(protect.length ? [`(deny file-write* ${sub(protect)} ${lit(protect)})`] : []),
     `(deny file-write* ${sub(noWrite)} ${lit(noWrite)})`,
+    ...moves,
     `(deny file-read* file-write* ${sub(secrets)} ${secretPrefixes})`,
     // Last, so it wins over the data folder's deny: read access to this profile's own private folders, and
     // to the folders above them inside the data folder for looking the path up (no listing, no contents).

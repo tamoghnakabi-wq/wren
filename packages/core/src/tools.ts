@@ -48,6 +48,12 @@ function computerTools(runtime: Runtime): ToolSpec[] {
     },
     {
       namespace: 'computer',
+      name: 'shell_stop',
+      description: 'Stop a background job this task started, and everything it started (for example to restart a dev server). Use this instead of kill: it needs no approval.',
+      parameters: obj({ job_id: str('Job id returned by shell.') }, ['job_id']),
+    },
+    {
+      namespace: 'computer',
       name: 'read_file',
       description: 'Read a UTF-8 text file. Large files are returned in pages.',
       parameters: obj({ path: str('File path.'), offset: int('Line to start at (1-based).'), limit: int('Max lines (default 400).') }, ['path']),
@@ -79,8 +85,22 @@ function computerTools(runtime: Runtime): ToolSpec[] {
       description: 'Publish a file from the computer to the user as a downloadable artifact (reports, exports, images).',
       parameters: obj({ path: str('File path.'), name: str('Display name (optional).') }, ['path']),
     },
+    ...(runtime === 'desktop' ? [OPEN_TOOL] : []),
   ];
 }
+
+/**
+ * Showing the user something on their own screen (desktop only). Commands can't do this with `open`: Wren's
+ * sandbox stops anything they'd start outside it (A-D2), so Wren opens it itself, after approval (0.1.50 review).
+ */
+export const OPEN_DESCRIPTION =
+  "Show the user a file or web page on their computer's screen: a PDF, image, plain-text or media file opens in the system viewer; other files and folders are shown in Finder (File Explorer on Windows); an http(s) link opens in their browser. Use it when the user should look at something (a report, a chart, a local dev server). You get nothing back but whether it opened. Commands can't open things themselves (`open` is blocked).";
+const OPEN_TOOL: ToolSpec = {
+  namespace: 'computer',
+  name: 'open',
+  description: OPEN_DESCRIPTION,
+  parameters: obj({ target: str('A file or folder path, or an http(s) URL.'), reveal: bool('Show the file in Finder/File Explorer instead of opening it.') }, ['target']),
+};
 
 const browserTools: ToolSpec[] = [
   {
@@ -302,6 +322,8 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
       return `Run \`${clip(a('command'), 120)}\``;
     case 'computer.shell_status':
       return `Check background job ${a('job_id')}`;
+    case 'computer.shell_stop':
+      return `Stop background job ${a('job_id')}`;
     case 'computer.read_file':
       return `Read ${a('path')}`;
     case 'computer.write_file':
@@ -312,6 +334,8 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
       return `List ${a('path')}`;
     case 'computer.share_file':
       return `Share ${a('name') || a('path')}`;
+    case 'computer.open':
+      return args.reveal === true ? `Show ${clip(a('target'))} in Finder` : `Open ${clip(a('target'))}`;
     case 'browser.navigate':
       return `Open ${clip(a('url'))}`;
     case 'browser.snapshot':

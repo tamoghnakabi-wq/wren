@@ -106,7 +106,7 @@ vi.mock('../src/engines/common', () => {
     finishEngine: async (p: { kill: () => void }) => (p.kill(), true),
   };
 });
-const { runGrokBuild } = await import('../src/engines/grok-build');
+const { grokHookTool, runGrokBuild } = await import('../src/engines/grok-build');
 
 const run = (resumeId?: string, prompt = 'how are you', images?: { mime: string; data: string }[]) => {
   const saved: string[] = [];
@@ -256,6 +256,30 @@ describe('Grok Build model and effort', () => {
       expect(h.args).not.toContain('high');
     } finally {
       h.effortFlag = '--reasoning-effort';
+    }
+  });
+});
+
+// A-D3 (0.1.50): the hook decides by Grok's exact tool names. Matching fragments made an MCP tool a shell call
+// with no command (rated low) and let any name containing "read", "list" or "ls" run without a decision.
+describe('Grok Build hook tool names', () => {
+  it('maps built-in tools exactly and sends everything else to a decision Wren rates high', async () => {
+    const { assessCall } = await import('@wren/core');
+    const rate = (name: string, input: Record<string, unknown>) => {
+      const m = grokHookTool(name, input);
+      return { name: m.name, internal: !!m.internal, risk: assessCall(m.name, m.args, 'desktop').risk };
+    };
+    expect(rate('run_terminal_cmd', { command: 'ls' })).toEqual({ name: 'computer.shell', internal: false, risk: 'low' });
+    expect(rate('search_replace', { file_path: '/p/a.ts' }).name).toBe('computer.write_file');
+    expect(rate('read_file', { target_file: '/p/a.ts' }).name).toBe('computer.read_file');
+    expect(grokHookTool('read_file', { target_file: '/p/a.ts' }).paths).toEqual(['/p/a.ts']);
+    expect(rate('list_dir', {})).toEqual({ name: 'computer.list_files', internal: false, risk: 'low' });
+    expect(rate('todo_write', { todos: [] }).internal).toBe(true);
+    // MCP tools (server__tool), a shell call without a command, file tools without a path, and unknown tools.
+    for (const [name, input] of [['postgres__execute_sql', { sql: 'drop table x' }], ['mcp__db__execute_sql', {}]] as const) expect(rate(name, input).risk, name).toBe('high');
+    for (const [name, input] of [['run_terminal_cmd', {}], ['run_terminal_cmd', { command: ['rm', 1] }], ['write', {}], ['read_file', {}], ['list_tools', {}], ['scheduler_create', { cron: '* * * * *' }], ['image_gen', {}]] as const) {
+      const r = rate(name, input as Record<string, unknown>);
+      expect(r, name).toEqual({ name: `grok.${name}`, internal: false, risk: 'high' });
     }
   });
 });

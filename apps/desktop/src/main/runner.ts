@@ -23,7 +23,8 @@ import {
 } from '@wren/core';
 import { runClaudeCode } from '../engines/claude-code';
 import { runGrokBuild } from '../engines/grok-build';
-import type { Engine } from './sandbox';
+import { removeRunTemp, type Engine } from './sandbox';
+import { stopRunDocker } from './docker-broker';
 import { deviceJson } from './api';
 import { engineImages, withSkipped } from '../engines/images';
 import { detect, type Capabilities } from './capabilities';
@@ -289,6 +290,9 @@ export class DeviceRunner {
       if (outcome.kind === 'completed' || outcome.kind === 'failed' || outcome.kind === 'cancelled') {
         killRunJobs(runId);
         void closeRunTab(runId);
+        // Its Docker broker, and its temp folder (TMPDIR) once what it left running has had time to go.
+        stopRunDocker(runId);
+        setTimeout(() => removeRunTemp(runId), 10_000).unref();
       }
       log(`run ${runId.slice(0, 8)} -> ${outcome.kind}`);
       if (lease) await deviceJson(`/api/device/runs/${runId}/finish`, outcome, { lease }).catch(() => {});
@@ -435,7 +439,7 @@ export class DeviceRunner {
     const tools = toolCatalog({ runtime: 'desktop', tools: c.agent.tools, githubConnected: c.githubConnected, extra: c.mcpTools, askable: c.askable }).filter((t) => {
       if (t.namespace === 'browser') return policy.browser;
       if (t.namespace === 'screen') return policy.screen;
-      if (t.namespace === 'computer' && (t.name === 'shell' || t.name === 'shell_status')) return policy.shell;
+      if (t.namespace === 'computer' && (t.name === 'shell' || t.name === 'shell_status' || t.name === 'shell_stop')) return policy.shell;
       return true;
     });
     let step = c.run.step;

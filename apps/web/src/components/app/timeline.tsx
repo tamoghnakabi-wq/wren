@@ -15,6 +15,7 @@ import { CodeText } from '@/components/app/code-text';
 const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   'computer.shell': Terminal,
   'computer.shell_status': Terminal,
+  'computer.shell_stop': Terminal,
   'computer.read_file': FileText,
   'computer.write_file': Pencil,
   'computer.edit_file': Pencil,

@@ -11,6 +11,7 @@ import { APP_ORIGIN, changedPolicy, dataDir, APP_URL, loadDevice, loadPolicy, pe
 import { stopAllEngines } from '../engines/common';
 import { engineProgram } from '../engines/program';
 import { closeBrowser, stopAllJobs } from './host';
+import { clearAgentTemp } from './sandbox';
 import { engineLoginScript } from './login';
 import { createPairing, type PairAnswer, type PairStart } from './pairing';
 import { KeepAwake } from './keepawake';
@@ -806,6 +807,8 @@ if (!process.argv.includes('--selftest')) app.whenReady().then(async () => {
       /* never in the way of starting */
     }
   }
+  // Runs' temp folders (their commands' TMPDIR), left by a crash.
+  clearAgentTemp();
   // Engine sign-in scripts: a Terminal opened before a restart may not have read its script yet, so only
   // those older than the 10 minutes they're kept for.
   try {

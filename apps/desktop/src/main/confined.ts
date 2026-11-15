@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, o
 import { dirname, join, relative, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { confinePath, reachesAny } from './paths';
-import { appDirs, autorunPaths, fileOpsProfile, hasSeatbelt } from './sandbox';
+import { appDirs, autorunPaths, credentialStores, fileOpsProfile, hasSeatbelt } from './sandbox';
 import { toolEnv } from './shellenv';
 
 // File reads, writes and listings the agent asks for. A path is checked against
@@ -84,6 +84,20 @@ const isPrivate = (p: string, dataDir: string) => privateRoots(dataDir).some((r)
 function refusePrivate(p: string, dataDir: string) {
   if (isPrivate(p, dataDir)) throw new Error(`"${p}" is part of Wren itself, so the agent can't use it.`);
 }
+/**
+ * Credential stores and the engines' sign-ins, as written or where a link leads: never read, written or listed,
+ * whatever folders are allowed (A-D4). On macOS the helper's profile refuses them too.
+ */
+function refuseSecrets(p: string, roots: string[]) {
+  if (reachesAny(p, roots[0] ?? homedir(), credentialStores())) throw new Error(`"${p}" is a credential store or an app's sign-in, which agents never use.`);
+}
+/** What reading refuses, for showing a file on the user's screen (`computer.open`): Wren itself and credential stores. */
+export function refuseToShow(p: string, roots: string[], dataDir: string): void {
+  refusePrivate(p, dataDir);
+  refuseSecrets(p, roots);
+}
+/** A listing entry inside a credential store, by its name (entries are never followed). */
+const inStores = (stores: string[]) => (p: string) => stores.some((r) => within(fold(p), fold(r)) || fold(p).startsWith(fold(r) + '.'));
 /** A file that makes programs run later outside the sandbox (a shell startup file, git's global config…). */
 function refuseAutorun(p: string, roots: string[]) {
   if (reachesAny(p, roots[0] ?? homedir(), autorunPaths(homedir(), roots))) throw new Error(`"${p}" makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.`);
@@ -146,6 +160,7 @@ function ensureFolder(dir: string, roots: string[]) {
 /** Read a file already checked to be inside `roots`. */
 export async function readConfined(path: string, roots: string[], dataDir: string, max: number): Promise<Buffer> {
   refusePrivate(path, dataDir);
+  refuseSecrets(path, roots);
   if (hasSeatbelt()) return helper(['/bin/cat', '--', path], roots, dataDir, null, max);
   // Elsewhere: never follow a link at the last component, and check what was opened.
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -166,9 +181,20 @@ export async function readConfined(path: string, roots: string[], dataDir: strin
   }
 }
 
+/**
+ * Make a folder (and its parents) inside `roots`, from inside the file helper's profile (macOS), so a link
+ * swapped into the path can't take it outside them. Used for a container's mount that doesn't exist yet.
+ */
+export async function makeFolderConfined(path: string, roots: string[], dataDir: string): Promise<void> {
+  refusePrivate(path, dataDir);
+  refuseSecrets(path, roots);
+  await helper(['/bin/mkdir', '-p', '--', path], roots, dataDir, null, 0);
+}
+
 /** Create or replace a file already checked to be inside `roots` (parent folders included). */
 export async function writeConfined(path: string, content: Buffer, roots: string[], dataDir: string): Promise<void> {
   refusePrivate(path, dataDir);
+  refuseSecrets(path, roots);
   await toolEnv(); // the folders on the user's PATH (protected below) as their shell has them, not the start-up guess
   refuseAutorun(path, roots);
   if (hasSeatbelt()) {
@@ -209,6 +235,8 @@ function removeIfSame(path: string, fd: number) {
 /** Entries under a folder already checked to be inside `roots`: "d|f|l size path" lines, links never followed. */
 export async function listConfined(root: string, depth: number, roots: string[], dataDir: string, limit = 500): Promise<string[]> {
   refusePrivate(root, dataDir);
+  refuseSecrets(root, roots);
+  const secret = inStores(credentialStores());
   if (hasSeatbelt()) {
     // Wren's own folders are pruned by find itself, so they don't use up the listing's limit; the
     // remaining arguments (one per folder) become `-o -path <folder>` there.
@@ -225,7 +253,7 @@ export async function listConfined(root: string, depth: number, roots: string[],
         const [t, size, ...rest] = line.split('|');
         return { line: `${kind(t)} ${size} ${rest.join('|')}`, path: rest.join('|') };
       })
-      .filter((e) => !isPrivate(e.path, dataDir)) // Wren's own folders aren't listed (its build in a project included)
+      .filter((e) => !isPrivate(e.path, dataDir) && !secret(e.path)) // Wren's own folders aren't listed (its build in a project included), nor credential stores
       .slice(0, limit)
       .map((e) => e.line);
   }
@@ -239,7 +267,7 @@ export async function listConfined(root: string, depth: number, roots: string[],
     for (const name of names) {
       if (name === 'node_modules' || name === '.git' || out.length >= limit) continue;
       const full = join(d, name);
-      if (isPrivate(full, dataDir)) continue; // Wren's own folders aren't listed either
+      if (isPrivate(full, dataDir) || secret(full)) continue; // Wren's own folders and credential stores aren't listed either
       let st;
       try {
         st = lstatSync(full); // never follow links out of the folder

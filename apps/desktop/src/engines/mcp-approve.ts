@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { SHOW_PAGE_DESCRIPTION } from '@wren/core/tools';
+import { OPEN_DESCRIPTION, SHOW_PAGE_DESCRIPTION } from '@wren/core/tools';
 import { APPROVE_HELPER_MS, ASK_HELPER_MS, PAGE_HELPER_MS, postToWren, uniqueNames } from './bridge-client';
 
 // The bridge's address and token come from Wren's private file (only this server's sandbox profile can
@@ -79,6 +79,22 @@ server.registerTool(
     try {
       const out = (await postToWren(url, token, { page: args }, { signal: extra.signal, timeoutMs: PAGE_HELPER_MS })) as { text?: string; isError?: boolean };
       return { content: [{ type: 'text' as const, text: out.text ?? 'The page wasn’t shown.' }], isError: out.text === undefined || !!out.isError };
+    } catch (e) {
+      return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };
+    }
+  },
+);
+
+// Showing the user a file or link on their screen (computer.open in Wren's own agent loop): commands can't `open`
+// things inside Wren's sandbox, so Wren does it, after the same approval.
+server.registerTool(
+  'open',
+  { description: OPEN_DESCRIPTION, inputSchema: { target: z.string().min(1).max(4096), reveal: z.boolean().optional() } },
+  async (args, extra) => {
+    try {
+      // It may wait for the user's approval, as long as a permission prompt.
+      const out = (await postToWren(url, token, { open: args }, { signal: extra.signal, timeoutMs: APPROVE_HELPER_MS })) as { text?: string; isError?: boolean };
+      return { content: [{ type: 'text' as const, text: out.text ?? 'Nothing was opened.' }], isError: out.text === undefined || !!out.isError };
     } catch (e) {
       return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };
     }

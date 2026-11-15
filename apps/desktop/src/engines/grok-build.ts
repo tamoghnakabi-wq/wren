@@ -48,10 +48,68 @@ function toolOutput(u: Record<string, unknown>): string {
   return content.map((c) => c.content?.text ?? c.text ?? '').join('\n') || (typeof u.rawOutput === 'string' ? u.rawOutput : JSON.stringify(u.rawOutput ?? ''));
 }
 
-/** Grok tool names -> Wren policy names (for the PreToolUse hook). */
+/**
+ * Grok's own tools by the exact names its hooks get (built-in names pass verbatim; the Claude-style aliases
+ * Grok accepts are here too), and what each one is to Wren. MCP tools arrive as `server__tool`, anything else
+ * is unknown (A-D3, 0.1.50: matching fragments of the name made `mcp__db__execute_sql` a shell call with no
+ * command, rated low, and let any name with "ls" or "read" in it run unasked).
+ */
+const GROK_TOOLS: Record<string, 'shell' | 'write' | 'read' | 'list' | 'fetch' | 'internal'> = {
+  run_terminal_cmd: 'shell', run_terminal_command: 'shell', run_terminal_cmd_concise: 'shell', bash: 'shell',
+  search_replace: 'write', search_replace_concise: 'write', write: 'write', hashline_edit: 'write', apply_patch: 'write', edit: 'write', multiedit: 'write', notebookedit: 'write',
+  read_file: 'read', read_file_concise: 'read', hashline_read: 'read', codex_read_file: 'read', view_image: 'read', read: 'read',
+  list_dir: 'list', codex_list_dir: 'list', grep: 'list', hashline_grep: 'list', codex_grep_files: 'list', glob: 'list', ls: 'list',
+  web_fetch: 'fetch', web_search: 'fetch', webfetch: 'fetch', websearch: 'fetch',
+  // Grok's own bookkeeping: its plan, goal and mode, questions to the user, and its own subagents and
+  // background commands, whose tool calls come through this hook like any other.
+  todo_write: 'internal', todowrite: 'internal', update_goal: 'internal', enter_plan_mode: 'internal', exit_plan_mode: 'internal', ask_user_question: 'internal', task: 'internal', send_subagent_message: 'internal',
+  get_task_output: 'internal', task_output: 'internal', wait_tasks: 'internal', kill_task: 'internal', get_terminal_command_output: 'internal', kill_terminal_command: 'internal', bashoutput: 'internal', killshell: 'internal',
+};
+
+/** The path a Grok file tool names, under any of the keys its tools use. */
+const grokPath = (input: Record<string, unknown>) => {
+  const v = input.path ?? input.file_path ?? input.absolute_path ?? input.target_file ?? input.target_directory ?? input.dir_path ?? input.directory;
+  return typeof v === 'string' ? v : '';
+};
+
+/**
+ * What a Grok tool call is to Wren's policy, for the PreToolUse hook: exact names only. A shell call without a
+ * command, a write or read without a path, and every tool Wren doesn't know become `grok.<name>`, which
+ * Wren can't check and so rates high; `internal` and pathless listings need no decision.
+ */
+export function grokHookTool(name: string, input: Record<string, unknown>): { name: string; args: Record<string, unknown>; paths: string[]; title: string; internal?: boolean } {
+  const unknown = { name: `grok.${name}`, args: input, paths: [] as string[], title: name };
+  if (name.includes('__')) return { name: `mcp_${name}`, args: input, paths: [], title: name };
+  const kind = GROK_TOOLS[name.toLowerCase()];
+  const path = grokPath(input);
+  const command = typeof input.command === 'string' ? input.command : Array.isArray(input.command) && input.command.every((w) => typeof w === 'string') ? (input.command as string[]).join(' ') : '';
+  switch (kind) {
+    case 'shell':
+      return command.trim() ? { name: 'computer.shell', args: { command }, paths: [], title: `Run \`${command.slice(0, 120)}\`` } : unknown;
+    case 'write':
+      return path ? { name: 'computer.write_file', args: { path }, paths: [path], title: `Edit ${path}` } : unknown;
+    case 'read':
+      return path ? { name: 'computer.read_file', args: { path }, paths: [path], title: `${name} ${path}` } : unknown;
+    case 'list':
+      return { name: 'computer.list_files', args: { path }, paths: path ? [path] : [], title: `${name} ${path}`.trim() };
+    case 'fetch': {
+      const url = String(input.url ?? input.query ?? '');
+      return { name: 'web.fetch', args: { url }, paths: [], title: `${name} ${url}`.trim() };
+    }
+    case 'internal':
+      return { name: `grok.${name}`, args: input, paths: [], title: name, internal: true };
+    default:
+      return unknown;
+  }
+}
+
+/**
+ * Grok tool names -> Wren names for the timeline only (a stream step of kind "other" gets the name its hook
+ * call will most likely have, so the approval lands on it). Never used to decide anything: see grokHookTool.
+ */
 function mapGrokTool(name: string, input: Record<string, unknown>) {
   const n = name.toLowerCase();
-  const path = String(input.path ?? input.file_path ?? input.absolute_path ?? input.target_file ?? '');
+  const path = grokPath(input);
   const command = typeof input.command === 'string' ? input.command : Array.isArray(input.command) ? (input.command as string[]).join(' ') : '';
   if (/bash|terminal|shell|command|exec|run_/.test(n)) return { name: 'computer.shell', args: { command }, paths: [] as string[], title: `Run \`${command.slice(0, 120)}\`` };
   if (/delete|remove/.test(n)) return { name: 'computer.shell', args: { command: `rm ${path}` }, paths: path ? [path] : [], title: `Delete ${path}` };
@@ -86,9 +144,10 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
   // personal "always-approve" setting can't bypass Wren's policy.
   const bridge = await startApprovalBridge(async ({ tool_name, input, tool_use_id, signal }) => {
     promptWork++; // a tool is about to run
-    const m = mapGrokTool(tool_name, input);
-    // A read with no path to check (Grok's own listing tools) needs no decision, but a stopped run still gets none (W-122).
-    if (m.name === 'computer.read_file' && !m.paths.length) return run.signal.aborted || signal.aborted ? { allow: false, message: 'Stopped by the user.' } : { allow: true };
+    const m = grokHookTool(String(tool_name), input && typeof input === 'object' ? input : {});
+    // Grok's own bookkeeping, and a listing with no path (its working folder), need no decision, but a stopped
+    // run still gets none (W-122).
+    if (m.internal || (m.name === 'computer.list_files' && !m.paths.length)) return run.signal.aborted || signal.aborted ? { allow: false, message: 'Stopped by the user.' } : { allow: true };
     return decide(run, writer, { callId: tool_use_id ?? `hook-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: m.name, args: m.args, title: m.title, paths: m.paths }, inFolders, signal);
   });
   // In Wren's data folder, which no agent can write (W-128): in a temp folder another task's command could
@@ -200,7 +259,9 @@ export async function runGrokBuild(run: EngineRun, inFolders: (p: string) => boo
           const p = msg.params ?? {};
           const call = (p.toolCall ?? {}) as { toolCallId?: string; title?: string; kind?: string; rawInput?: Record<string, unknown>; locations?: { path: string }[] };
           const options = (p.options ?? []) as { optionId: string; kind: string }[];
-          const t = toolFor(call);
+          // The ACP kind and locations are Grok's own report; for kind "other" only the title is known, which
+          // isn't a tool name, so that call is one Wren can't check (A-D3).
+          const t = call.kind && call.kind !== 'other' && KIND_TO_TOOL[call.kind] ? toolFor(call) : { name: 'grok.tool', args: call.rawInput ?? {}, paths: (call.locations ?? []).map((l) => l.path).filter(Boolean) };
           const d = await decide(run, writer, { callId: String(call.toolCallId ?? `perm-${Date.now()}`), name: t.name, args: t.args, title: String(call.title ?? t.name), paths: t.paths }, inFolders);
           const opt = options.find((o) => o.kind === (d.allow ? 'allow_once' : 'reject_once')) ?? options.find((o) => (d.allow ? o.kind.startsWith('allow') : o.kind.startsWith('reject')));
           send({ jsonrpc: '2.0', id: msg.id, result: opt ? { outcome: { outcome: 'selected', optionId: opt.optionId } } : { outcome: { outcome: 'cancelled' } } });

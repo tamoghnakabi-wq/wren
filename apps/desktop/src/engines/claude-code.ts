@@ -2,7 +2,9 @@ import type { ChildProcess } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { LoopOutcome } from '@wren/core';
+import { randomBytes } from 'node:crypto';
 import { dataDir } from '../main/config';
+import { performOpen, planOpen } from '../main/open';
 import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
@@ -19,6 +21,10 @@ import { engineProgram } from './program';
 export const ASK_TOOL = 'mcp__wren__ask_agent';
 /** Wren's show_page tool as Claude Code names it. */
 export const PAGE_TOOL = 'mcp__wren__show_page';
+/** Wren's open tool (computer.open) as Claude Code names it. */
+export const OPEN_TOOL = 'mcp__wren__open';
+/** A target that names a URL scheme (not a Windows drive such as C:\). */
+const isLink = (t: string) => /^[a-z][a-z0-9+.-]+:/i.test(t) && !/^[a-z]:[\\/]/i.test(t);
 
 const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: string; args: Record<string, unknown>; paths: string[] }> = {
   Bash: (i) => ({ name: 'computer.shell', args: { command: String(i.command ?? '') }, paths: [] }),
@@ -35,6 +41,11 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
   [ASK_TOOL]: (i) => ({ name: 'task.ask_agent', args: { agent: String(i.agent ?? ''), question: String(i.question ?? '') }, paths: [] }),
   // Showing a page: the step keeps the title and the page's size; the page itself is kept as a file.
   [PAGE_TOOL]: (i) => ({ name: 'task.show_page', args: { title: String(i.title ?? '').slice(0, 120), html: `[${Math.ceil(String(i.html ?? '').length / 1024)} KB of HTML]` }, paths: [] }),
+  // Showing the user a file or link: rated and approved like Wren's own computer.open; a file is checked as a path.
+  [OPEN_TOOL]: (i) => {
+    const target = String(i.target ?? '');
+    return { name: 'computer.open', args: { target, reveal: i.reveal === true }, paths: isLink(target) ? [] : [target] };
+  },
 };
 
 /**
@@ -43,6 +54,11 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
  * Names a version doesn't have are ignored, so both are listed.
  */
 const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet,Task';
+/**
+ * The built-in tools for a run: no Bash at all when terminal access is off. Claude Code runs commands it counts
+ * as read-only (`ls`) without asking, so refusing at Wren's prompt alone let them through (A-D6, 0.1.50).
+ */
+export const claudeTools = (shell: boolean) => (shell ? CLAUDE_TOOLS : CLAUDE_TOOLS.split(',').filter((t) => t !== 'Bash').join(','));
 /** Claude Code's own to-do list: shown as the task's plan, not as steps. */
 const PLAN_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet']);
 /** The levels `claude --effort` takes. Any other (an agent that came from another brain) keeps Claude Code's own default. */
@@ -70,6 +86,23 @@ export function claudeDenyRules(paths: string[], writeOnly: string[] = []): stri
   };
   return [...paths.flatMap((p) => rules(p, ['Read', 'Edit'])), ...writeOnly.flatMap((p) => rules(p, ['Edit']))];
 }
+
+/** What the run's setup means for the agent, so it doesn't try what can't work here (0.1.50 review). */
+function engineNotes(run: EngineRun): string[] {
+  const notes: string[] = [];
+  if (!run.allow.shell) notes.push('Terminal access is turned off on this computer, so you have no Bash tool.');
+  else if (hasSeatbelt()) notes.push("Your commands run in Wren's sandbox: they can't open apps, files or web pages (`open`), script other apps (AppleScript) or reach other apps' services, so don't retry those. Keep temporary files and sockets in $TMPDIR. Docker works through Wren (DOCKER_HOST is set): containers may mount the allowed folders, but not other folders of this Mac or the Docker socket, and can't be privileged.");
+  notes.push("To show the user a file or web page on their screen, use Wren's open tool (mcp__wren__open).");
+  return notes;
+}
+
+/**
+ * Credentials files in a project (.env and the like): Claude Code's own Read opens files in the working folders
+ * without asking, so these go to its permission prompt, which is Wren's check (`decide`: critical, as for
+ * read_file; a .env.example is low and goes through). Checked with Claude Code 2.1.322 in restricted mode: a
+ * .env read without the rule, refused at the prompt with it (A-P4 follow-up, 0.1.50 review).
+ */
+export const CREDENTIAL_ASK_RULES = ['.env', '.env.*', '.envrc', '.npmrc', '.netrc', '.pypirc', '.git-credentials', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', '*credentials*.json', '*credentials*.yaml', '*credentials*.yml', '*credentials*.toml', 'credentials', '*.keychain', '*.keychain-db'].map((n) => `Read(**/${n})`);
 
 function mapTool(name: string, input: Record<string, unknown>) {
   const m = TOOL_MAP[name];
@@ -105,6 +138,8 @@ function titleFor(name: string, input: Record<string, unknown>): string {
       return describeCall('task.ask_agent', { agent: String(input.agent ?? ''), question: String(input.question ?? '') });
     case PAGE_TOOL:
       return describeCall('task.show_page', { title: String(input.title ?? '') });
+    case OPEN_TOOL:
+      return describeCall('computer.open', { target: String(input.target ?? ''), reveal: input.reveal === true });
     default:
       return name;
   }
@@ -177,6 +212,10 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   const asked = new Map<string, number>();
   // Pages kept in this run: a show_page result names one, and only these are shown as pages in the timeline.
   const shownPages = new Set<string>();
+  // Opens Claude Code's own permission prompt already approved (each used once by the open that follows it), so
+  // an open is asked about once; an open that comes without a prompt is decided when it arrives.
+  const allowedOpens: string[] = [];
+  const openKey = (a: Record<string, unknown>) => JSON.stringify([String(a.target ?? ''), a.reveal === true]);
   const bridge = await startApprovalBridge(
     async ({ tool_name, input, tool_use_id, signal }) => {
       // Wren's own ask_agent needs no approval: the server decides which agents this one may ask.
@@ -184,7 +223,9 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       // Showing a page needs none either: it runs sandboxed in Wren, with nothing of the user's.
       if (tool_name === PAGE_TOOL) return { allow: true };
       const m = mapTool(tool_name, input);
-      return decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders, signal);
+      const d = await decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders, signal);
+      if (d.allow && tool_name === OPEN_TOOL) allowedOpens.push(openKey(m.args));
+      return d;
     },
     undefined,
     run.askable?.length ? (req) => askThroughWren(run, writer, req, asked) : undefined,
@@ -198,6 +239,22 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       } catch (e) {
         return { text: `The page couldn’t be kept: ${(e as Error).message}`, isError: true };
       }
+    },
+    async ({ target, reveal, signal }) => {
+      const m = mapTool(OPEN_TOOL, { target, reveal });
+      const at = allowedOpens.indexOf(openKey(m.args));
+      if (at >= 0) allowedOpens.splice(at, 1);
+      else {
+        const d = await decide(run, writer, { callId: `perm-${randomBytes(6).toString('hex')}`, name: m.name, args: m.args, title: titleFor(OPEN_TOOL, m.args), paths: m.paths.filter(Boolean) }, inFolders, signal);
+        if (!d.allow) return { text: d.message ?? 'Not allowed.', isError: true };
+      }
+      if (run.signal.aborted || signal.aborted) return { text: 'Stopped by the user.', isError: true };
+      // The folders allowed now (the profile's are fixed for the run, these may have been narrowed since).
+      const plan = planOpen(target, reveal, allowedRoots(run.folders), dataDir());
+      if ('error' in plan) return { text: plan.error, isError: true };
+      if (plan.kind !== 'url' && !inFolders(plan.path)) return { text: `${plan.path} is outside the folders allowed on this computer.`, isError: true };
+      const r = await performOpen(plan);
+      return { text: r.output, isError: !!r.isError };
     },
   );
 
@@ -223,7 +280,9 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
     await toolEnv();
     const settingsFile = join(privateDir, 'settings.json');
     // Plus no edits to what runs programs later outside the sandbox (shell startup files, its own settings and hooks).
-    writeFileSync(settingsFile, JSON.stringify({ permissions: { deny: claudeDenyRules(enginePrivatePaths('claude-code', dataDir()), autorunPaths(undefined, allowedRoots(run.folders))) } }), { mode: 0o600 });
+    // With terminal access off, Bash is also denied outright, in case a version or a subagent offers it anyway.
+    const deny = [...claudeDenyRules(enginePrivatePaths('claude-code', dataDir()), autorunPaths(undefined, allowedRoots(run.folders))), ...(run.allow.shell ? [] : ['Bash'])];
+    writeFileSync(settingsFile, JSON.stringify({ permissions: { deny, ask: CREDENTIAL_ASK_RULES } }), { mode: 0o600 });
     const args = [
       '-p',
       '--input-format',
@@ -238,14 +297,14 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       // stay inside the working folders; only Wren's MCP server is loaded.
       '--restricted',
       '--tools',
-      CLAUDE_TOOLS,
+      claudeTools(run.allow.shell),
       '--strict-mcp-config',
       '--mcp-config',
       mcpFile,
       '--settings',
       settingsFile,
       '--append-system-prompt',
-      `You are working for the user through Wren as the agent "${run.agentName}". ${run.instructions}`.slice(0, 20000),
+      [`You are working for the user through Wren as the agent "${run.agentName}".`, ...engineNotes(run), run.instructions].join(' ').slice(0, 20000),
     ];
     if (run.model && run.model !== 'default') args.push('--model', run.model);
     const effort = run.effort && CLAUDE_EFFORTS.includes(run.effort) && effortFlag('claude-code', cli);

@@ -9,10 +9,11 @@ import { agentAnswerText, assessCall, clipMiddle, deniedText, describeCall, MAX_
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
 import { APPROVAL_WAIT_MS, ASK_WAIT_MS, ENGINE_MCP_TIMEOUT_MS } from './bridge-client';
-import { dataDir } from '../main/config';
+import { dataDir, loadPolicy } from '../main/config';
+import { dockerEnv } from '../main/docker-broker';
 import { allowedRoots, reachesAny } from '../main/paths';
 import { killTree, tracked, treeAlive } from '../main/proctree';
-import { autorunPaths, enginePrivatePaths, engineProfile, hasSeatbelt, seatbeltProfile, type Engine } from '../main/sandbox';
+import { autorunPaths, enginePrivatePaths, engineProfile, hasSeatbelt, makeRunTemp, seatbeltProfile, type Engine } from '../main/sandbox';
 import { agentEnv, SHELL_PREFIX, toolEnv, userPathDirs } from '../main/shellenv';
 import { currentProgramTrust } from '../main/trust';
 
@@ -80,6 +81,15 @@ const ENGINE_VARS: Record<Engine, RegExp> = {
 };
 const NETWORK_VARS = /^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|ALL_PROXY|all_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|XDG_STATE_HOME)$/;
 
+/**
+ * The run's own temp folder (macOS): the engine's and its commands' TMPDIR, where their own sockets work
+ * (sandbox.ts), and its Docker broker (docker-broker.ts), checked against the folders allowed now.
+ */
+async function runTemp(runId: string): Promise<NodeJS.ProcessEnv> {
+  const temp = makeRunTemp(runId);
+  return { TMPDIR: `${temp}/`, TMUX_TMPDIR: temp, ...(await dockerEnv(runId, temp, () => allowedRoots(loadPolicy().folders), dataDir())) };
+}
+
 /** Environment for an engine process: the user's own login for that CLI, never our session state. */
 export function engineEnv(engine: Engine): NodeJS.ProcessEnv {
   const env = agentEnv(process.env, {});
@@ -100,7 +110,7 @@ export function engineEnv(engine: Engine): NodeJS.ProcessEnv {
 export async function spawnEngine(engine: Engine, cli: string, args: string[], run: EngineRun, helper: string, extraEnv: NodeJS.ProcessEnv = {}, privateRead: string[] = []): Promise<ChildProcessWithoutNullStreams> {
   const env = { ...engineEnv(engine), ...extraEnv };
   if (!hasSeatbelt()) return track(spawn(cli, args, { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' }));
-  Object.assign(env, await toolEnv());
+  Object.assign(env, await toolEnv(), await runTemp(run.runId));
   const profile = engineProfile(engine, allowedRoots(run.folders), dataDir(), appPaths(helper), undefined, privateRead);
   return track(spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...args], { cwd: run.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true }));
 }
@@ -248,7 +258,7 @@ export function effortFlag(engine: Engine, cli: string): string | null {
 export async function spawnClaude(cli: string, args: string[], run: EngineRun, helper: string): Promise<ChildProcessWithoutNullStreams> {
   const env: NodeJS.ProcessEnv = { ...engineEnv('claude-code') };
   if (hasSeatbelt()) {
-    Object.assign(env, await toolEnv(), {
+    Object.assign(env, await toolEnv(), await runTemp(run.runId), {
       SHELL: /^\/bin\/(zsh|bash)$/.test(process.env.SHELL ?? '') ? process.env.SHELL : '/bin/zsh',
       CLAUDE_CODE_SHELL_PREFIX: shellPrefix(),
       WREN_SHELL_SB: seatbeltProfile(allowedRoots(run.folders), dataDir(), undefined, appPaths(helper)),
@@ -407,7 +417,7 @@ export async function decide(
     const base = allowedRoots(run.folders)[0] ?? homedir();
     for (const p of call.paths) if (reachesAny(p, base, priv)) return { allow: false, message: `Blocked by Wren: ${p} is part of Wren itself, a credential store or another app's sign-in, which agents never use.` };
     // Nor, for anything but reading, a file that makes programs run later outside the sandbox.
-    if (call.name !== 'computer.read_file' && call.name !== 'computer.list_files') {
+    if (call.name !== 'computer.read_file' && call.name !== 'computer.list_files' && call.name !== 'computer.open') {
       for (const p of call.paths) if (reachesAny(p, base, autorunPaths(homedir(), allowedRoots(run.folders)))) return { allow: false, message: `Blocked by Wren: ${p} makes programs run later outside Wren's sandbox (when you open a terminal, use git or log in), so agents never change it.` };
     }
   }
@@ -470,6 +480,8 @@ export type BridgeHandler = (req: { tool_name: string; input: Record<string, unk
 export type AskHandler = (req: { agent: string; question: string; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
 /** An engine showing the user a page it made (Claude Code's show_page tool): what to tell the engine. */
 export type PageHandler = (req: { title: unknown; html: unknown; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
+/** An engine showing the user a file or link on their screen (Claude Code's open tool, computer.open). */
+export type OpenHandler = (req: { target: string; reveal: boolean; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
 
 export { ASK_WAIT_MS };
 
@@ -561,7 +573,7 @@ const PAGE_PROMPT_TOOL = 'mcp__wren__show_page';
 /** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks (its default is 30 s). */
 const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 5_000 };
 
-export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL, onAsk?: AskHandler, onPage?: PageHandler): Promise<{ url: string; token: string; close: () => void }> {
+export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL, onAsk?: AskHandler, onPage?: PageHandler, onOpen?: OpenHandler): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
   // Every admitted request, from admission (still sending its body) until its decision ends (W-135).
@@ -635,6 +647,12 @@ export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRI
         if (r && typeof r.page === 'object' && r.page) {
           // The helper's show_page tool: the page is kept and shown in the task.
           const out = onPage && !gone.signal.aborted ? await onPage({ title: r.page.title, html: r.page.html, signal: gone.signal }) : { text: 'Pages can’t be shown here.', isError: true };
+          res.end(JSON.stringify(out));
+          return;
+        }
+        if (r && typeof r.open === 'object' && r.open) {
+          // The helper's open tool: decided (unless its permission prompt already was) and done by Wren itself.
+          const out = onOpen && !gone.signal.aborted ? await onOpen({ target: String(r.open.target ?? ''), reveal: r.open.reveal === true, signal: gone.signal }) : { text: 'Opening files and links isn’t available here.', isError: true };
           res.end(JSON.stringify(out));
           return;
         }

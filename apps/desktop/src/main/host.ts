@@ -12,10 +12,12 @@ import { uploadArtifact } from './upload';
 import { dataDir, type Policy } from './config';
 import { listConfined, readConfined, TooLarge, writeConfined } from './confined';
 import { allowedRoots, confinePath } from './paths';
+import { performOpen, planOpen } from './open';
 import { bornOf, ended, external, killTree, tracked, treeAlive, windowsProcesses, type Proc } from './proctree';
-import { jobs, kill, release, type Job } from './jobs';
+import { jobs, kill, release, stop, type Job } from './jobs';
 import { spawnContained } from './winjob';
-import { hasSeatbelt, seatbeltProfile } from './sandbox';
+import { hasSeatbelt, makeRunTemp, seatbeltProfile } from './sandbox';
+import { dockerEnv } from './docker-broker';
 import { agentEnv, toolEnv } from './shellenv';
 import { currentProgramTrust } from './trust';
 
@@ -109,6 +111,8 @@ export class LocalHost implements ToolHost {
         return this.shell(s('command'), s('cwd'), Number(args.timeout_sec) || 120, !!args.background, ctx, resume);
       case 'computer.shell_status':
         return this.jobStatus(s('job_id'), Math.min(Number(args.wait_sec) || 0, 600), ctx);
+      case 'computer.shell_stop':
+        return this.stopJob(s('job_id'));
       case 'computer.read_file': {
         const p = this.resolvePath(s('path'));
         if (!existsSync(p)) return { output: `File not found: ${p}`, isError: true };
@@ -162,6 +166,12 @@ export class LocalHost implements ToolHost {
         const a = await this.upload(data, s('name') || p.split(sep).pop() || 'file', 'file');
         return { output: `Shared "${a.name}" (${a.size} bytes) with the user.`, artifacts: [{ id: a.id, name: a.name }] };
       }
+      case 'computer.open': {
+        // Shown by Wren itself, never by a command (the sandbox stops `open`): see open.ts.
+        const plan = planOpen(s('target'), args.reveal === true, this.roots(), dataDir());
+        if ('error' in plan) return { output: plan.error, isError: true };
+        return performOpen(plan);
+      }
       case 'screen.capture':
         return this.captureScreen();
     }
@@ -188,6 +198,10 @@ export class LocalHost implements ToolHost {
       return spawnContained(command, cwd, env);
     }
     if (hasSeatbelt()) {
+      // The run's own temp folder, the one place outside the allowed folders where its sockets work (sandbox.ts).
+      const temp = makeRunTemp(this.runId);
+      // Docker through Wren's broker (docker-broker.ts): the real socket is out of the sandbox's reach.
+      Object.assign(env, { TMPDIR: `${temp}/`, TMUX_TMPDIR: temp }, await dockerEnv(this.runId, temp, () => this.roots(), dataDir()));
       // Not a login shell: startup files stay unread (and unreadable); PATH and toolchain
       // variables come from toolEnv() instead.
       return tracked(spawn('/usr/bin/sandbox-exec', ['-p', this.sandboxProfile(), '/bin/bash', '-c', command], { cwd, env, detached: true }));
@@ -256,6 +270,16 @@ export class LocalHost implements ToolHost {
       return { output: `Job ${id} finished with exit code ${job.exit}.\n${tail(job.out)}` };
     }
     return { output: `Job ${id} is still running.\n${tail(job.out, 6000)}` };
+  }
+
+  /** Stop one of this task's jobs and what it started (its process group, or tree on Windows); other tasks' are unknown here (W-186). */
+  private async stopJob(id: string): Promise<ToolResult> {
+    const job = jobs.get(id);
+    if (!job || job.runId !== this.runId) return { output: 'Unknown or finished job id.', isError: true };
+    const gone = await stop(id, job, 3000);
+    const code = job.exit === null ? '' : ` (its command had exited with code ${job.exit})`;
+    if (!gone) return { output: `Job ${id} was told to stop, but something it started is still running. Check again with computer.shell_status.\n${tail(job.out, 2000)}`, isError: true };
+    return { output: `Stopped job ${id} and everything it started${code}.\n${tail(job.out, 2000)}` };
   }
 
   // -------------------------------------------------------- browser

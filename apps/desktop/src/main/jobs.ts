@@ -35,7 +35,7 @@ export function kill(p: ChildProcess, graceMs = 3000): Promise<boolean> {
   return killTree(p, graceMs).catch(() => false);
 }
 
-async function stop(id: string, j: Job, graceMs: number): Promise<boolean> {
+export async function stop(id: string, j: Job, graceMs: number): Promise<boolean> {
   j.stopping = true;
   const gone = await kill(j.proc, graceMs);
   if (gone && jobs.get(id) === j) jobs.delete(id);
