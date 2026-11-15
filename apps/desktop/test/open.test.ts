@@ -24,11 +24,16 @@ const plan = (t: string, reveal = false, platform: NodeJS.Platform = 'darwin') =
 // ways that can't run anything an agent wrote.
 describe('computer.open', () => {
   it('opens documents only in a fixed system viewer on macOS, never whatever claims the type', () => {
-    expect(plan(join(project, 'report.pdf'))).toEqual({ kind: 'view', path: join(project, 'report.pdf'), viewer: '/System/Applications/Preview.app' });
-    expect(plan('chart.png')).toMatchObject({ kind: 'view', viewer: '/System/Applications/Preview.app' });
-    expect(plan('notes.md')).toMatchObject({ kind: 'view', viewer: '/System/Applications/TextEdit.app' });
-    expect(plan('data.csv')).toMatchObject({ kind: 'view', viewer: '/System/Applications/TextEdit.app' });
-    expect(plan('clip.mov')).toMatchObject({ kind: 'view', viewer: '/System/Applications/QuickTime Player.app' });
+    if (process.platform === 'darwin') {
+      expect(plan(join(project, 'report.pdf'))).toEqual({ kind: 'view', path: join(project, 'report.pdf'), viewer: '/System/Applications/Preview.app' });
+      expect(plan('chart.png')).toMatchObject({ kind: 'view', viewer: '/System/Applications/Preview.app' });
+      expect(plan('notes.md')).toMatchObject({ kind: 'view', viewer: '/System/Applications/TextEdit.app' });
+      expect(plan('data.csv')).toMatchObject({ kind: 'view', viewer: '/System/Applications/TextEdit.app' });
+      expect(plan('clip.mov')).toMatchObject({ kind: 'view', viewer: '/System/Applications/QuickTime Player.app' });
+    } else {
+      // Where the viewer isn't there (tests on Linux), the file is only revealed, never handed to whatever app.
+      expect(plan('report.pdf')).toMatchObject({ kind: 'reveal' });
+    }
     // Windows: the user's own app for an allowed type (there's no sandbox to keep it out of anyway).
     expect(plan('report.pdf', false, 'win32')).toEqual({ kind: 'view', path: join(project, 'report.pdf') });
   });

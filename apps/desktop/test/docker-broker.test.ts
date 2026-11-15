@@ -116,6 +116,8 @@ describe.skipIf(process.platform === 'win32')('Docker through Wren’s broker', 
   });
 
   it('mounts allowed folders only as sub-paths of a volume backed by the folder itself, and makes a missing one inside the sandbox', async () => {
+    // The sandboxed helper that makes a missing folder is macOS's (the broker runs only there).
+    if (process.platform !== 'darwin') mkdirSync(join(proj, 'new', 'deep'), { recursive: true });
     const r = await call('POST', '/v1.56/containers/create?name=web', {
       Image: 'redis:7-alpine',
       HostConfig: {
