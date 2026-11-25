@@ -55,9 +55,10 @@ describe('the Settings page renders the same on the server and in the browser', 
 });
 
 /** Run the inline <head> script against stand-ins and report what it left on <html>. */
-function runScript(stored: Record<string, string>, prefersDark: boolean) {
+function runScript(stored: Record<string, string>, prefersDark: boolean, titleBar?: string) {
   const root = fakeRoot();
-  new Function('document', 'localStorage', 'matchMedia', PREFS_SCRIPT)({ documentElement: root }, { getItem: (k: string) => stored[k] ?? null }, () => ({ matches: prefersDark }));
+  const win = { wren: titleBar ? { titleBar } : undefined };
+  new Function('window', 'document', 'localStorage', 'matchMedia', PREFS_SCRIPT)(win, { documentElement: root }, { getItem: (k: string) => stored[k] ?? null }, () => ({ matches: prefersDark }));
   return root.state();
 }
 function fakeRoot() {
@@ -92,5 +93,14 @@ describe('the theme and panes are put back once React has the page', () => {
     const root = fakeRoot(); // as React leaves <html> after building the page again: nothing of ours on it
     applyStoredPrefs(root, { getItem: (k) => ({ 'wren-sidebar': 'collapsed' })[k] ?? null }, true);
     expect(root.state()).toEqual({ dark: true, sidebar: 'collapsed' });
+  });
+
+  it('with the desktop window’s hidden title bar kept (macOS), as the inline script sets it', () => {
+    for (const titleBar of ['hidden', undefined]) {
+      const root = fakeRoot();
+      applyStoredPrefs(root, { getItem: (k) => ({ 'wren-theme': 'dark' })[k] ?? null }, false, titleBar);
+      expect(root.state()).toEqual(runScript({ 'wren-theme': 'dark' }, false, titleBar));
+      expect(root.dataset.titlebar).toBe(titleBar);
+    }
   });
 });

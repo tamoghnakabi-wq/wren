@@ -8,6 +8,34 @@
 /* The on-screen keyboard is open (set by the task page from the visual viewport). */
 @custom-variant kb-open (&:where(:root[data-keyboard] *));
 
+/* The desktop app on macOS (0.1.52+) has no title bar: the page runs to the top edge with the window buttons over
+   it (set early by lib/prefs.ts from the bridge). --wren-titlebar is the room left at the top for them: the
+   sidebar, the task and page headers, the site header and the phone menu start below it, and .titlebar-drag lets
+   the window be dragged by that strip. Zero everywhere else. */
+:root {
+  --wren-titlebar: 0px;
+}
+:root[data-titlebar='hidden'] {
+  --wren-titlebar: 38px;
+}
+.titlebar-drag {
+  display: none;
+}
+:root[data-titlebar='hidden'] .titlebar-drag {
+  display: block;
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--wren-titlebar);
+  z-index: 60;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+/* The collapsed sidebar is narrower than the window buttons, so its tint and edge start below the strip. */
+:root[data-titlebar='hidden'][data-sidebar='collapsed'] .wren-sidebar {
+  background-clip: content-box;
+  border-image: linear-gradient(to bottom, transparent var(--wren-titlebar), var(--color-border) var(--wren-titlebar)) 1;
+}
+
 /* Graphite: black and white, so the colour on screen is the agents' own (their characters) and one
    amber "lamp" that only means "an agent needs you". Every text pair is ≥4.5:1. */
 :root {

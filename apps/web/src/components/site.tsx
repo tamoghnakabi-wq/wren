@@ -11,7 +11,7 @@ export function SiteNav({ tone = 'paper' }: { tone?: 'paper' | 'night' }) {
   const base = cx('rounded-lg px-3 py-2 transition-colors', night ? 'text-night-muted hover:text-night-text' : 'text-muted hover:text-text');
   const link = cx(base, 'hidden sm:block');
   return (
-    <header className={cx('top-0 z-40', night ? 'absolute inset-x-0 text-night-text' : 'sticky border-b border-border/70 bg-bg/80 backdrop-blur-md')}>
+    <header className={cx('top-0 z-40 pt-[var(--wren-titlebar)]', night ? 'absolute inset-x-0 text-night-text' : 'sticky border-b border-border/70 bg-bg/80 backdrop-blur-md')}>
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
         <Link href="/" aria-label="Wren home" className="rounded-lg">
           <Logo tone={night ? 'night' : 'auto'} />

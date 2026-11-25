@@ -67,16 +67,16 @@ export function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-dvh">
-      <a href="#main" className="sr-only z-[70] rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-fg focus:not-sr-only focus:fixed focus:top-3 focus:left-3">
+      <a href="#main" className="sr-only z-[70] rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-fg focus:not-sr-only focus:fixed focus:top-[calc(var(--wren-titlebar)+0.75rem)] focus:left-3">
         Skip to content
       </a>
-      <aside className="wren-sidebar sticky top-0 z-20 hidden h-dvh w-[264px] shrink-0 flex-col border-r border-border bg-bg-subtle/60 transition-[width] duration-200 ease-out motion-reduce:transition-none lg:flex rail:w-[68px]">
+      <aside className="wren-sidebar sticky top-0 z-20 hidden h-dvh w-[264px] shrink-0 flex-col border-r border-border bg-bg-subtle/60 pt-[var(--wren-titlebar)] transition-[width] duration-200 ease-out motion-reduce:transition-none lg:flex rail:w-[68px]">
         <SidebarContent collapsible />
       </aside>
 
       {drawer && <Drawer onClose={closeDrawer} />}
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col pt-[var(--wren-titlebar)] lg:pt-0">
         {!fullBleed && <MobileTopBar onMenu={() => setDrawer(true)} />}
         <main id="main" tabIndex={-1} className={cx('flex-1 focus:outline-none', fullBleed ? '' : 'px-4 pt-4 pb-28 sm:px-6 lg:px-10 lg:pt-10 lg:pb-12')}>
           <div className={cx(fullBleed ? '' : 'mx-auto w-full max-w-5xl')}>
@@ -125,8 +125,8 @@ function Drawer({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Menu">
       <div className="fade-in absolute inset-0 bg-black/40 backdrop-blur-[1px]" onClick={onClose} />
-      <aside ref={panel} className="drawer-in absolute inset-y-0 left-0 flex w-[84%] max-w-[300px] flex-col bg-bg shadow-pop" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
-        <button className="absolute top-4 right-3 z-10 rounded-lg p-1.5 text-muted transition-colors hover:bg-bg-subtle hover:text-text" style={{ marginTop: 'env(safe-area-inset-top)' }} onClick={onClose} aria-label="Close menu">
+      <aside ref={panel} className="drawer-in absolute inset-y-0 left-0 flex w-[84%] max-w-[300px] flex-col bg-bg shadow-pop" style={{ paddingTop: 'max(env(safe-area-inset-top), var(--wren-titlebar))' }}>
+        <button className="absolute top-4 right-3 z-10 rounded-lg p-1.5 text-muted transition-colors hover:bg-bg-subtle hover:text-text" style={{ marginTop: 'max(env(safe-area-inset-top), var(--wren-titlebar))' }} onClick={onClose} aria-label="Close menu">
           <X className="h-5 w-5" />
         </button>
         <SidebarContent />
@@ -294,7 +294,7 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
 function MobileTopBar({ onMenu }: { onMenu: () => void }) {
   const inbox = useInboxCount();
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-bg/85 px-3 backdrop-blur-md lg:hidden" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
+    <header className="sticky top-[var(--wren-titlebar)] z-30 flex h-14 items-center justify-between border-b border-border bg-bg/85 px-3 backdrop-blur-md lg:hidden" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
       <div className="flex w-20">
         <button onClick={onMenu} className="rounded-lg p-2 text-muted transition-colors hover:text-text" aria-label="Open menu">
           <Menu className="h-5 w-5" />

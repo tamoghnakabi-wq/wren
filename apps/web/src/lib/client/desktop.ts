@@ -34,6 +34,8 @@ export interface DesktopStatus {
 }
 
 export interface WrenDesktop {
+  /** 'hidden' when the window has no title bar (macOS, desktop 0.1.52+); lib/prefs.ts marks the page from it. */
+  titleBar?: 'hidden';
   status(): Promise<DesktopStatus>;
   link(): Promise<{ userCode: string; pairId: string }>;
   unlink(): Promise<void>;

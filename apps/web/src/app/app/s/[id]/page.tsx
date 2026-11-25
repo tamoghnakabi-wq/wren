@@ -303,7 +303,7 @@ export default function SessionPage() {
   return (
     // Exactly the window, never more: the page itself must not scroll (only the panes inside do).
     <div className="relative flex h-dvh flex-col overflow-hidden">
-      <header className="flex items-center gap-2 border-b border-border bg-bg/90 px-3 py-2.5 backdrop-blur-md sm:px-5" style={{ paddingTop: 'max(env(safe-area-inset-top), 10px)' }}>
+      <header className="flex items-center gap-2 border-b border-border bg-bg/90 px-3 py-2.5 backdrop-blur-md sm:px-5" style={{ paddingTop: 'calc(max(env(safe-area-inset-top), 10px) + var(--wren-titlebar))' }}>
         <button onClick={() => (history.length > 1 ? router.back() : router.push('/app'))} className="rounded-lg p-1.5 text-muted hover:bg-bg-subtle" aria-label="Back">
           <ArrowLeft className="h-5 w-5" />
         </button>

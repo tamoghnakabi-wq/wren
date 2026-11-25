@@ -39,6 +39,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script id="wren-prefs" dangerouslySetInnerHTML={{ __html: PREFS_SCRIPT }} />
       </head>
       <body className="min-h-dvh bg-bg text-text">
+        {/* The desktop app's window has no title bar on macOS: this strip is where it's dragged (globals.css). */}
+        <div aria-hidden className="titlebar-drag" />
         <ThemeWatcher />
         <SiteAnalytics>{children}</SiteAnalytics>
       </body>

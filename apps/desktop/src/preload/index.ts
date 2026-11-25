@@ -4,10 +4,13 @@ import { contextBridge, ipcRenderer } from 'electron';
 // main process passed in). Each call is re-checked in the main process.
 
 const origin = (process.argv.find((a) => a.startsWith('--wren-origin=')) ?? '').slice('--wren-origin='.length);
+/** 'hidden' when the window has no title bar (macOS, 0.1.52+): the page makes room for the window buttons. */
+const titleBar = process.argv.includes('--wren-titlebar=hidden') ? 'hidden' : undefined;
 
 if (origin && location.origin === origin) {
   const invoke = (ch: string, ...args: unknown[]) => ipcRenderer.invoke(ch, ...args);
   contextBridge.exposeInMainWorld('wren', {
+    titleBar,
     status: () => invoke('status'),
     link: () => invoke('link'),
     unlink: () => invoke('unlink'),
