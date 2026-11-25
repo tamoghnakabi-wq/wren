@@ -104,7 +104,7 @@ export function toolEnv(): Promise<Record<string, string>> {
 // It lives in Wren's data folder, which sandboxed commands can neither read nor change.
 // The command also gets only the agent allowlist of variables (W-108): Claude Code's own sign-in
 // and provider settings stay with Claude Code.
-const PREFIX_VARS = [...BASE_VAR_NAMES, 'TMUX_TMPDIR', 'DOCKER_HOST', 'DOCKER_CONFIG', 'TESTCONTAINERS_RYUK_DISABLED', ...TOOL_VAR_NAMES].filter((n) => n !== 'SHELL');
+const PREFIX_VARS = [...BASE_VAR_NAMES, 'TMUX_TMPDIR', 'DOCKER_HOST', 'DOCKER_CONFIG', 'BUILDX_CONFIG', 'TESTCONTAINERS_RYUK_DISABLED', ...TOOL_VAR_NAMES].filter((n) => n !== 'SHELL');
 export const SHELL_PREFIX = `#!/bin/sh
 # Written by Wren: runs one command from Claude Code inside Wren's sandbox, with a minimal environment.
 p="$WREN_SHELL_SB"

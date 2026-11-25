@@ -147,6 +147,15 @@ const PROGRAM_RULES: Rule[] = [
 const OPEN_PROGRAM = /^open(\s|$)/;
 const OPEN_IN_SANDBOX =
   "Blocked: Wren's sandbox doesn't let commands open files, apps or web pages with `open` (they would run outside it). Use Wren's open tool (computer.open, or the wren open tool) to show the user a file or page, or give them the path or link.";
+/**
+ * What else the macOS sandbox refuses because a system service would do it outside the command (2026-11-26 audit):
+ * refused up front with what to do instead (screencapture would otherwise wait until the command times out).
+ */
+const REFUSED_IN_SANDBOX: [RegExp, string][] = [
+  [/^screencapture(\s|$)/, "Blocked: Wren's sandbox doesn't let commands capture the screen. Use the screen.capture tool, which the user allows in Wren's settings."],
+  [/^(pbcopy|pbpaste)(\s|$)/, "Blocked: Wren's sandbox doesn't let commands use the clipboard (it can hold passwords). Write to a file, or give the user the text."],
+  [/^shortcuts(\s|$)/, "Blocked: Wren's sandbox doesn't let commands run the user's Shortcuts (they would run outside it). Ask the user to run it."],
+];
 
 /** One simple command: its real argument vector (quotes removed), as the program receives it. */
 interface SimpleCommand {
@@ -970,6 +979,10 @@ export function assessShell(command: string, runtime: Runtime, trust?: ProgramTr
     }
   }
   for (const line of found.lines) {
+    if (runtime === 'desktop' && place.sandboxed) {
+      const refused = REFUSED_IN_SANDBOX.find(([re]) => re.test(line));
+      if (refused) return { risk: 'high', reason: 'uses a system service outside the sandbox', blocked: refused[1] };
+    }
     if (runtime === 'desktop' && OPEN_PROGRAM.test(line)) {
       if (place.sandboxed) return { risk: 'high', reason: 'opens files, apps or pages outside the sandbox', blocked: OPEN_IN_SANDBOX };
       if (riskRank('high') > riskRank(risk)) {

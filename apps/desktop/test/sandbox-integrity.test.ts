@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
-const { appDirs, engineProfile, fileOpsProfile, makeRunTemp, removeRunTemp, seatbeltProfile, socketHolders } = await import('../src/main/sandbox');
+const { appDirs, dockerConfigDir, engineProfile, fileOpsProfile, makeRunTemp, removeRunTemp, seatbeltProfile, socketHolders } = await import('../src/main/sandbox');
 const { listConfined, readConfined, writeConfined } = await import('../src/main/confined');
 
 // W-128: what decides approvals (Wren's helper, Grok's per-run hook plugin) can't be changed by any agent,
@@ -280,6 +280,38 @@ describe.skipIf(!existsSync('/usr/bin/sandbox-exec'))('starting things outside t
         resolve(code ?? -1);
       });
     });
+
+  // 2026-11-26 audit: system services that act for a command outside its own process. Each check first shows the
+  // service works outside any profile, so a machine without it (CI) proves nothing either way.
+  it("can't read the clipboard, capture the screen, run the user's Shortcuts or change the agents' Docker config", () => {
+    for (const profile of profiles([project])) {
+      const before = spawnSync('/usr/bin/pbpaste', ['-pboard', 'find'], { encoding: 'utf8' }).stdout;
+      try {
+        spawnSync('/usr/bin/pbcopy', ['-pboard', 'find'], { input: 'wren-probe' });
+        if (spawnSync('/usr/bin/pbpaste', ['-pboard', 'find'], { encoding: 'utf8' }).stdout === 'wren-probe') {
+          expect(sb(profile, '/usr/bin/pbpaste -pboard find').stdout).toBe('');
+          sb(profile, 'printf changed | /usr/bin/pbcopy -pboard find');
+          expect(spawnSync('/usr/bin/pbpaste', ['-pboard', 'find'], { encoding: 'utf8' }).stdout).toBe('wren-probe');
+        }
+      } finally {
+        spawnSync('/usr/bin/pbcopy', ['-pboard', 'find'], { input: before });
+      }
+      if (spawnSync('/usr/bin/shortcuts', ['list']).status === 0) expect(sb(profile, '/usr/bin/shortcuts list').status).not.toBe(0);
+      // One pixel, so the test never keeps a picture of the screen.
+      const shot = join(project, 'pixel.png');
+      spawnSync('/usr/sbin/screencapture', ['-x', '-R0,0,1,1', shot]);
+      const works = existsSync(shot);
+      rmSync(shot, { force: true });
+      if (works) {
+        // Refused, it waits rather than failing: ended after 3 s (a 1-pixel capture takes ~80 ms when allowed).
+        spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/usr/sbin/screencapture', '-x', '-R0,0,1,1', shot], { timeout: 3_000 });
+        expect(existsSync(shot)).toBe(false);
+        rmSync(shot, { force: true });
+      }
+      expect(profile).toMatch(/replayd/);
+      expect(sb(profile, `/bin/mkdir -p '${dockerConfigDir()}' 2>/dev/null; echo x > '${dockerConfigDir()}/config.json'`).status).not.toBe(0);
+    }
+  }, 30_000);
 
   it("can't open an app it built, so the app never runs with the user's full access", async () => {
     // A minimal background app that leaves a mark where commands can't write (the data folder).

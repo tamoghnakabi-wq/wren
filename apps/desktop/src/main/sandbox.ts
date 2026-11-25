@@ -339,14 +339,26 @@ export function runTempDir(runId: string): string {
  */
 export function makeRunTemp(runId: string): string {
   const root = agentTempRoot();
-  try {
-    if (!lstatSync(root).isDirectory()) unlinkSync(root);
-  } catch {
-    // nothing there yet
-  }
   const dir = runTempDir(runId);
+  // Agents may replace either with a link (the area is in their temp folder): Wren's own process writes there (the
+  // Docker broker's socket), so a link is removed and the folder made again (2026-11-26 audit).
+  for (const p of [root, dir]) {
+    try {
+      if (!lstatSync(p).isDirectory()) unlinkSync(p);
+    } catch {
+      // nothing there yet
+    }
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+/**
+ * The Docker CLI's config for agents (DOCKER_CONFIG): readable to commands, writable by none (in every profile's
+ * `noWrite`), so Wren never writes a file where an agent could have put a link (2026-11-26 audit).
+ */
+export function dockerConfigDir(): string {
+  return join(realpathOr(tmpdir()), 'wren-docker-cli');
 }
 
 /** Remove a finished run's temp folder (best effort). */
@@ -426,7 +438,7 @@ function build(s: Spec): string {
   const writable = [...s.roots, ...temp, ...caches, ...engineDirs];
   const readable = [...s.roots, ...caches, ...engineDirs, ...(s.tools ? TOOLCHAINS.map(h) : []), ...(s.readOnly ?? [])];
   const ownState = new Set(engineDirs);
-  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? []), ...autorunPaths(home, s.roots)])];
+  const noWrite = [...new Set([...appDirs(), ...(s.readOnly ?? []), ...autorunPaths(home, s.roots), dockerConfigDir()])];
   const secrets = [...SECRETS.map(h).filter((p) => !ownState.has(p)), s.dataDir];
   const otherEngines = (Object.keys(ENGINE_STATE) as Engine[]).filter((e) => e !== s.engine);
   for (const e of otherEngines) for (const d of ENGINE_STATE[e].dirs) secrets.push(h(d));
@@ -470,6 +482,12 @@ function build(s: Spec): string {
     // run commands (A-D2, 0.1.50). launchctl submit/bootstrap are already refused inside a profile.
     '(deny lsopen)',
     '(deny appleevent-send)',
+    // System services that act for a command outside its own process (2026-11-26 audit, each tested from inside a
+    // profile): the clipboard (it read whatever the user had copied: a password, a code), the screen through
+    // ScreenCaptureKit (with Wren's own Screen Recording permission, past the screen switch and its approval), and
+    // the user's Shortcuts (they run outside the sandbox, with input the command chooses). Automator refuses
+    // sandboxed callers itself.
+    String.raw`(deny mach-lookup (global-name-regex #"^com\.apple\.(pasteboard\.|replayd$|siri\.VoiceShortcuts|shortcuts\.|WorkflowKit\.)"))`,
     // Sockets are matched by their real path, so a link elsewhere (/var/run/docker.sock) is covered too.
     ...sockets,
     '(deny file-write*)',

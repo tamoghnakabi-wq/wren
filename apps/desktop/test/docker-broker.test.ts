@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, request, type IncomingMessage, type Server } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '0.0.0' }, safeStorage: {} }));
-const { startDockerBroker, parseStrictJson, routeOf, parseTarget, hostConfigProblem } = await import('../src/main/docker-broker');
+const { startDockerBroker, parseStrictJson, routeOf, parseTarget, hostConfigProblem, stopContainersOutside, writeDockerConfig } = await import('../src/main/docker-broker');
+const { makeRunTemp, runTempDir } = await import('../src/main/sandbox');
 
 // The fix review (0.1.50): Docker for agents through a broker that passes on only what can't reach past the
 // allowed folders. A fake Docker daemon records exactly what reaches it.
@@ -50,6 +51,12 @@ beforeAll(async () => {
       const json = (status: number, v: unknown) => (res.writeHead(status, { 'content-type': 'application/json' }), res.end(JSON.stringify(v)));
       let m: RegExpExecArray | null;
       if ((m = /^\/volumes\/([^/]+)$/.exec(path)) && req.method === 'GET') return volumes.has(m[1]) ? json(200, volumes.get(m[1])) : json(404, { message: 'no such volume' });
+      if (path === '/volumes' && req.method === 'GET') return json(200, { Volumes: [...volumes.values()] });
+      if (path === '/containers/json') {
+        const vol = JSON.parse(new URL(req.url!, 'http://d').searchParams.get('filters') ?? '{}').volume?.[0];
+        const all = [...containers.values()] as { Id: string; Mounts: { Name?: string }[] }[];
+        return json(200, all.filter((c) => !vol || c.Mounts.some((x) => x.Name === vol)).map((c) => ({ Id: c.Id })));
+      }
       if (path === '/volumes/create') {
         const v = JSON.parse(body);
         volumes.set(v.Name, { Name: v.Name, Driver: v.Driver ?? 'local', Options: v.DriverOpts ?? null });
@@ -253,6 +260,53 @@ describe.skipIf(process.platform === 'win32')('Docker through Wren’s broker', 
     expect((await call('POST', '/v1.56/build?t=x&securityopt=%5B%22seccomp%3Dunconfined%22%5D')).status).toBe(403);
     expect((await call('POST', '/v1.56/build?networkmode=container:db')).status).toBe(403);
     expect((await call('POST', '/v1.56/build?t=x&networkmode=host')).status).toBe(200);
+  });
+
+  // 2026-11-26 audit: Go folds a key's non-ASCII letters to the smallest of their case orbit, so `Prıvileged`
+  // (dotless ı) is Docker's Privileged; the broker's NFKC-and-lowercase fold didn't see it.
+  it('reads keys the way Docker’s decoder folds them, dotless i and long s included', async () => {
+    for (const body of [
+      '{"Image":"x","HostConfig":{"Prıvileged":true}}',
+      '{"Image":"x","HostConfig":{"Bınds":["/etc:/x"]}}',
+      '{"Image":"x","HostConfig":{"Mountſ":[{"Type":"bind","Source":"/etc","Target":"/x"}]}}',
+      '{"Image":"x","HostConfıg":{"Privileged":true}}',
+      '{"Image":"x","HostConfig":{"CapAdd":["SYS_ADMIN"],"Devıces":[{"PathOnHost":"/dev/vda","PathInContainer":"/x"}]}}',
+    ]) {
+      expect((await call('POST', '/v1.56/containers/create', body)).status, body).toBe(403);
+    }
+    expect((await call('POST', '/v1.56/containers/mine/exec', '{"Cmd":["sh"],"Prıvileged":true}')).status).toBe(403);
+    expect(sent('/containers/create')).toBeUndefined();
+  });
+
+  it('reads every copy of a build option', async () => {
+    expect((await call('POST', '/v1.56/build?securityopt=%5B%5D&securityopt=%5B%22seccomp%3Dunconfined%22%5D')).status).toBe(403);
+    expect((await call('POST', '/v1.56/build?networkmode=host&networkmode=container:db')).status).toBe(403);
+  });
+
+  it('stops containers that use a folder no longer allowed, and only those', async () => {
+    volumes.set('wren-folder-old', { Name: 'wren-folder-old', Driver: 'local', Options: { type: 'none', o: 'bind', device: '/Users/someone/removed' } });
+    volumes.set('wren-folder-now', { Name: 'wren-folder-now', Driver: 'local', Options: { type: 'none', o: 'bind', device: proj } });
+    containers.set('old', inspect(ID('7'), [{ Type: 'volume', Name: 'wren-folder-old', Driver: 'local' }]));
+    containers.set('now', inspect(ID('8'), [{ Type: 'volume', Name: 'wren-folder-now', Driver: 'local' }]));
+    expect(await stopContainersOutside([proj, holder, loose], join(sockDir, 'u.sock'))).toBe(1);
+    expect(sent(`/containers/${ID('7')}/stop`)).toBeTruthy();
+    expect(sent(`/containers/${ID('8')}/stop`)).toBeUndefined();
+    expect(await stopContainersOutside([proj], null)).toBe(0); // Docker not running
+  });
+
+  it('never writes the CLI config, or a run’s folder, through a link an agent left', () => {
+    const decoy = realpathSync(mkdtempSync(join(tmpdir(), 'wren-decoy-')));
+    const dir = join(base, 'cli-config');
+    symlinkSync(decoy, dir);
+    expect(writeDockerConfig(dir)).toBe(dir);
+    expect(lstatSync(dir).isDirectory()).toBe(true);
+    expect(existsSync(join(decoy, 'config.json'))).toBe(false);
+    const run = `link-${process.pid}`;
+    mkdirSync(join(runTempDir(run), '..'), { recursive: true });
+    symlinkSync(decoy, runTempDir(run));
+    expect(lstatSync(makeRunTemp(run)).isDirectory()).toBe(true);
+    rmSync(runTempDir(run), { recursive: true, force: true });
+    rmSync(decoy, { recursive: true, force: true });
   });
 
   it('reads JSON the way Docker does, keeping big numbers as written', () => {

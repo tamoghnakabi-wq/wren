@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { createServer, request, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { makeFolderConfined } from './confined';
 import { reachesAny } from './paths';
-import { agentCanWrite, appDirs, autorunPaths, credentialStores } from './sandbox';
+import { agentCanWrite, appDirs, autorunPaths, credentialStores, dockerConfigDir } from './sandbox';
 
 // Docker for agents on macOS (0.1.50 review). The Docker socket is a door out of Wren's sandbox: a container can
 // mount any folder of this Mac (`-v ~/.ssh:/x`), run privileged, or join the VM's processes, so commands can't
@@ -37,7 +37,26 @@ const PLUGIN_DIRS = ['/Applications/Docker.app/Contents/Resources/cli-plugins', 
  * So keys are compared folded, any key given twice is refused, and checks look fields up folded too (`field`).
  * Big integers keep their text, so a re-written body says what the original did.
  */
-export const fold = (k: string) => k.normalize('NFKC').toLowerCase();
+export const fold = (k: string) => [...k].map(foldChar).join('');
+
+/**
+ * One character as Go's `foldName` reads it (encoding/json, Go 1.25: ASCII upper-cased, anything else the smallest
+ * rune of its simple case-fold orbit, `foldRune`), so `Prıvileged` (dotless ı → I), `Bınds`, the Kelvin sign and the
+ * long s all name Docker's field. JavaScript has no SimpleFold: the smallest of the character, its lower and upper
+ * case and their NFKC forms (single characters only) gives Go's answer wherever that is an ASCII letter, and joins a
+ * few more (fullwidth letters) that Go keeps apart, which only refuses more (2026-11-26 audit: NFKC plus
+ * toLowerCase left dotless ı apart, so `{"HostConfig":{"Prıvileged":true}}` passed the check and Docker made a
+ * privileged container).
+ */
+function foldChar(c: string): string {
+  if (c.length === 1 && c < '\x80') return c.toUpperCase();
+  const n = c.normalize('NFKC');
+  let min = c;
+  for (const x of [c.toLowerCase(), c.toUpperCase(), n, n.toLowerCase(), n.toUpperCase()]) {
+    if ([...x].length === 1 && x.codePointAt(0)! < min.codePointAt(0)!) min = x;
+  }
+  return min < '\x80' ? min.toUpperCase() : min;
+}
 const rawJSON = (JSON as unknown as { rawJSON?: (s: string) => unknown }).rawJSON;
 
 export function parseStrictJson(text: string): unknown {
@@ -242,13 +261,13 @@ export function hostConfigProblem(hc: unknown, existing = false): string | null 
 
 /** Query options of a build that reach past a normal build container. */
 export function buildProblem(query: string): string | null {
+  // Every copy of an option counts: which one Docker reads (first, last, all) isn't Wren's to guess.
   const q = new URLSearchParams(query.replace(/^\?/, ''));
-  const so = q.get('securityopt');
-  if (so && so !== '[]' && so !== 'null') return 'security options aren’t allowed in builds';
-  if (q.get('cgroupparent')) return 'cgroupparent isn’t allowed in builds';
-  if ((q.get('networkmode') ?? '').startsWith('container:')) return 'a build can’t join another container’s network';
-  const iso = q.get('isolation');
-  if (iso && iso !== 'default') return 'isolation isn’t allowed in builds';
+  const all = (k: string) => [...q.entries()].filter(([key]) => key.toLowerCase() === k).map(([, v]) => v);
+  if (all('securityopt').some((v) => v && v !== '[]' && v !== 'null')) return 'security options aren’t allowed in builds';
+  if (all('cgroupparent').some(Boolean)) return 'cgroupparent isn’t allowed in builds';
+  if (all('networkmode').some((v) => v.startsWith('container:'))) return 'a build can’t join another container’s network';
+  if (all('isolation').some((v) => v && v !== 'default')) return 'isolation isn’t allowed in builds';
   return null;
 }
 
@@ -825,6 +844,52 @@ export function dockerSocket(home = homedir()): string | null {
 
 const brokers = new Map<string, Promise<{ path: string; close: () => void }>>();
 
+/** A request of Wren's own to the real Docker socket (outside any run's broker). */
+function dockerJson(socket: string, method: string, path: string): Promise<{ status: number; json: unknown }> {
+  return new Promise((resolve, reject) => {
+    const r = request({ socketPath: socket, method, path, agent: false, headers: { host: 'docker' } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        let json: unknown = null;
+        try {
+          json = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
+        } catch {
+          json = null;
+        }
+        resolve({ status: res.statusCode ?? 502, json });
+      });
+      res.on('error', reject);
+    });
+    r.setTimeout(30_000, () => r.destroy(new Error('Docker didn’t answer')));
+    r.on('error', reject);
+    r.end();
+  });
+}
+
+/**
+ * Folders taken away end agents' access through containers too (2026-11-26 audit): a container an agent started
+ * with an allowed folder mounted (a `wren-folder-…` volume) kept running, and code in it kept using a folder the
+ * user had just removed. Stops every running container that mounts the volume of a folder no longer allowed.
+ * Resolves the number stopped; Docker not running counts as nothing to do.
+ */
+export async function stopContainersOutside(roots: string[], socket = dockerSocket()): Promise<number> {
+  if (!socket) return 0;
+  const vols = await dockerJson(socket, 'GET', `/volumes?filters=${encodeURIComponent(JSON.stringify({ name: [FOLDER_VOLUME] }))}`);
+  const list = ((vols.json as { Volumes?: { Name?: string; Options?: Record<string, string> | null }[] } | null)?.Volumes ?? []).filter((v) => v.Name?.startsWith(FOLDER_VOLUME));
+  const gone = list.filter((v) => !roots.includes(v.Options?.device ?? '')).map((v) => v.Name!);
+  let stopped = 0;
+  for (const name of gone) {
+    const cs = await dockerJson(socket, 'GET', `/containers/json?filters=${encodeURIComponent(JSON.stringify({ volume: [name] }))}`);
+    for (const c of (cs.json as { Id?: string }[] | null) ?? []) {
+      if (!c.Id || !/^[0-9a-f]{64}$/.test(c.Id)) continue;
+      const r = await dockerJson(socket, 'POST', `/containers/${c.Id}/stop?t=5`);
+      if (r.status < 300 || r.status === 304) stopped++;
+    }
+  }
+  return stopped;
+}
+
 /**
  * A run's Docker: its broker (started once, in its temp folder) and what its commands need to use it. The CLI's
  * own config (~/.docker) is a credential store agents can't read, so they get a config of their own that finds
@@ -838,10 +903,36 @@ export async function dockerEnv(runId: string, temp: string, roots: () => string
     b.catch(() => brokers.delete(runId));
   }
   const { path } = await b;
-  const config = join(temp, 'docker');
-  mkdirSync(config, { recursive: true, mode: 0o700 });
-  writeFileSync(join(config, 'config.json'), JSON.stringify({ cliPluginsExtraDirs: PLUGIN_DIRS }), { mode: 0o600 });
-  return { DOCKER_HOST: `unix://${path}`, DOCKER_CONFIG: config, TESTCONTAINERS_RYUK_DISABLED: 'true' };
+  // buildx keeps its state beside the CLI config unless told otherwise; that folder is read-only to agents.
+  return { DOCKER_HOST: `unix://${path}`, DOCKER_CONFIG: writeDockerConfig(), BUILDX_CONFIG: join(temp, 'buildx'), TESTCONTAINERS_RYUK_DISABLED: 'true' };
+}
+
+/**
+ * The agents' Docker CLI config, in a folder no profile may write (`dockerConfigDir`). One made before it was
+ * protected might be a link or hold one: anything there that isn't a plain folder is removed, and the file is
+ * written without following a link.
+ */
+export function writeDockerConfig(dir = dockerConfigDir()): string {
+  try {
+    const st = lstatSync(dir);
+    if (!st.isDirectory()) unlinkSync(dir);
+  } catch {
+    // nothing there yet
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  const file = join(dir, 'config.json');
+  try {
+    if (!lstatSync(file).isFile()) rmSync(file, { recursive: true, force: true });
+  } catch {
+    // not made yet
+  }
+  const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o644);
+  try {
+    writeSync(fd, JSON.stringify({ cliPluginsExtraDirs: PLUGIN_DIRS }));
+  } finally {
+    closeSync(fd);
+  }
+  return dir;
 }
 
 /** A run ended: its broker stops (containers it made keep running, like any the user starts). */

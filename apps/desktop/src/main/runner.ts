@@ -24,7 +24,7 @@ import {
 import { runClaudeCode } from '../engines/claude-code';
 import { runGrokBuild } from '../engines/grok-build';
 import { removeRunTemp, type Engine } from './sandbox';
-import { stopRunDocker } from './docker-broker';
+import { stopContainersOutside, stopRunDocker } from './docker-broker';
 import { deviceJson } from './api';
 import { engineImages, withSkipped } from '../engines/images';
 import { detect, type Capabilities } from './capabilities';
@@ -314,6 +314,12 @@ export class DeviceRunner {
    */
   permissionsReduced() {
     for (const id of this.active.keys()) killRunJobs(id);
+    // Containers agents started with a folder that is no longer allowed stop too (macOS: Docker goes through Wren).
+    if (process.platform === 'darwin') {
+      void stopContainersOutside(allowedRoots(loadPolicy().folders))
+        .then((n) => n && log(`stopped ${n} container(s) using a folder no longer allowed`))
+        .catch((e) => log(`couldn't check agents' containers: ${(e as Error).message}`));
+    }
     for (const id of this.engineRuns) {
       this.stopReasons.set(id, 'Stopped because this computer’s permissions changed while it was running. Send a message to continue with the new settings.');
       this.active.get(id)?.abort();

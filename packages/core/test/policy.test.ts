@@ -435,6 +435,13 @@ describe('narrower rules after the fix review (0.1.50)', () => {
       expect(['low', 'medium'], c).toContain(mac(c).risk);
     }
   });
+  it('refuses the clipboard, screen capture and Shortcuts in the sandbox, with what to do instead (2026-11-26 audit)', () => {
+    for (const [c, why] of [['screencapture -x s.png', /screen\.capture/], ['echo x | pbcopy', /clipboard/], ['pbpaste > f', /clipboard/], ['/usr/bin/shortcuts run X', /Shortcuts/], ["bash -c 'screencapture a.png'", /screen/]] as const) {
+      expect(mac(c).blocked, c).toMatch(why);
+    }
+    expect(win('pbcopy').blocked).toBeUndefined(); // not macOS's sandbox
+    expect(assessShell('screencapture x', 'cloud').blocked).toBeUndefined();
+  });
   it("rates launchctl's read-only subcommands like other programs", () => {
     expect(mac('launchctl list').risk).toBe('medium');
     expect(mac('launchctl print gui/501').risk).toBe('medium');
