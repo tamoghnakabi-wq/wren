@@ -12,14 +12,16 @@ import { dayLabel } from '@/lib/usage-days';
 
 // Usage → This Mac: what the other AI apps on this computer used, read by the desktop app from their own
 // logs (window.wren.localUsage). It never leaves the computer: the page prices it here. Desktop 0.1.54+ also
-// says how much of each app's plan limits is used (window.wren.planLimits), as the app itself reports it.
+// says how much of each app's plan limits is used (window.wren.planLimits), as the app itself reports it: the
+// Limits view beside Tokens and Cost (as T3 Code has it), asked only while that view is open.
 
 const RANGES = [7, 30, 90] as const;
 type Range = (typeof RANGES)[number];
-type Measure = 'tokens' | 'cost';
+type Measure = 'tokens' | 'cost' | 'limits';
 /** Each app keeps one shade of ink: colour on Wren's screens is the agents' own. */
 const SHADE: Record<LocalApp, string> = { 'claude-code': 'bg-text', codex: 'bg-text/65', antigravity: 'bg-text/42', 'grok-build': 'bg-text/28', opencode: 'bg-text/16' };
 const RANGE_KEY = 'wren-local-usage-range';
+const SHOW_KEY = 'wren-local-usage-show';
 
 function storedRange(): Range {
   try {
@@ -27,6 +29,15 @@ function storedRange(): Range {
     return (RANGES as readonly number[]).includes(n) ? (n as Range) : 30;
   } catch {
     return 30;
+  }
+}
+
+function storedMeasure(): Measure {
+  try {
+    const m = localStorage.getItem(SHOW_KEY);
+    return m === 'cost' || m === 'limits' ? m : 'tokens';
+  } catch {
+    return 'tokens';
   }
 }
 
@@ -44,10 +55,12 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
   const [reading, setReading] = useState(true);
   const [prices, setPrices] = useState<{ models: PriceTable; fetchedAt: string } | null | 'none'>(null);
   const [range, setRange] = useState<Range>(storedRange);
-  const [measure, setMeasure] = useState<Measure>('tokens');
+  const [measure, setMeasure] = useState<Measure>(storedMeasure);
   const [breakdown, setBreakdown] = useState<'model' | 'day'>('model');
   // null while the first ask is out; 'failed' when the desktop couldn't answer at all.
   const [limits, setLimits] = useState<PlanLimitsReport | 'failed' | null>(null);
+  const [asking, setAsking] = useState(false);
+  const limitsView = measure === 'limits' && !!bridge.planLimits;
 
   // Settles a read (the first one starts with `reading` already true).
   const settle = (p: Promise<LocalUsageReport>) =>
@@ -58,12 +71,17 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
   const read = (refresh: boolean) => {
     setReading(true);
     void settle(bridge.localUsage({ refresh }));
-    void askLimits(bridge, refresh, setLimits);
+  };
+  // Each app is asked by running it (about a second), so only for the Limits view: when it's picked (the desktop
+  // answers again from what it asked in the last minute), when the page opens on it, and on its refresh button.
+  const ask = (refresh: boolean) => {
+    setAsking(true);
+    void Promise.resolve(askLimits(bridge, refresh, setLimits)).finally(() => setAsking(false));
   };
   useEffect(() => {
     let live = true;
     void settle(bridge.localUsage({ refresh: false }));
-    void askLimits(bridge, false, setLimits);
+    if (storedMeasure() === 'limits') void askLimits(bridge, false, setLimits);
     fetch('/api/usage/prices')
       .then((r) => (r.ok ? r.json() : null))
       .then((d: { models?: PriceTable; fetchedAt?: string } | null) => live && setPrices(d?.models ? { models: d.models, fetchedAt: d.fetchedAt ?? '' } : 'none'))
@@ -73,6 +91,15 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
     };
     // Once per bridge (once in practice): `settle` only sets state.
   }, [bridge]);
+  const pickMeasure = (m: Measure) => {
+    setMeasure(m);
+    if (m === 'limits' && m !== measure) ask(false);
+    try {
+      localStorage.setItem(SHOW_KEY, m);
+    } catch {
+      /* remembered for this visit only */
+    }
+  };
   const pickRange = (r: Range) => {
     setRange(r);
     try {
@@ -84,16 +111,62 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
 
   const table = prices && prices !== 'none' ? prices.models : null;
   const s = useMemo(() => (report ? summarize(report, range, table) : null), [report, range, table]);
+  const priced = table !== null;
+  const showCost = measure === 'cost' && priced;
+  const checked = (at: number | string) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
+  const toolbar = (
+    <div className="mb-4 flex flex-wrap items-center gap-2">
+      {/* Limits are as they are now, so they have no range. */}
+      {!limitsView && <Pills value={range} onChange={pickRange} items={RANGES.map((r) => ({ value: r, label: `${r} days` }))} label="Range" />}
+      <span className="flex-1" />
+      <div className="flex items-center gap-2">
+        {/* Cost is listed while prices load too, so Limits doesn't move when they arrive. */}
+        {(prices !== 'none' || bridge.planLimits) && (
+          <Pills
+            value={limitsView ? 'limits' : showCost ? 'cost' : 'tokens'}
+            onChange={pickMeasure}
+            items={[
+              { value: 'tokens' as const, label: 'Tokens' },
+              ...(prices !== 'none' ? [{ value: 'cost' as const, label: 'Cost' }] : []),
+              ...(bridge.planLimits ? [{ value: 'limits' as const, label: 'Limits' }] : []),
+            ]}
+            label="Show"
+          />
+        )}
+        {limitsView ? (
+          <Button variant="ghost" size="sm" onClick={() => ask(true)} disabled={asking} aria-label="Check limits again" title={limits && limits !== 'failed' ? `Check again (last checked ${checked(limits.generatedAt)})` : 'Check again'}>
+            <RotateCw className={cx('h-4 w-4', asking && 'animate-spin motion-reduce:animate-none')} />
+          </Button>
+        ) : (
+          <Button variant="ghost" size="sm" onClick={() => read(true)} disabled={reading} aria-label="Read again" title={report ? `Read again (last read ${checked(report.generatedAt)})` : 'Read again'}>
+            <RotateCw className={cx('h-4 w-4', reading && 'animate-spin motion-reduce:animate-none')} />
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+
+  if (limitsView)
+    return (
+      <div>
+        {toolbar}
+        <PlanLimits limits={limits} place={place} onRetry={() => ask(true)} />
+      </div>
+    );
   if (error && !report)
     return (
-      <EmptyState title={`Couldn’t read usage on this ${place}`} action={<Button onClick={() => read(true)}>Try again</Button>}>
-        {error}
-      </EmptyState>
+      <div>
+        {toolbar}
+        <EmptyState title={`Couldn’t read usage on this ${place}`} action={<Button onClick={() => read(true)}>Try again</Button>}>
+          {error}
+        </EmptyState>
+      </div>
     );
   if (!s)
     return (
       <div aria-busy="true">
+        {toolbar}
         <p className="mb-4 text-sm text-muted" role="status">
           Reading the AI apps’ logs on this {place}… The first time takes a few seconds.
         </p>
@@ -107,31 +180,20 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
     );
   if (!s.apps.some((a) => a.found))
     return (
-      <EmptyState title={`No AI app logs on this ${place}`}>
-        Wren reads the usage Claude Code, Codex, Grok Build, Antigravity and OpenCode record in their own folders. None of them has any here yet.
-      </EmptyState>
+      <div>
+        {toolbar}
+        <EmptyState title={`No AI app logs on this ${place}`}>
+          Wren reads the usage Claude Code, Codex, Grok Build, Antigravity and OpenCode record in their own folders. None of them has any here yet.
+        </EmptyState>
+      </div>
     );
 
-  const priced = table !== null;
-  const showCost = measure === 'cost' && priced;
   const value = (a: Amount) => (showCost ? a.cost : a.tokens);
   const fmt = (n: number) => (showCost ? formatUsd(n) : formatTokens(n));
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Pills value={range} onChange={pickRange} items={RANGES.map((r) => ({ value: r, label: `${r} days` }))} label="Range" />
-        <span className="flex-1" />
-        <div className="flex items-center gap-2">
-          {priced && <Pills value={measure} onChange={setMeasure} items={[{ value: 'tokens', label: 'Tokens' }, { value: 'cost', label: 'Cost' }]} label="Show" />}
-          <Button variant="ghost" size="sm" onClick={() => read(true)} disabled={reading} aria-label="Read again" title={`Read again (last read ${new Date(report!.generatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })})`}>
-            <RotateCw className={cx('h-4 w-4', reading && 'animate-spin motion-reduce:animate-none')} />
-          </Button>
-        </div>
-      </div>
-
-      {bridge.planLimits && <PlanLimits limits={limits} place={place} />}
-
+      {toolbar}
       <Card className="grid gap-6 p-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:p-6">
         <div>
           <p className="font-display text-4xl tabular-nums sm:text-5xl">{showCost ? `~${formatUsd(s.total.cost)}` : formatTokens(s.total.tokens)}</p>
@@ -256,30 +318,46 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
   );
 }
 
-/** Plan limits as each app reports them; an app that isn't installed isn't listed, nor is the card if none is. */
-function PlanLimits({ limits, place }: { limits: PlanLimitsReport | 'failed' | null; place: string }) {
-  if (limits === null) return <Skeleton className="mb-4 h-28 rounded-2xl" />;
-  if (limits === 'failed') return null;
+/** The Limits view: each installed app's plan limits as the app itself reports them, one card per app. */
+function PlanLimits({ limits, place, onRetry }: { limits: PlanLimitsReport | 'failed' | null; place: string; onRetry: () => void }) {
+  if (limits === null)
+    return (
+      <div aria-busy="true" className="space-y-4">
+        <p className="text-sm text-muted" role="status">
+          Asking Claude Code, Codex and Grok Build…
+        </p>
+        {[0, 1].map((i) => (
+          <Skeleton key={i} className="h-40 rounded-2xl" />
+        ))}
+      </div>
+    );
+  if (limits === 'failed')
+    return (
+      <EmptyState title="Couldn’t check plan limits" action={<Button onClick={onRetry}>Try again</Button>}>
+        The desktop app didn’t answer.
+      </EmptyState>
+    );
   const apps = limits.apps.filter((a) => a.state !== 'missing');
-  if (!apps.length) return null;
+  if (!apps.length)
+    return (
+      <EmptyState title={`No plan limits on this ${place}`}>
+        Claude Code, Codex and Grok Build can say how much of their plan’s limits is used. None of them is installed here.
+      </EmptyState>
+    );
   const now = limits.generatedAt;
   const timed = apps.some((a) => a.windows.some((w) => limitPace(w, now).elapsed !== null));
   return (
-    <Card className="mb-4 p-5">
-      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <p className="text-sm font-medium">Plan limits</p>
-        <p className="text-[12px] text-faint">Checked {new Date(now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</p>
-      </div>
-      <div className="space-y-5">
-        {apps.map((a) => {
-          const name = appLabel(a.app);
-          return (
-            <section key={a.app} aria-label={`${name} plan limits`}>
-              <p className="mb-3 text-[13px] text-muted">
-                {name}
-                {a.plan && ` · ${a.plan} plan`}
-                {a.resetsBanked ? ` · ${a.resetsBanked} full ${a.resetsBanked === 1 ? 'reset' : 'resets'} banked` : ''}
-              </p>
+    <div className="space-y-4">
+      {apps.map((a) => {
+        const name = appLabel(a.app);
+        const about = [a.plan && `${a.plan} plan`, a.resetsBanked ? `${a.resetsBanked} full ${a.resetsBanked === 1 ? 'reset' : 'resets'} banked` : ''].filter(Boolean).join(' · ');
+        return (
+          <section key={a.app} aria-label={`${name} plan limits`}>
+            <Card className="p-5 lg:p-6">
+              <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                <h2 className="text-base font-semibold">{name}</h2>
+                {about && <p className="text-[13px] text-muted">{about}</p>}
+              </div>
               {a.state === 'ok' ? (
                 <ul className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
                   {a.windows.map((w) => (
@@ -289,12 +367,14 @@ function PlanLimits({ limits, place }: { limits: PlanLimitsReport | 'failed' | n
               ) : (
                 <p className="text-sm text-muted">{limitsNote(a.state, name, place, a.note)}</p>
               )}
-            </section>
-          );
-        })}
-      </div>
-      {timed && <p className="mt-4 text-[12px] text-faint">The mark on each bar is where an even pace would be by now.</p>}
-    </Card>
+            </Card>
+          </section>
+        );
+      })}
+      <p className="text-[12px] text-faint">
+        Checked {new Date(now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}, as each app reports it.{timed && ' The mark on each bar is where an even pace would be by now.'}
+      </p>
+    </div>
   );
 }
 
