@@ -412,6 +412,85 @@ describe('agent loop', () => {
     expect(ask(buildTurns(model.calls[2].events)).images).toEqual([image]);
   });
 
+  it('asks before setting a task for later, even for an autonomous agent', async () => {
+    const store = new MemStore();
+    const set: unknown[] = [];
+    Object.assign(store, { schedule: async (req: unknown) => (set.push(req), { id: 'sch1', at: 'Thursday 5:00 pm (Australia/Melbourne)', name: 'Call the bank' }) });
+    await store.userSays('remind me to call the bank at 5');
+    const call = { name: 'task.schedule', args: { when: '2026-11-27T17:00:00+11:00', task: 'Remind the user to call the bank.', title: 'Call the bank' } };
+    const model = new ScriptModel([{ calls: [call] }, { text: 'I’ll remind you at 5.' }]);
+    const first = await base(store, model, new FakeHost(), { autonomy: 'autonomous' });
+    expect(first.kind).toBe('waiting_approval');
+    expect(set).toEqual([]);
+    store.approvals.set('ap1', 'approved');
+    expect(await base(store, model, new FakeHost(), { autonomy: 'autonomous' })).toMatchObject({ kind: 'completed' });
+    expect(set).toEqual([{ when: call.args.when, task: call.args.task, title: 'Call the bank' }]);
+    const step = store.events_.find((e) => e.type === 'tool')!.data as ToolCallData;
+    expect(step.result).toMatchObject({ output: expect.stringContaining('“Call the bank” starts on its own at Thursday 5:00 pm'), meta: { schedule: 'sch1' } });
+    expect(step.risk).toBe('high');
+  });
+
+  it('sets nothing for later when the user says no, and reports what the server refused', async () => {
+    const store = new MemStore();
+    const set: unknown[] = [];
+    Object.assign(store, { schedule: async (req: unknown) => (set.push(req), { error: 'Pick a time at least a minute from now.' }) });
+    await store.userSays('later');
+    const call = { name: 'task.schedule', args: { when: '2026-11-27T17:00:00+11:00', task: 'Check the build.' } };
+    const model = new ScriptModel([{ calls: [call] }, { text: 'OK.' }, { calls: [call] }, { text: 'Too soon.' }]);
+    await base(store, model, new FakeHost());
+    store.approvals.set('ap1', 'denied');
+    await base(store, model, new FakeHost());
+    expect(set).toEqual([]);
+    await store.userSays('try again');
+    await base(store, model, new FakeHost());
+    store.approvals.set('ap2', 'approved');
+    await base(store, model, new FakeHost());
+    expect(set).toHaveLength(1);
+    const steps = store.events_.filter((e) => e.type === 'tool').map((e) => (e.data as ToolCallData).result);
+    expect(steps[0]).toMatchObject({ isError: true });
+    expect(steps[1]).toMatchObject({ output: 'Pick a time at least a minute from now.', isError: true });
+  });
+
+  it('asks for a secret in a card and carries on when it is saved, declined or answered with a message', async () => {
+    for (const answer of ['saved', 'declined', 'message'] as const) {
+      const store = new MemStore();
+      await store.userSays('run the payment tests');
+      const call = { name: 'task.request_secret', args: { name: 'STRIPE_KEY', why: 'Your Stripe test key, for the tests.' } };
+      const model = new ScriptModel([{ calls: [call] }, { text: 'Done.' }]);
+      const first = await base(store, model, new FakeHost(), { autonomy: 'autonomous' });
+      expect(first).toMatchObject({ kind: 'waiting_input', question: 'Needs a secret: STRIPE_KEY' });
+      expect(store.notes).toContain('Your agent needs a secret');
+      const step = store.events_.find((e) => e.type === 'tool')!;
+      expect(step.status).toBe('awaiting_secret');
+      // Nothing answered yet: it keeps waiting.
+      expect(await base(store, model, new FakeHost())).toMatchObject({ kind: 'waiting_input' });
+      if (answer === 'message') await store.userSays('skip that, use the mock');
+      else step.data = { ...(step.data as object), secretAnswer: answer };
+      const env: Record<string, string>[] = [];
+      const host = Object.assign(new FakeHost(), { execute: async (_n: string, _a: unknown, ctx: { env?: Record<string, string> }) => (env.push(ctx.env ?? {}), { output: 'ok' }) });
+      expect(await base(store, model, host, { secrets: answer === 'saved' ? [{ name: 'STRIPE_KEY', value: 'sk_test_123456' }] : [] })).toMatchObject({ kind: 'completed' });
+      const result = (store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).result!;
+      if (answer === 'saved') expect(result).toMatchObject({ output: expect.stringContaining('$STRIPE_KEY') });
+      else expect(result).toMatchObject({ isError: true, output: answer === 'declined' ? expect.stringContaining('declined') : expect.stringContaining('wrote a message instead') });
+      expect(JSON.stringify(model.calls)).not.toContain('sk_test_123456');
+    }
+  });
+
+  it('gives commands the task’s secrets, and refuses a name programs use', async () => {
+    const store = new MemStore();
+    await store.userSays('deploy');
+    const model = new ScriptModel([{ calls: [{ name: 'computer.shell', args: { command: 'deploy' } }, { name: 'task.request_secret', args: { name: 'PATH', why: 'x' } }, { name: 'task.request_secret', args: { name: 'TOKEN', why: 'The deploy token.' } }] }, { text: 'Deployed.' }]);
+    const env: Record<string, string>[] = [];
+    const host = Object.assign(new FakeHost(), { execute: async (_n: string, _a: unknown, ctx: { env?: Record<string, string> }) => (env.push(ctx.env ?? {}), { output: 'ok' }) });
+    const out = await base(store, model, host, { autonomy: 'autonomous', secrets: [{ name: 'TOKEN', value: 'tok_abcdef' }] });
+    expect(out).toMatchObject({ kind: 'completed' });
+    expect(env).toEqual([{ TOKEN: 'tok_abcdef' }]);
+    const results = store.events_.filter((e) => e.type === 'tool').map((e) => (e.data as ToolCallData).result);
+    expect(results[1]).toMatchObject({ isError: true, output: expect.stringContaining('something else') });
+    // Already saved for this task: no card, the agent is told it has it.
+    expect(results[2]).toMatchObject({ output: expect.stringContaining('$TOKEN') });
+  });
+
   it('yields at the deadline and continues in the next tick', async () => {
     const store = new MemStore();
     await store.userSays('go');

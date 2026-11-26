@@ -11,6 +11,8 @@ import { connectionSecret } from '@/lib/models';
 import { assertPlatformAllowed, operatorGatewayToken } from '@/lib/platform-credits';
 import { agentAnswer, askableAgents, askAgent, cancelAsk, decideApproval, finishRun, stricter, taskTx } from '@/lib/runs';
 import { DbRunStore } from '@/lib/runner/store';
+import { createReminder } from '@/lib/schedules';
+import { loadTaskSecrets } from '@/lib/task-secrets';
 
 // Everything a desktop device needs to execute a run it owns. The device runs
 // the agent loop locally; this API is its persistence, approvals, notification
@@ -156,6 +158,24 @@ export const POST = route<Ctx>(async (req, ctx) => {
       const b = z.object({ key: z.string().min(1).max(100), agent: z.string().trim().min(1).max(100), question: z.string().trim().min(1).max(8000) }).parse(raw);
       await renew(runId, lease);
       return json(await askAgent({ userId: run.user_id as string, runId, lease: lease!, ...b }));
+    }
+    case 'secrets': {
+      // The secrets the user saved for this run's task (task.request_secret), for its commands on this computer.
+      await renew(runId, lease);
+      return json({ secrets: await loadTaskSecrets(run.session_id as string, run.user_id as string) });
+    }
+    case 'secret-answer': {
+      // The answer to a secret card on one of this run's own steps (an engine waiting in its request_secret call).
+      const b = z.object({ eventId: z.string().uuid() }).parse(raw);
+      await renew(runId, lease);
+      const [ev] = await sql`select data->>'secretAnswer' as answer from public.events where id = ${b.eventId} and run_id = ${runId} and type = 'tool'`;
+      return json({ answer: ev?.answer === 'saved' || ev?.answer === 'declined' ? ev.answer : null });
+    }
+    case 'schedule': {
+      // task.schedule, which the user approved: for this run's own agent and task, never one the request names.
+      const b = z.object({ when: z.string().trim().min(1).max(64), task: z.string().trim().min(1).max(8000), title: z.string().trim().max(80).optional() }).parse(raw);
+      await renew(runId, lease);
+      return json(await createReminder({ userId: run.user_id as string, agentId: run.agent_id as string, sessionId: run.session_id as string, ...b }));
     }
     case 'agent-answer': {
       const b = z.object({ key: z.string().min(1).max(100) }).parse(raw);

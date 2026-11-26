@@ -203,7 +203,7 @@ function AgentSchedules({ agentId }: { agentId: string }) {
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{x.name}</p>
             <p className="text-[12.5px] text-muted">
-              {describeCronClient(x.cron)} · {x.enabled ? (x.next_run_at ? `next ${new Date(x.next_run_at).toLocaleString()}` : 'pending') : 'paused'}
+              {x.cron ? describeCronClient(x.cron) : 'Once'} · {x.enabled ? (x.next_run_at ? `${x.cron ? 'next ' : ''}${new Date(x.next_run_at).toLocaleString()}` : 'pending') : x.cron ? 'paused' : 'didn’t start'}
             </p>
           </div>
         </div>

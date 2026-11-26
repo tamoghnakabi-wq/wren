@@ -10,3 +10,4 @@ export * from './text';
 export * from './semver';
 export { chatgptEfforts, createModelClient, listModels, PROVIDER_BASE, type ClientOptions, type ModelInfo } from './models/index';
 export { ScriptedModel } from './models/scripted';
+export * from './secrets';

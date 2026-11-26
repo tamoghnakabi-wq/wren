@@ -1,11 +1,11 @@
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { agentAnswerText, assessCall, clipMiddle, deniedText, describeCall, MAX_TOOL_OUTPUT, needsApproval, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type StatusData, type ToolCallData } from '@wren/core';
+import { agentAnswerText, ALWAYS_ASK, assessCall, clipMiddle, deniedText, describeCall, MAX_TOOL_OUTPUT, needsApproval, secretNameProblem, taskSecretEnv, type AskableAgent, type Autonomy, type Effort, type LoopOutcome, type MessageData, type PlanItem, type Risk, type ScheduleRequest, type StatusData, type TaskSecret, type ToolCallData } from '@wren/core';
 import type { RemoteStore } from '../main/remote';
 import type { EngineImage } from './images';
 import { APPROVAL_WAIT_MS, ASK_WAIT_MS, ENGINE_MCP_TIMEOUT_MS } from './bridge-client';
@@ -52,6 +52,8 @@ export interface EngineRun {
    * crash (that turn is run again), new for a follow-up, so asking the same again in a later turn is a new ask.
    */
   turn?: number;
+  /** The secrets the user saved for this task (task.request_secret): the CLI's commands get them as variables. */
+  secrets?: TaskSecret[];
 }
 
 /**
@@ -59,7 +61,7 @@ export interface EngineRun {
  * install places, then the user's PATH as read from their login shell once (no shell is run for this, W-183).
  * Which one Wren may start is decided by `engineProgram` (engines/program.ts).
  */
-export function findClis(name: 'claude' | 'grok'): string[] {
+export function findClis(name: 'claude' | 'grok' | 'codex'): string[] {
   const home = homedir();
   const candidates =
     process.platform === 'win32'
@@ -256,7 +258,8 @@ export function effortFlag(engine: Engine, cli: string): string | null {
  * the allowed folders and toolchains only, never the Keychain or Claude's own settings.
  */
 export async function spawnClaude(cli: string, args: string[], run: EngineRun, helper: string): Promise<ChildProcessWithoutNullStreams> {
-  const env: NodeJS.ProcessEnv = { ...engineEnv('claude-code') };
+  // The task's secrets: its commands inherit them from the CLI (one saved during this turn comes as a file instead).
+  const env: NodeJS.ProcessEnv = { ...engineEnv('claude-code'), ...taskSecretEnv(Object.fromEntries((run.secrets ?? []).map((x) => [x.name, x.value]))) };
   if (hasSeatbelt()) {
     Object.assign(env, await toolEnv(), await runTemp(run.runId), {
       SHELL: /^\/bin\/(zsh|bash)$/.test(process.env.SHELL ?? '') ? process.env.SHELL : '/bin/zsh',
@@ -428,7 +431,8 @@ export async function decide(
   // On macOS the engine (and everything it runs) is inside Wren's sandbox; elsewhere it isn't.
   const a = assessCall(call.name, call.args, 'desktop', { unsandboxed: !hasSeatbelt(), trustedProgram: call.name === 'computer.shell' ? await currentProgramTrust(allowedRoots(run.folders)) : undefined });
   if (a.blocked) return { allow: false, message: a.blocked };
-  if (!needsApproval(a.risk as Risk, run.autonomy)) return over() ? stopped : { allow: true };
+  // A task for later (task.schedule) is asked about every time, whatever the autonomy (as in the agent loop).
+  if (!needsApproval(a.risk as Risk, run.autonomy) && !ALWAYS_ASK.has(call.name)) return over() ? stopped : { allow: true };
   let t = writer.tools.get(call.callId);
   // A step only takes the approval for the same kind of action: a request naming another call's id can't
   // take over that step (W-121). A generic engine step (the stream didn't say what kind of tool) can.
@@ -483,7 +487,79 @@ export type PageHandler = (req: { title: unknown; html: unknown; signal: AbortSi
 /** An engine showing the user a file or link on their screen (Claude Code's open tool, computer.open). */
 export type OpenHandler = (req: { target: string; reveal: boolean; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
 
+/** An engine setting a task for later (Claude Code's schedule tool): what to tell the engine. */
+export type ScheduleHandler = (req: ScheduleRequest & { signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
+/** An engine asking for a secret (Claude Code's request_secret tool): where the value is, or why there is none. */
+export type SecretHandler = (req: { name: string; why: string; signal: AbortSignal }) => Promise<{ text: string; isError?: boolean }>;
+
 export { ASK_WAIT_MS };
+
+/**
+ * A secret the user saved, put where only this task's commands look: a new folder with a random name in the run's
+ * own temp folder (which its commands may read), made fresh each time so nothing an agent planted there (a link)
+ * can redirect the write, and the file created new (`wx`), readable by the user only.
+ */
+export function writeSecretFile(runId: string, name: string, value: string): string {
+  const dir = mkdtempSync(join(makeRunTemp(runId), 'secret-'));
+  const file = join(dir, name);
+  writeFileSync(file, value, { mode: 0o600, flag: 'wx' });
+  return file;
+}
+
+/**
+ * An engine asks the user for a secret (Claude Code's request_secret tool): the step its stream showed (or a
+ * new one) becomes the card in the task, and Wren waits for the user's answer like an ask, polling the server
+ * while the CLI's call stays open. The value goes to a file (`writeSecretFile`), never into the answer: the CLI
+ * started before it was saved, so its commands can't get it as a variable until the next turn.
+ */
+export async function secretThroughWren(
+  run: EngineRun,
+  writer: TimelineWriter,
+  req: { name: string; why: string; signal: AbortSignal },
+  opts: { pollMs?: number; waitMs?: number; stepWaitMs?: number } = {},
+): Promise<{ text: string; isError?: boolean }> {
+  const name = req.name.trim();
+  const why = req.why.trim().slice(0, 300);
+  const problem = secretNameProblem(name);
+  if (problem) return { text: problem, isError: true };
+  if (!why) return { text: 'Say what it is and what you need it for (why); the user sees it on the card.', isError: true };
+  const deliver = (value: string) => {
+    const file = writeSecretFile(run.runId, name, value);
+    return { text: `The user saved ${name}. It's in the file ${file}, for this task only. Use it inside a command as "$(cat '${file}')"; don't read or print it yourself. In this task's later turns your commands also get it as the environment variable $${name}.` };
+  };
+  const saved = async () => (await run.store.secrets().catch(() => [] as TaskSecret[])).find((x) => x.name === name);
+  const known = await saved();
+  if (known) return deliver(known.value);
+  // The step the CLI's stream showed for this call; it can come a moment after the request.
+  const title = describeCall('task.request_secret', { name });
+  let id = writer.matchOpen('task.request_secret', title, false);
+  for (let waited = 0; !id && waited < (opts.stepWaitMs ?? 3000); waited += 250) {
+    await pause(250, run.signal, req.signal);
+    id = writer.matchOpen('task.request_secret', title, false);
+  }
+  if (!id) {
+    id = `perm-${randomBytes(6).toString('hex')}`;
+    await writer.toolStart(id, 'task.request_secret', { name, why }, title, true);
+  }
+  const step = writer.tools.get(id)!;
+  await writer.setStep(step, 'awaiting_secret', { args: { name, why } });
+  await run.store.notify('Your agent needs a secret', `${name}: ${why}`, 'question').catch(() => {});
+  const giveUpAt = Date.now() + (opts.waitMs ?? ASK_WAIT_MS);
+  for (;;) {
+    if (run.signal.aborted || req.signal.aborted) {
+      await writer.setStep(step, 'cancelled', { endedAt: Date.now(), result: { output: 'Withdrawn: the task stopped or the request was cancelled.', isError: true } }).catch(() => {});
+      return { text: 'Stopped: the task was stopped while waiting for the secret.', isError: true };
+    }
+    if (Date.now() > giveUpAt) return { text: `No answer came in ${Math.round((opts.waitMs ?? ASK_WAIT_MS) / 60_000)} minutes. Carry on without ${name}, or ask the user again later.`, isError: true };
+    const answer = await run.store.secretAnswer(step.id).catch(() => null);
+    if (answer === 'saved') {
+      const s = await saved();
+      return s ? deliver(s.value) : { text: `The user saved ${name}, but Wren couldn't fetch it. Ask them to try again.`, isError: true };
+    }
+    if (answer === 'declined') return { text: `The user declined to give ${name}. Carry on without it, or ask them what they'd like instead.`, isError: true };
+    await pause(opts.pollMs ?? 2000, run.signal, req.signal);
+  }
+}
 
 /**
  * An engine asks another of the user's agents (Claude Code's ask_agent tool) and waits for the answer, like
@@ -573,7 +649,14 @@ const PAGE_PROMPT_TOOL = 'mcp__wren__show_page';
 /** How long a request may take to arrive (not to be decided); `checkMs` is how often Node checks (its default is 30 s). */
 const ARRIVAL = { requestMs: 15_000, headersMs: 10_000, checkMs: 5_000 };
 
-export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRIVAL, onAsk?: AskHandler, onPage?: PageHandler, onOpen?: OpenHandler): Promise<{ url: string; token: string; close: () => void }> {
+export async function startApprovalBridge(
+  handler: BridgeHandler,
+  arrival = ARRIVAL,
+  onAsk?: AskHandler,
+  onPage?: PageHandler,
+  onOpen?: OpenHandler,
+  more: { onSchedule?: ScheduleHandler; onSecret?: SecretHandler } = {},
+): Promise<{ url: string; token: string; close: () => void }> {
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
   // Every admitted request, from admission (still sending its body) until its decision ends (W-135).
@@ -653,6 +736,21 @@ export async function startApprovalBridge(handler: BridgeHandler, arrival = ARRI
         if (r && typeof r.open === 'object' && r.open) {
           // The helper's open tool: decided (unless its permission prompt already was) and done by Wren itself.
           const out = onOpen && !gone.signal.aborted ? await onOpen({ target: String(r.open.target ?? ''), reveal: r.open.reveal === true, signal: gone.signal }) : { text: 'Opening files and links isn’t available here.', isError: true };
+          res.end(JSON.stringify(out));
+          return;
+        }
+        if (r && typeof r.schedule === 'object' && r.schedule) {
+          // The helper's schedule tool: approved (unless its permission prompt already was), then set by Wren.
+          const sc = r.schedule as Record<string, unknown>;
+          const out = more.onSchedule && !gone.signal.aborted
+            ? await more.onSchedule({ when: String(sc.when ?? ''), task: String(sc.task ?? ''), ...(typeof sc.title === 'string' && sc.title ? { title: sc.title } : {}), signal: gone.signal })
+            : { text: 'Tasks for later can’t be set here. Tell the user to set one up in Schedules.', isError: true };
+          res.end(JSON.stringify(out));
+          return;
+        }
+        if (r && typeof r.secret === 'object' && r.secret) {
+          // The helper's request_secret tool: answered once the user fills in the card (or declines).
+          const out = more.onSecret && !gone.signal.aborted ? await more.onSecret({ name: String(r.secret.name ?? ''), why: String(r.secret.why ?? ''), signal: gone.signal }) : { text: 'Secrets can’t be asked for here.', isError: true };
           res.end(JSON.stringify(out));
           return;
         }

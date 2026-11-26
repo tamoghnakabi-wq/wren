@@ -272,7 +272,7 @@ function Palette({ onClose }: { onClose: () => void }) {
           <p className="px-3 py-8 text-center text-[14px] text-muted">{failed ? `Search failed: ${failed}` : `Nothing matches “${query}”.`}</p>
         )}
         {query && !!items.length && !searching && result && !result.tasks.length && !result.messages.length && (
-          <p className="px-3 pt-2 pb-3 text-[12.5px] text-faint">No task has those words.</p>
+          <p className="px-3 pt-2 pb-3 text-[12.5px] text-faint">{query.includes('"') || /[“”]/.test(query) ? 'No task has those words together.' : 'No task has those words.'}</p>
         )}
       </div>
     </div>

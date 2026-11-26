@@ -9,7 +9,7 @@ import { allowedRoots } from '../main/paths';
 import { toolEnv } from '../main/shellenv';
 import { approvalServerProfile, autorunPaths, enginePrivatePaths, hasSeatbelt } from '../main/sandbox';
 import { checkPage, describeCall } from '@wren/core';
-import { appPaths, askThroughWren, claudeSupportsRestricted, cliHelpKnown, decide, effortFlag, finishEngine, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
+import { appPaths, askThroughWren, claudeSupportsRestricted, cliHelpKnown, decide, effortFlag, finishEngine, secretThroughWren, spawnClaude, startApprovalBridge, stopEngine, TimelineWriter, type EngineRun } from './common';
 import { engineProgram } from './program';
 
 // Claude Code engine: runs Anthropic's own, unmodified `claude` CLI on this
@@ -23,6 +23,10 @@ export const ASK_TOOL = 'mcp__wren__ask_agent';
 export const PAGE_TOOL = 'mcp__wren__show_page';
 /** Wren's open tool (computer.open) as Claude Code names it. */
 export const OPEN_TOOL = 'mcp__wren__open';
+/** Wren's schedule tool (task.schedule) as Claude Code names it. */
+export const SCHEDULE_TOOL = 'mcp__wren__schedule';
+/** Wren's request_secret tool (task.request_secret) as Claude Code names it. */
+export const SECRET_TOOL = 'mcp__wren__request_secret';
 /** A target that names a URL scheme (not a Windows drive such as C:\). */
 const isLink = (t: string) => /^[a-z][a-z0-9+.-]+:/i.test(t) && !/^[a-z]:[\\/]/i.test(t);
 
@@ -41,6 +45,10 @@ const TOOL_MAP: Record<string, (input: Record<string, unknown>) => { name: strin
   [ASK_TOOL]: (i) => ({ name: 'task.ask_agent', args: { agent: String(i.agent ?? ''), question: String(i.question ?? '') }, paths: [] }),
   // Showing a page: the step keeps the title and the page's size; the page itself is kept as a file.
   [PAGE_TOOL]: (i) => ({ name: 'task.show_page', args: { title: String(i.title ?? '').slice(0, 120), html: `[${Math.ceil(String(i.html ?? '').length / 1024)} KB of HTML]` }, paths: [] }),
+  // A task for later: approved every time, like the agent loop's.
+  [SCHEDULE_TOOL]: (i) => ({ name: 'task.schedule', args: { when: String(i.when ?? ''), task: String(i.task ?? ''), ...(i.title ? { title: String(i.title) } : {}) }, paths: [] }),
+  // Asking for a secret: the card in the task; the value never goes to the CLI's answer.
+  [SECRET_TOOL]: (i) => ({ name: 'task.request_secret', args: { name: String(i.name ?? ''), why: String(i.why ?? '') }, paths: [] }),
   // Showing the user a file or link: rated and approved like Wren's own computer.open; a file is checked as a path.
   [OPEN_TOOL]: (i) => {
     const target = String(i.target ?? '');
@@ -93,6 +101,7 @@ function engineNotes(run: EngineRun): string[] {
   if (!run.allow.shell) notes.push('Terminal access is turned off on this computer, so you have no Bash tool.');
   else if (hasSeatbelt()) notes.push("Your commands run in Wren's sandbox: they can't open apps, files or web pages (`open`), script other apps (AppleScript) or reach other apps' services, so don't retry those. Keep temporary files and sockets in $TMPDIR. Docker works through Wren (DOCKER_HOST is set): containers may mount the allowed folders, but not other folders of this Mac or the Docker socket, and can't be privileged.");
   notes.push("To show the user a file or web page on their screen, use Wren's open tool (mcp__wren__open).");
+  notes.push("When you need an API key, password or other secret, ask for it with Wren's request_secret tool (mcp__wren__request_secret), never in a message. To do something later on your own (a reminder the user asks for), use Wren's schedule tool (mcp__wren__schedule); the user approves it.");
   return notes;
 }
 
@@ -140,6 +149,10 @@ function titleFor(name: string, input: Record<string, unknown>): string {
       return describeCall('task.show_page', { title: String(input.title ?? '') });
     case OPEN_TOOL:
       return describeCall('computer.open', { target: String(input.target ?? ''), reveal: input.reveal === true });
+    case SCHEDULE_TOOL:
+      return describeCall('task.schedule', { when: String(input.when ?? ''), task: String(input.task ?? ''), title: String(input.title ?? '') });
+    case SECRET_TOOL:
+      return describeCall('task.request_secret', { name: String(input.name ?? '') });
     default:
       return name;
   }
@@ -216,15 +229,21 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
   // an open is asked about once; an open that comes without a prompt is decided when it arrives.
   const allowedOpens: string[] = [];
   const openKey = (a: Record<string, unknown>) => JSON.stringify([String(a.target ?? ''), a.reveal === true]);
+  // The same for tasks for later: approved at the permission prompt, used once by the schedule call that follows.
+  const allowedSchedules: string[] = [];
+  const scheduleKey = (a: Record<string, unknown>) => JSON.stringify([String(a.when ?? ''), String(a.task ?? ''), String(a.title ?? '')]);
   const bridge = await startApprovalBridge(
     async ({ tool_name, input, tool_use_id, signal }) => {
       // Wren's own ask_agent needs no approval: the server decides which agents this one may ask.
       if (tool_name === ASK_TOOL) return run.askable?.length ? { allow: true } : { allow: false, message: 'Asking other agents isn’t available here.' };
       // Showing a page needs none either: it runs sandboxed in Wren, with nothing of the user's.
       if (tool_name === PAGE_TOOL) return { allow: true };
+      // Asking for a secret is the user's own card: they answer it there.
+      if (tool_name === SECRET_TOOL) return { allow: true };
       const m = mapTool(tool_name, input);
       const d = await decide(run, writer, { callId: tool_use_id ?? `perm-${Date.now()}`, name: m.name, args: m.args, title: titleFor(tool_name, input), paths: m.paths.filter(Boolean) }, inFolders, signal);
       if (d.allow && tool_name === OPEN_TOOL) allowedOpens.push(openKey(m.args));
+      if (d.allow && tool_name === SCHEDULE_TOOL) allowedSchedules.push(scheduleKey(m.args));
       return d;
     },
     undefined,
@@ -255,6 +274,25 @@ export async function runClaudeCode(run: EngineRun, inFolders: (p: string) => bo
       if (plan.kind !== 'url' && !inFolders(plan.path)) return { text: `${plan.path} is outside the folders allowed on this computer.`, isError: true };
       const r = await performOpen(plan);
       return { text: r.output, isError: !!r.isError };
+    },
+    {
+      onSchedule: async ({ when, task, title, signal }) => {
+        const m = mapTool(SCHEDULE_TOOL, { when, task, title });
+        const at = allowedSchedules.indexOf(scheduleKey(m.args));
+        if (at >= 0) allowedSchedules.splice(at, 1);
+        else {
+          const d = await decide(run, writer, { callId: `perm-${randomBytes(6).toString('hex')}`, name: m.name, args: m.args, title: titleFor(SCHEDULE_TOOL, m.args), paths: [] }, inFolders, signal);
+          if (!d.allow) return { text: d.message ?? 'Not allowed.', isError: true };
+        }
+        if (run.signal.aborted || signal.aborted) return { text: 'Stopped by the user.', isError: true };
+        try {
+          const r = await run.store.schedule({ when, task, ...(title ? { title } : {}) });
+          return 'error' in r ? { text: r.error, isError: true } : { text: `Set: “${r.name}” starts on its own at ${r.at}, as a new task for you with that message. The user can see and change it in Schedules.` };
+        } catch (e) {
+          return { text: `It couldn’t be set: ${(e as Error).message}`, isError: true };
+        }
+      },
+      onSecret: (req) => secretThroughWren(run, writer, req),
     },
   );
 

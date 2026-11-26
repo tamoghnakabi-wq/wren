@@ -86,10 +86,13 @@ export interface PlanLimitsReport {
   version: 1;
   generatedAt: number;
   apps: {
-    app: 'claude-code';
-    state: 'ok' | 'none' | 'missing' | 'untrusted' | 'old' | 'failed';
+    /** Claude Code always; Codex and Grok Build from desktop 0.1.55. */
+    app: 'claude-code' | 'codex' | 'grok-build';
+    state: 'ok' | 'none' | 'missing' | 'untrusted' | 'old' | 'unavailable' | 'failed';
     plan?: string;
     windows: LimitWindow[];
+    /** Full resets the plan holds to use later (Codex). */
+    resetsBanked?: number;
     note?: string;
   }[];
 }

@@ -3,7 +3,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
+import { taskSecretEnv, type ImageRef, type ToolCallData, type ToolContext, type ToolHost, type ToolResult } from '@wren/core';
 import { fetchReadable } from '@wren/core/net';
 import { BrowserController, registerSelectors } from '@wren/core/browser/controller';
 import type { BrowserContext } from 'playwright-core';
@@ -190,9 +190,10 @@ export class LocalHost implements ToolHost {
     return seatbeltProfile(this.roots(), dataDir());
   }
 
-  private async spawnShell(command: string, cwd: string): Promise<ChildProcess> {
-    // A minimal environment, never Wren's own (it may hold tokens or startup hooks): see agentEnv().
-    const env = agentEnv(process.env, await toolEnv());
+  private async spawnShell(command: string, cwd: string, secrets?: Record<string, string>): Promise<ChildProcess> {
+    // A minimal environment, never Wren's own (it may hold tokens or startup hooks): see agentEnv(). The task's
+    // secrets (task.request_secret) are added by their own names, which core's secretNameProblem allows.
+    const env = { ...agentEnv(process.env, await toolEnv()), ...taskSecretEnv(secrets) };
     if (process.platform === 'win32') {
       // The command first puts itself in a Job Object, so whatever it starts ends with it (winjob.ts).
       return spawnContained(command, cwd, env);
@@ -219,7 +220,7 @@ export class LocalHost implements ToolHost {
       if (!command.trim()) return { output: 'Empty command.', isError: true };
       const dir = this.resolvePath(cwd || '.');
       id = randomUUID().slice(0, 8);
-      const proc = await this.spawnShell(command, dir);
+      const proc = await this.spawnShell(command, dir, ctx.env);
       const j: Job = { proc, out: '', exit: null, started: Date.now(), runId: this.runId };
       const add = (b: Buffer) => {
         j.out += b.toString('utf8');

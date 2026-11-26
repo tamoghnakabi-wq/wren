@@ -1,4 +1,4 @@
-import type { AgentAnswer, ApprovalRequest, ApprovalState, AskAgentRequest, AskAgentStart, ModelClient, ModelRequest, ModelStreamEvent, ModelTurn, ModelUsage, RunStore, SessionEvent } from '@wren/core';
+import type { AgentAnswer, ApprovalRequest, ApprovalState, AskAgentRequest, AskAgentStart, ModelClient, ModelRequest, ModelStreamEvent, ModelTurn, ModelUsage, RunStore, ScheduleRequest, ScheduleResult, SessionEvent, TaskSecret } from '@wren/core';
 import { ModelError, pageFileName } from '@wren/core';
 import { deviceFetch, deviceJson } from './api';
 import { uploadArtifact } from './upload';
@@ -67,6 +67,18 @@ export class RemoteStore implements RunStore {
   async savePage(page: { title: string; html: string }): Promise<{ id: string; name: string }> {
     const a = await uploadArtifact({ runId: this.runId, lease: this.lease, data: Buffer.from(page.html, 'utf8'), name: pageFileName(page.title), kind: 'page' });
     return { id: a.id, name: a.name };
+  }
+  /** The secrets the user saved for this run's task (task.request_secret), for its commands. */
+  async secrets(): Promise<TaskSecret[]> {
+    return (await this.call<{ secrets: TaskSecret[] }>('secrets')).secrets ?? [];
+  }
+  /** Whether the user answered the secret card on one of this run's steps (an engine's request_secret). */
+  async secretAnswer(eventId: string): Promise<'saved' | 'declined' | null> {
+    return (await this.call<{ answer: 'saved' | 'declined' | null }>('secret-answer', { eventId })).answer;
+  }
+  /** task.schedule, after the user approved it: the server sets it for this run's agent and task. */
+  async schedule(req: ScheduleRequest): Promise<ScheduleResult> {
+    return this.call<ScheduleResult>('schedule', req);
   }
   /** Ask another of the user's agents (the server checks this agent may). */
   async askAgent(req: AskAgentRequest): Promise<AskAgentStart> {

@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { ImageRef, ToolCallData, ToolContext, ToolHost, ToolResult } from '@wren/core';
 import { BROWSER_DAEMON_TS } from '@wren/core/browser/daemon-source';
 import { fetchReadable } from '@wren/core/net';
-import { assessGithub, MAX_TOOL_OUTPUT } from '@wren/core';
+import { assessGithub, MAX_TOOL_OUTPUT, taskSecretEnv } from '@wren/core';
 import { guessMime, saveArtifact } from '../blob';
 import { callMcp, type McpToolInfo } from '../mcp';
 import { env } from '../env';
@@ -399,7 +399,11 @@ export class SandboxHost implements ToolHost {
       // No credentials go into the VM: GitHub access is only through the github.request tool,
       // which is risk-assessed and runs here.
       // The launcher returns at once; the job it starts must outlive it, so the VM isn't asked to end it at a limit.
-      const launch = `setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`;
+      // The task's secrets (task.request_secret) go to this command only, as variables of its environment.
+      const vars = Object.entries(taskSecretEnv(ctx.env))
+        .map(([k, v]) => `${k}=${shq(v)} `)
+        .join('');
+      const launch = `${vars}setsid nohup "$HOME/.wren/run.sh" ${id} ${shq(cwd ? this.abs(cwd) : WORKSPACE)} ${shq(command)} ${shq(this.o.runId)} >/dev/null 2>&1 < /dev/null &`;
       await inComputer(sb, 'bash', [...WREN_SH, launch], { limitMs: COMMAND_MS, signal: ctx.signal, outlives: true });
       if (background) return { output: `Started background job ${id}. Check it with computer.shell_status.`, meta: { job: id } };
       await ctx.checkpoint({ kind: 'job', handle: id, startedAt: started });

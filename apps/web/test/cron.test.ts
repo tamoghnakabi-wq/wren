@@ -52,7 +52,7 @@ describe('cron deadline', () => {
     await vi.advanceTimersByTimeAsync(45_000);
     const report = await (await res).json();
     expect(report.late).toEqual(['kick']);
-    expect(report.skipped).toEqual(['limits', 'schedules', 'approvals', 'unclaimed', 'orphaned', 'removed', 'asks', 'cleanup', 'deletions', 'housekeeping']);
+    expect(report.skipped).toEqual(['limits', 'schedules', 'secrets', 'approvals', 'unclaimed', 'orphaned', 'removed', 'asks', 'cleanup', 'deletions', 'housekeeping']);
     expect(report.kicked).toBe(1);
     expect(calls.deletions).toBeUndefined();
   });

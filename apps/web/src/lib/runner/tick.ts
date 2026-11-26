@@ -6,6 +6,7 @@ import { db } from '../db';
 import { resolveCloudModel, connectionSecret } from '../models';
 import { notifyUser } from '../notify';
 import { askableAgents, finishRun, kickTick, stricter } from '../runs';
+import { loadTaskSecrets } from '../task-secrets';
 import { DbRunStore, LeaseLostError } from './store';
 import { mcpNamespace, mcpToolSpecs, type McpToolInfo } from '../mcp';
 import { SandboxHost, WORKSPACE } from './sandbox-host';
@@ -132,6 +133,8 @@ export async function runTick(runId: string): Promise<string> {
       modelRetries: Number(run.retry_count) || 0,
       signal: watch.signal,
       loadAttachment: attachmentLoader(run.user_id),
+      // The secrets the user saved for this task (task.request_secret), for its commands.
+      secrets: await loadTaskSecrets(run.session_id, run.user_id),
       log: (m, e) => console.log(`[run ${runId.slice(0, 8)}] ${m}`, e ?? ''),
     });
   } catch (e) {

@@ -240,6 +240,18 @@ export function askAgentTool(agents: AskableAgent[]): ToolSpec {
 export const SHOW_PAGE_DESCRIPTION =
   "Show the user a page you made, inside this task: one self-contained HTML document for a chart, table, diagram, dashboard, timeline, comparison or small interactive tool, when seeing it beats reading it. The page runs in a sandbox with no network access, so put all its data in it. Scripts may come from cdn.jsdelivr.net, cdnjs.cloudflare.com or unpkg.com (pin exact versions) and fonts from Google Fonts; images must be inline (data: URIs or SVG). Match the app with the CSS variables --wren-bg, --wren-surface, --wren-text, --wren-muted, --wren-border, --wren-accent, --wren-success, --wren-warning and --wren-danger (set for the user's light or dark theme), and lay it out for any width from a phone to a wide screen. At most 500 KB. Still say in your reply what the page shows.";
 
+/** task.schedule, as the agent loop and Claude Code (through Wren's MCP helper) describe it. */
+export const SCHEDULE_DESCRIPTION =
+  "Set up a task for yourself that starts on its own once, at a later time: a reminder the user asked for (\"remind me at 5\"), or a check you should do later (\"look at the build again tomorrow morning\"). At that time a new task starts for you with `task` as its message, so write it so it makes sense on its own, with what you'll need to know. The user always has to approve it, and can see and change it in Schedules. Only when the user asks for something later or it clearly helps; for something that repeats, tell the user to set up a schedule.";
+
+/** task.request_secret, as the agent loop describes it. */
+export const REQUEST_SECRET_DESCRIPTION =
+  'Ask the user for a secret your commands need (an API key, token or password), in a private card in this task. Never ask for one in a message, and don\'t ask for one you don\'t need. You never see the value: once the user saves it, your shell commands get it as the environment variable `name` (use it as "$NAME"), and Wren blanks it out of anything they print. Don\'t print it, write it into files others can read, or send it anywhere but where the task needs it. The user can decline.';
+
+/** The same tool as Claude Code gets it (through Wren's MCP helper): the value comes in a file, and Claude Code sees what its commands print. */
+export const REQUEST_SECRET_FILE_DESCRIPTION =
+  'Ask the user for a secret your commands need (an API key, token or password), in a private card in this task. Never ask for one in a message, and don\'t ask for one you don\'t need. Once the user saves it, Wren puts it in a file only this task\'s commands can read and tells you where: use it as "$(cat <that file>)" inside a command, never read or print it yourself (you would see what your commands print), and don\'t copy it anywhere but where the task needs it. The user can decline.';
+
 const taskTools = (notify: boolean, askable?: AskableAgent[]): ToolSpec[] => [
   {
     namespace: 'task',
@@ -260,6 +272,31 @@ const taskTools = (notify: boolean, askable?: AskableAgent[]): ToolSpec[] => [
     name: 'ask_user',
     description: 'Pause and ask the user a question when you genuinely need a decision or information. The run resumes when they answer.',
     parameters: obj({ question: str('The question.') }, ['question']),
+  },
+  {
+    namespace: 'task',
+    name: 'request_secret',
+    description: REQUEST_SECRET_DESCRIPTION,
+    parameters: obj(
+      {
+        name: str('The environment variable your commands will read it from, e.g. STRIPE_API_KEY (capital letters, digits and _).'),
+        why: str('What it is and what you need it for, in one sentence the user sees on the card, e.g. "Your Stripe test secret key, to run the payment tests."'),
+      },
+      ['name', 'why'],
+    ),
+  },
+  {
+    namespace: 'task',
+    name: 'schedule',
+    description: SCHEDULE_DESCRIPTION,
+    parameters: obj(
+      {
+        when: str('When it starts: an ISO 8601 date and time with its UTC offset, e.g. 2026-11-27T17:00:00+11:00 (work it out from the current time and time zone in the context). From a minute to a year ahead.'),
+        task: str("The message the new task starts with, written for yourself then (it won't see this conversation)."),
+        title: str('A short name for it, as the user will see it in Schedules (e.g. "Call the bank").'),
+      },
+      ['when', 'task'],
+    ),
   },
   {
     namespace: 'task',
@@ -312,6 +349,14 @@ export function toolCatalog(opts: CatalogOptions): ToolSpec[] {
 }
 
 export const qualified = (t: { namespace: string; name: string }) => `${t.namespace}.${t.name}`;
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** An ISO time as the agent wrote it, in its own offset (the user's time zone): "27 Nov 2026, 17:00". */
+function whenText(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso.trim());
+  if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) return iso.slice(0, 64);
+  return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}, ${m[4]}:${m[5]}`;
+}
 
 /** Human-readable one-liner for the activity timeline. */
 export function describeCall(name: string, args: Record<string, unknown>): string {
@@ -370,6 +415,10 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
       return `Show page: ${clip(a('title'))}`;
     case 'task.ask_agent':
       return `Ask ${clip(a('agent'), 40) || 'another agent'}: ${clip(a('question'))}`;
+    case 'task.request_secret':
+      return `Ask for a secret: ${clip(a('name'), 64)}`;
+    case 'task.schedule':
+      return `Schedule “${clip(a('title') || a('task'), 60)}” for ${whenText(a('when'))}`;
     case 'screen.capture':
       return 'Capture the screen';
     default:

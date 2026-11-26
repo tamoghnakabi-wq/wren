@@ -377,6 +377,8 @@ export class DeviceRunner {
       resumeId: resume?.data.resumeId,
       // Claude Code can ask the user's other agents through Wren's MCP helper; Grok Build can't yet.
       askable: engine === 'claude-code' ? c.askable : undefined,
+      // The secrets the user saved for this task (task.request_secret): Claude Code's commands get them as variables.
+      secrets: engine === 'claude-code' ? await Promise.resolve().then(() => store.secrets()).catch(() => []) : undefined,
       // The first message of this turn: the same when a crash makes it run again, new for a follow-up.
       // A turn carried on after a usage limit keeps its number, so a question it asks again is the same ask.
       turn: asks[0]?.seq ?? (interrupted && typeof cut?.turn === 'number' ? cut.turn : 0),
@@ -470,6 +472,9 @@ export class DeviceRunner {
         signal,
         // A model behind Wren's proxy gets attached text on the server, which reads the transcript itself.
         loadAttachment: model instanceof ProxyModelClient ? undefined : attachments(c.run.id, store.lease, signal),
+        // The secrets the user saved for this task (task.request_secret), for its commands here; asked again
+        // each time the loop starts, so one saved while it waited is there when it carries on.
+        secrets: await Promise.resolve().then(() => store.secrets()).catch(() => []),
         log: (m, e) => console.log(`[run ${c.run.id.slice(0, 8)}] ${m}`, e ?? ''),
       });
       if (outcome.kind !== 'yield') return outcome;

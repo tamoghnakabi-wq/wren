@@ -397,18 +397,25 @@ interface Toast {
   id: number;
   text: string;
   tone: 'info' | 'error' | 'success';
+  /** A button that undoes what the toast reports (it closes the toast). */
+  action?: ToastAction;
 }
-const ToastCtx = createContext<(text: string, tone?: Toast['tone']) => void>(() => {});
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+const ToastCtx = createContext<(text: string, tone?: Toast['tone'], action?: ToastAction) => void>(() => {});
 export const useToast = () => useContext(ToastCtx);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const dismiss = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
   const push = useCallback(
-    (text: string, tone: Toast['tone'] = 'info') => {
+    (text: string, tone: Toast['tone'] = 'info', action?: ToastAction) => {
       const id = Date.now() + Math.random();
-      setToasts((t) => [...t.slice(-3), { id, text, tone }]);
-      setTimeout(() => dismiss(id), tone === 'error' ? 7000 : 3500);
+      setToasts((t) => [...t.slice(-3), { id, text, tone, action }]);
+      // A toast with a button stays long enough to reach it.
+      setTimeout(() => dismiss(id), tone === 'error' ? 7000 : action ? 6000 : 3500);
     },
     [dismiss],
   );
@@ -424,6 +431,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           >
             {t.tone === 'error' ? <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /> : t.tone === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /> : null}
             <span className="min-w-0 flex-1 text-pretty">{t.text}</span>
+            {t.action && (
+              <button
+                type="button"
+                onClick={() => {
+                  dismiss(t.id);
+                  t.action!.run();
+                }}
+                className="-my-0.5 rounded-md px-1.5 py-0.5 font-semibold underline decoration-current/40 underline-offset-2 hover:decoration-current"
+              >
+                {t.action.label}
+              </button>
+            )}
             <button type="button" onClick={() => dismiss(t.id)} className="-my-0.5 rounded-md p-0.5 opacity-60 transition-opacity hover:opacity-100" aria-label="Dismiss">
               <X className="h-4 w-4" />
             </button>

@@ -1,13 +1,14 @@
 'use client';
 
-import { AlertTriangle, ArrowDownUp, Bell, Brain, Camera, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, FileText, FolderTree, Globe, Hand, Info, Keyboard, LayoutTemplate, ListChecks, Loader2, MessagesSquare, Monitor, MousePointerClick, Pencil, Plug, Search, Share2, Terminal, Undo2, X } from 'lucide-react';
+import { AlertTriangle, ArrowDownUp, Bell, Brain, CalendarClock, Camera, Check, ChevronRight, CircleHelp, CircleX, Code2, Copy, Eye, EyeOff, FileText, FolderTree, Globe, Hand, Info, KeyRound, Keyboard, LayoutTemplate, ListChecks, Loader2, MessagesSquare, Monitor, MousePointerClick, Pencil, Plug, Search, Share2, Terminal, Undo2, X } from 'lucide-react';
 import Link from 'next/link';
 import { GithubMark as Github } from '../brand';
 import { createContext, useContext, useEffect, useId, useMemo, useState } from 'react';
 import type { Approval, EventRow, PlanItem } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { Markdown } from '../markdown';
-import { cx, formatBytes } from '../ui';
+import { api } from '@/lib/client/api';
+import { Button, cx, formatBytes, useToast } from '../ui';
 import { ApprovalCard } from './approval-card';
 import { PageCard } from './page-frame';
 import { CodeText } from '@/components/app/code-text';
@@ -36,6 +37,8 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   'memory.forget': Brain,
   'task.update_plan': ListChecks,
   'task.ask_user': CircleHelp,
+  'task.request_secret': KeyRound,
+  'task.schedule': CalendarClock,
   'task.ask_agent': MessagesSquare,
   'task.show_page': LayoutTemplate,
   'task.notify': Bell,
@@ -269,7 +272,7 @@ function AssistantTurn({ ev, tools, agent, approvals, thinkingEv }: { ev: EventR
       <div className="min-w-0 flex-1 space-y-2.5">
         {(streaming || thinkingEv?.status === 'streaming') && thinking && <p className="line-clamp-2 text-[13px] text-faint italic">{thinking.slice(-220)}</p>}
         {text && (
-          <div className={cx('group/answer relative', failed && 'opacity-60')}>
+          <div className={cx('group/answer relative', failed && 'opacity-60')} data-answer={streaming || failed ? undefined : ''}>
             <Markdown>{text + (streaming ? ' ▍' : '')}</Markdown>
             {!streaming && !failed && <CopyButton text={text} />}
           </div>
@@ -311,7 +314,7 @@ function CopyButton({ text }: { text: string }) {
 function Steps({ tools, approvals }: { tools: EventRow[]; approvals: Approval[] }) {
   const [open, setOpen] = useState(false);
   const visible = tools.filter((t) => (t.data as unknown as ToolData).name !== 'task.update_plan');
-  const attention = visible.filter((t) => t.status === 'awaiting_approval' || t.status === 'awaiting_input');
+  const attention = visible.filter((t) => t.status === 'awaiting_approval' || t.status === 'awaiting_input' || t.status === 'awaiting_secret');
   const collapsible = visible.length > 4 && !attention.length;
   const shown = collapsible && !open ? visible.slice(-3) : visible;
   return (
@@ -358,6 +361,8 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
     );
   }
 
+  if (status === 'awaiting_secret') return <SecretCard ev={ev} d={d} />;
+
   return (
     <div className="border-b border-border last:border-0">
       <button
@@ -379,6 +384,7 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
         </div>
       )}
       {status === 'awaiting_approval' && !approval && <p className="px-3.5 pb-2.5 text-[12.5px] text-warning">Waiting for approval…</p>}
+      {d.name === 'task.request_secret' && status === 'done' && <SavedSecret ev={ev} name={String(d.args.name ?? '')} />}
       {d.name === 'task.ask_agent' && d.ask && (
         <p className="px-3.5 pb-2.5 pl-10 text-[12.5px] text-muted">
           {status === 'awaiting_agent' ? `${d.ask.agent} is working on the answer. ` : ''}
@@ -408,6 +414,115 @@ function Step({ ev, approval }: { ev: EventRow; approval?: Approval }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A secret the agent asked for (task.request_secret): typed here, never into the conversation. The server keeps
+ * it for the task's commands (lib/task-secrets.ts); the page only sends it, and never gets it back.
+ */
+function SecretCard({ ev, d }: { ev: EventRow; d: ToolData }) {
+  const toast = useToast();
+  const name = String(d.args.name ?? '');
+  const answered = (d as ToolData & { secretAnswer?: string }).secretAnswer;
+  // A step an engine CLI made (only Claude Code can ask): its commands get the value as a file, and the CLI sees
+  // what they print.
+  const engine = (d as ToolData & { engine?: unknown }).engine ? 'Claude Code' : null;
+  const [value, setValue] = useState('');
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState<'save' | 'decline' | null>(null);
+  const inputId = useId();
+  const send = async (decline: boolean) => {
+    setBusy(decline ? 'decline' : 'save');
+    try {
+      await api(`/api/sessions/${ev.session_id}/secrets`, { body: decline ? { eventId: ev.id, decline: true } : { eventId: ev.id, value } });
+      setValue('');
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="border-b border-border bg-info-soft/60 px-3.5 py-3 last:border-0">
+      <p className="flex items-center gap-2 text-[13px] font-semibold text-info">
+        <KeyRound className="h-4 w-4" aria-hidden /> A secret for this task
+      </p>
+      <p className="mt-1 text-[15px] break-words">{String(d.args.why ?? '')}</p>
+      {answered ? (
+        <p className="mt-1.5 text-[12.5px] text-muted">{answered === 'saved' ? 'Saved. The agent carries on.' : 'Declined. The agent carries on without it.'}</p>
+      ) : (
+        <form
+          className="mt-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (value.trim().length >= 4) void send(false);
+          }}
+        >
+          <label htmlFor={inputId} className="text-[12.5px] text-muted">
+            {engine ? (
+              <>Its commands read it from a file Wren makes for this task. Wren keeps it encrypted for 24 hours and blanks it out of what this task shows; {engine} would see it only if a command printed it.</>
+            ) : (
+              <>
+                Its commands get it as <code className="rounded bg-surface px-1 font-mono text-[12px] text-text">${name}</code>. Wren keeps it encrypted for 24 hours, doesn’t give it to the AI model, and blanks it out of what this task shows.
+              </>
+            )}
+          </label>
+          <div className="mt-2 flex items-center gap-1.5 rounded-xl border border-border bg-surface pr-1 focus-within:border-border-strong">
+            <input
+              id={inputId}
+              type={show ? 'text' : 'password'}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={8192}
+              placeholder={name}
+              className="min-w-0 flex-1 bg-transparent px-3 py-2 font-mono text-[14px] outline-none placeholder:text-faint"
+            />
+            <button type="button" onClick={() => setShow((v) => !v)} className="rounded-lg p-1.5 text-faint hover:bg-bg-subtle hover:text-text" aria-label={show ? 'Hide it' : 'Show it'} aria-pressed={show}>
+              {show ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+            </button>
+          </div>
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            <Button size="sm" type="submit" loading={busy === 'save'} disabled={!!busy || value.trim().length < 4}>
+              Save for this task
+            </Button>
+            <Button size="sm" variant="ghost" type="button" loading={busy === 'decline'} disabled={!!busy} onClick={() => send(true)}>
+              Decline
+            </Button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/** Under a secret the user saved: it lasts a day, and can be removed now. */
+function SavedSecret({ ev, name }: { ev: EventRow; name: string }) {
+  const toast = useToast();
+  const [gone, setGone] = useState(false);
+  const remove = async () => {
+    try {
+      await api(`/api/sessions/${ev.session_id}/secrets?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+      setGone(true);
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+  return (
+    <p className="px-3.5 pb-2.5 pl-10 text-[12.5px] text-muted">
+      {gone ? (
+        `Removed: this task’s commands don’t get $${name} any more.`
+      ) : (
+        <>
+          Saved for this task’s commands for 24 hours.{' '}
+          <button type="button" className="font-medium text-text underline decoration-border-strong underline-offset-2 hover:decoration-text" onClick={remove}>
+            Remove it now
+          </button>
+        </>
+      )}
+    </p>
   );
 }
 
@@ -446,6 +561,14 @@ function StatusLine({ ev }: { ev: EventRow }) {
       <span>
         {String(ev.data.text ?? '')}
         {resetAt > 0 && `${/[.!?)]$/.test(String(ev.data.text ?? '').trim()) ? '' : '.'} It resets ${whenLabel(resetAt)}.`}
+        {code === 'handed_off' && typeof ev.data.sessionId === 'string' && (
+          <>
+            {' '}
+            <Link href={`/app/s/${ev.data.sessionId}`} className="font-medium underline">
+              Open it
+            </Link>
+          </>
+        )}
         {chatgpt && (
           <>
             {' '}

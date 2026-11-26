@@ -17,13 +17,50 @@ export function searchWords(q: string): string[] {
   return (long.length ? long : all).slice(0, MAX_WORDS);
 }
 
+/** Words in quotes, which must come together and in this order. */
+export interface Phrase {
+  words: string[];
+  /** The quote isn't closed yet (it's still being typed), so its last word may be the start of one. */
+  open: boolean;
+}
+/** Phrases looked for at most. */
+export const MAX_PHRASES = 3;
+
 /**
- * A message matches when it has every word. The last word (the one still being typed) also matches as the
- * start of a longer word ("deplo" finds "deploy") once it has three characters: a shorter prefix would match
- * most of the index.
+ * The quoted phrases of a query ("deploy the api"), each as its words (the same runs of letters and digits as
+ * `searchWords`, one-letter ones kept: they hold the others apart). A quote needs two words to be a phrase.
  */
-export function tsQuery(words: string[]): string {
-  return words.map((w, i) => (i === words.length - 1 && w.length >= 3 ? `${w}:*` : w)).join(' & ');
+export function searchPhrases(q: string): Phrase[] {
+  const s = q.slice(0, MAX_QUERY).toLowerCase().replace(/[“”„‟«»]/g, '"');
+  const out: Phrase[] = [];
+  for (const m of s.matchAll(/"([^"]*)("|$)/g)) {
+    const words = (m[1].match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, MAX_WORDS);
+    if (words.length >= 2) out.push({ words, open: !m[2] });
+    if (out.length >= MAX_PHRASES) break;
+  }
+  return out;
+}
+
+/**
+ * A message matches when it has every word, and each phrase's words next to each other in order (`<->`).
+ * The word still being typed also matches as the start of a longer word ("deplo" finds "deploy") once it
+ * has three characters (a shorter prefix would match most of the index): the last loose word, or the last
+ * word of a phrase whose quote isn't closed yet.
+ */
+export function tsQuery(words: string[], phrases: Phrase[] = []): string {
+  const prefix = (w: string, last: boolean) => (last && w.length >= 3 ? `${w}:*` : w);
+  const typing = phrases.some((p) => p.open);
+  const inPhrase = new Set(phrases.flatMap((p) => p.words));
+  const loose = words.filter((w) => !inPhrase.has(w));
+  return [
+    ...phrases.map((p) => `(${p.words.map((w, i) => prefix(w, p.open && i === p.words.length - 1)).join(' <-> ')})`),
+    ...loose.map((w, i) => prefix(w, !typing && i === loose.length - 1)),
+  ].join(' & ');
+}
+
+/** A POSIX pattern (`~*`) for a title holding a phrase: its words with only spaces or punctuation between. */
+export function phrasePattern(p: Phrase): string {
+  return p.words.join('[^[:alnum:]]+');
 }
 
 /** Whether a query is worth sending to the database for messages: at least one word of two or more characters. */

@@ -21,6 +21,8 @@ import { assertPlatformAllowed } from './platform-credits';
 import { notifyUser, nudgeDevice } from './notify';
 import { SandboxHost } from './runner/sandbox-host';
 import { sourceInfo } from './client/sources';
+import { handoffTranscript } from './handoff';
+import { scrubForSession } from './task-secrets';
 
 // Task lifecycle shared by the API routes, the cloud tick and the desktop API.
 
@@ -35,10 +37,14 @@ export interface StartTaskInput {
   trigger?: 'user' | 'schedule' | 'agent';
   scheduleId?: string;
   scheduleName?: string;
+  /** A one-off schedule (said so in the task's context). */
+  scheduleOnce?: boolean;
   runtime?: Runtime; // override (e.g. "run this one in the cloud")
   deviceId?: string;
   /** A question another agent asked (task.ask_agent): the task is linked to the run that asked. */
   parent?: AskParent;
+  /** Carried on from another agent's task (handOff): its conversation goes in the context, and it's linked. */
+  handoff?: { fromSessionId: string; fromAgent: string; title: string; transcript: string };
 }
 
 interface AskParent {
@@ -112,7 +118,9 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
     memories: memories.map((m) => ({ id: String(m.id), content: m.content })),
     trigger: i.trigger ?? 'user',
     scheduleName: i.scheduleName,
+    scheduleOnce: i.scheduleOnce,
     askedBy: i.parent ? { agent: i.parent.agentName, task: i.parent.taskTitle } : undefined,
+    handoff: i.handoff ? { fromAgent: i.handoff.fromAgent, title: i.handoff.title, transcript: i.handoff.transcript } : undefined,
   });
   const msg: MessageData & { context: string } = { ...(userMessage as MessageData), context };
 
@@ -150,8 +158,8 @@ export async function startTask(i: StartTaskInput): Promise<{ sessionId: string;
       if (active) return { sessionId, runId: null as string | null };
     } else {
       const title = (text.split('\n')[0] || 'New task').slice(0, 80);
-      const [s] = await tx`insert into public.sessions (user_id, agent_id, title, status, runtime, device_id, parent_session_id, parent_run_id, parent_ask_key)
-        values (${i.userId}, ${agent.id}, ${title}, 'queued', ${runtime}, ${deviceId}, ${i.parent?.sessionId ?? null}, ${i.parent?.runId ?? null}, ${i.parent?.key ?? null}) returning id`;
+      const [s] = await tx`insert into public.sessions (user_id, agent_id, title, status, runtime, device_id, parent_session_id, parent_run_id, parent_ask_key, handed_from)
+        values (${i.userId}, ${agent.id}, ${title}, 'queued', ${runtime}, ${deviceId}, ${i.parent?.sessionId ?? null}, ${i.parent?.runId ?? null}, ${i.parent?.key ?? null}, ${i.handoff?.fromSessionId ?? null}) returning id`;
       sessionId = s.id as string;
     }
     const [run] = await tx`
@@ -215,7 +223,7 @@ async function continueActiveRun(sessionId: string, userId: string, message: Rec
     // Waiting out a plan's usage limit: sending now would only hit it again, so the message goes when the
     // task carries on (at the reset, or when the user presses Resume now).
     if (active.limited) return { runId: active.id as string, kick: false };
-    const [asked] = await tx`select 1 from public.events where run_id = ${active.id} and type = 'tool' and status = 'awaiting_input' limit 1`;
+    const [asked] = await tx`select 1 from public.events where run_id = ${active.id} and type = 'tool' and status in ('awaiting_input', 'awaiting_secret') limit 1`;
     if (active.status === 'paused' || (active.status === 'waiting' && asked)) {
       await tx`update public.runs set status = 'queued', pause_requested = false, wake_at = null where id = ${active.id}`;
       await tx`update public.sessions set status = 'queued' where id = ${sessionId}`;
@@ -335,6 +343,8 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
         values (${run.user_id}, ${run.session_id}, ${runId}, 'status', 'done', ${tx.json({ text: 'The computer this task was using was unlinked, so the task stopped.', level: 'warn' } satisfies StatusData as unknown as Json)})`;
     }
     let o = outcome;
+    // The answer and the error are saved and sent as notifications: the task's secrets are blanked out of them.
+    if (o.kind === 'completed' || o.kind === 'failed') o = await scrubForSession(o, run.session_id, run.user_id);
     // Stop was pressed while the worker was busy: whatever it reports next, the run ends cancelled.
     const cancelledLate = run.cancel_requested && !['completed', 'failed', 'cancelled'].includes(o.kind);
     if (cancelledLate) o = { kind: 'cancelled', steps: o.steps };
@@ -355,9 +365,12 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       const [a] = await tx`select status from public.approvals where id = ${o.approvalId} and run_id = ${runId}`;
       resume = !!a && ['approved', 'denied', 'expired'].includes(a.status);
     } else if (o.kind === 'waiting_input') {
+      // A reply after the question (or the secret card), or the card answered meanwhile.
       const [answered] = await tx`
         select 1 from public.events m where m.run_id = ${runId} and m.type = 'message' and m.data->>'role' = 'user'
-          and m.seq > (select coalesce(max(seq), 0) from public.events where run_id = ${runId} and type = 'tool' and status = 'awaiting_input')
+          and m.seq > (select coalesce(max(seq), 0) from public.events where run_id = ${runId} and type = 'tool' and status in ('awaiting_input', 'awaiting_secret'))
+        union all
+        select 1 from public.events where run_id = ${runId} and type = 'tool' and status = 'awaiting_secret' and data ? 'secretAnswer'
         limit 1`;
       resume = !!answered;
     } else if (o.kind === 'waiting_agent') {
@@ -388,7 +401,7 @@ export async function finishRun(runId: string, outcome: LoopOutcome, leaseId?: s
       where id = ${runId}`;
     if (o.kind === 'cancelled') {
       // Steps and approvals the run never finished end with it.
-      await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'awaiting_agent', 'running')`;
+      await tx`update public.events set status = 'cancelled' where run_id = ${runId} and type = 'tool' and status in ('pending', 'awaiting_approval', 'awaiting_input', 'awaiting_secret', 'awaiting_agent', 'running')`;
       await tx`update public.approvals set status = 'cancelled' where run_id = ${runId} and status = 'pending'`;
     }
     await tx`update public.sessions set status = ${resume ? 'queued' : SESSION_STATUS[o.kind]}, last_event_at = now() where id = ${run.session_id}`;
@@ -571,6 +584,49 @@ export async function resumeRun(userId: string, runId: string) {
  * "Don't resume": a task paused by a usage limit stays paused at the reset, as if the user had paused it
  * (`pause_requested`, which the cron's `limits` stage skips). Resume still carries it on.
  */
+/** Events of the old task read for a hand-off at most (the newest), plus its first message. */
+const HANDOFF_EVENTS = 3000;
+
+/**
+ * Carry a task on with another agent (the task's menu, or its usage-limit banner): a new task for that agent,
+ * with this one's conversation in its context (lib/handoff.ts) and the files it shared attached, linked back
+ * here (`handed_from`). This one keeps its history; a run paused at a usage limit stays paused (it would
+ * otherwise carry on by itself at the reset too), and a line here links to the new task. Not while it works.
+ */
+export async function handOff(userId: string, sessionId: string, agentId: string): Promise<{ sessionId: string; runId: string }> {
+  const sql = db();
+  const [s] = await sql`select s.id, s.title, s.agent_id, a.name as agent_name from public.sessions s left join public.agents a on a.id = s.agent_id where s.id = ${sessionId} and s.user_id = ${userId}`;
+  if (!s) throw new HttpError(404, 'Task not found.', 'not_found');
+  if (s.agent_id === agentId) throw new HttpError(400, 'Pick another agent: this one already has the task.', 'invalid');
+  const [to] = await sql`select name from public.agents where id = ${agentId} and user_id = ${userId} and archived_at is null`;
+  if (!to) throw new HttpError(404, 'Agent not found.', 'not_found');
+  const [busy] = await sql`select 1 from public.runs where session_id = ${sessionId} and status in ('queued', 'running') limit 1`;
+  if (busy) throw new HttpError(409, 'It’s still working. Pause or stop it first, then carry it on with another agent.', 'conflict');
+  // Only what the transcript reads, and long texts cut, so a long task's tool outputs never come back here.
+  const pick = sql`jsonb_build_object('role', data->'role', 'text', left(data->>'text', 20000), 'attachments', data->'attachments', 'answersCallId', data->'answersCallId',
+    'name', data->'name', 'title', left(data->>'title', 300), 'result', jsonb_build_object('isError', data->'result'->'isError'), 'items', data->'items', 'level', data->'level')`;
+  const [first] = await sql`select seq, type, status, ${pick} as data from public.events where session_id = ${sessionId} and type = 'message' and data->>'role' = 'user' order by seq limit 1`;
+  const newest = await sql`select seq, type, status, ${pick} as data from public.events
+    where session_id = ${sessionId} and type in ('message', 'tool', 'status', 'plan') order by seq desc limit ${HANDOFF_EVENTS}`;
+  const rows = [...(first && !newest.some((e) => e.seq === first.seq) ? [first] : []), ...[...newest].reverse()];
+  const fromAgent = String(s.agent_name ?? 'Another agent');
+  const files = await sql`select id, name, mime, size from public.artifacts where session_id = ${sessionId} and user_id = ${userId} and kind in ('file', 'upload') order by created_at desc limit 10`;
+  const r = await startTask({
+    userId,
+    agentId,
+    text: `Carry on with “${s.title}”. ${fromAgent} started it; Wren has given you the conversation so far${files.length ? ', and the files the task had are attached' : ''}.`,
+    attachments: files.map((f) => ({ artifactId: String(f.id), name: String(f.name), mime: String(f.mime), size: Number(f.size) })),
+    handoff: { fromSessionId: sessionId, fromAgent, title: String(s.title), transcript: handoffTranscript(rows as unknown as Parameters<typeof handoffTranscript>[0], fromAgent) },
+  });
+  const [paused] = await sql`select id from public.runs where session_id = ${sessionId} and status = 'paused' order by created_at desc limit 1`;
+  if (paused) await holdRun(userId, String(paused.id));
+  const [last] = await sql`select id from public.runs where session_id = ${sessionId} order by created_at desc limit 1`;
+  await sql`insert into public.events (user_id, session_id, run_id, type, status, data)
+    values (${userId}, ${sessionId}, ${last?.id ?? null}, 'status', 'done', ${sql.json({ text: `Carried on with ${to.name} in a new task.`, level: 'info', code: 'handed_off', sessionId: r.sessionId } as unknown as Json)})`;
+  await sql`update public.sessions set last_event_at = now() where id = ${sessionId}`;
+  return { sessionId: r.sessionId, runId: r.runId };
+}
+
 export async function holdRun(userId: string, runId: string): Promise<void> {
   const [ref] = await db()`select session_id from public.runs where id = ${runId} and user_id = ${userId}`;
   if (!ref) return;

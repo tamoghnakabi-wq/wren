@@ -11,7 +11,8 @@ vi.mock('../src/lib/auth', () => ({
     }
   },
 }));
-const { nextRunAfter, validateCron } = await import('../src/lib/schedules');
+vi.mock('../src/lib/db', () => ({ db: () => { throw new Error('no database in this test'); } }));
+const { nextRunAfter, parseWhen, ScheduleSchema, validateCron, validateRunAt } = await import('../src/lib/schedules');
 
 // W-85: the 15-minute minimum holds for every gap, and again when a schedule runs.
 describe('schedules', () => {
@@ -38,5 +39,33 @@ describe('schedules', () => {
     // Started late (an outage): no catch-up burst right after.
     const late = new Date('2026-10-06T12:20:00Z');
     expect(nextRunAfter('*/15 * * * *', 'UTC', slot, late).getTime() - late.getTime()).toBeGreaterThanOrEqual(14 * 60_000);
+  });
+});
+
+// One-off schedules (0.1.55): a time, from a minute to a year ahead; an agent's must carry its UTC offset.
+describe('one-off schedules', () => {
+  const now = new Date('2026-11-26T06:00:00Z');
+  it('take a time from a minute to a year ahead', () => {
+    expect(() => validateRunAt(new Date('2026-11-26T06:00:30Z'), now)).toThrow(/at least a minute/);
+    expect(() => validateRunAt(new Date('2027-12-01T00:00:00Z'), now)).toThrow(/within a year/);
+    expect(() => validateRunAt(new Date('nope'), now)).toThrow(/isn’t a date/);
+    expect(() => validateRunAt(new Date('2026-11-27T06:00:00Z'), now)).not.toThrow();
+  });
+
+  it('read an agent’s time only with its offset', () => {
+    expect(parseWhen('2026-11-27T17:00:00+11:00')?.toISOString()).toBe('2026-11-27T06:00:00.000Z');
+    expect(parseWhen('2026-11-27T06:00Z')?.toISOString()).toBe('2026-11-27T06:00:00.000Z');
+    expect(parseWhen('2026-11-27T17:00:00+1100')?.toISOString()).toBe('2026-11-27T06:00:00.000Z');
+    expect(parseWhen('2026-11-27T17:00:00')).toBeNull();
+    expect(parseWhen('tomorrow at 5')).toBeNull();
+    expect(parseWhen('2026-13-45T17:00:00Z')).toBeNull();
+  });
+
+  it('are either repeating or once, never both', () => {
+    const base = { agentId: '00000000-0000-4000-8000-000000000000', name: 'n', prompt: 'p' };
+    expect(ScheduleSchema.safeParse({ ...base, cron: '0 8 * * *' }).success).toBe(true);
+    expect(ScheduleSchema.safeParse({ ...base, runAt: '2026-11-27T06:00:00.000Z' }).success).toBe(true);
+    expect(ScheduleSchema.safeParse({ ...base, cron: '0 8 * * *', runAt: '2026-11-27T06:00:00.000Z' }).success).toBe(false);
+    expect(ScheduleSchema.safeParse(base).success).toBe(false);
   });
 });

@@ -1,16 +1,38 @@
 'use client';
 
-import { ArrowUp, ChevronDown, Cloud, Laptop, Link2, Loader2, Paperclip, X } from 'lucide-react';
-import { useEffect, useRef, useState, type ClipboardEvent } from 'react';
+import { ArchiveRestore, ArrowUp, ChevronDown, Cloud, Laptop, Link2, Loader2, Paperclip, X } from 'lucide-react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent, type RefObject } from 'react';
 import { api } from '@/lib/client/api';
 import { MAX_MESSAGE_CHARS, PASTE_AS_FILE_CHARS, pastedFileName, READABLE_TEXT_BYTES } from '@/lib/client/paste';
 import { uploadFile, type Attachment } from '@/lib/client/upload';
 import { sourceInfo } from '@/lib/client/sources';
+import { putAside, readDrafts, STASH_EVENT, takeBack } from '@/lib/client/stash';
 import { isLiveDevice, type Agent } from '@/lib/client/types';
 import { AgentAvatar } from '../agent-avatar';
 import { cx, formatBytes, useToast } from '../ui';
 import { useApp } from './provider';
 import { ChatGPTPlanBadge, useUsesChatGPTPlan } from './chatgpt-ui';
+
+/** Sent with the text the user chose to quote from an agent's answer (the task page's composer adds it). */
+export const QUOTE_EVENT = 'wren:quote';
+
+const subscribeStash = (cb: () => void) => {
+  window.addEventListener('storage', cb);
+  window.addEventListener(STASH_EVENT, cb);
+  return () => {
+    window.removeEventListener('storage', cb);
+    window.removeEventListener(STASH_EVENT, cb);
+  };
+};
+/** Focus the box with the caret at the end (after React has put the new text in). */
+const caretToEnd = (ta: RefObject<HTMLTextAreaElement | null>) =>
+  requestAnimationFrame(() => {
+    const el = ta.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  });
+const stashKeys = () => (/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘S' : 'Ctrl+S');
 
 export function Composer({
   agent,
@@ -35,7 +57,7 @@ export function Composer({
   /** What ↑ in an empty box brings back: the user's last message in this task. */
   recall?: string;
 }) {
-  const { agents, devices } = useApp();
+  const { agents, devices, userId } = useApp();
   const toast = useToast();
   const [text, setText] = useState(() => (initialText ?? '').slice(0, MAX_MESSAGE_CHARS));
   // A draft someone else may have written (a link can come from anywhere): said so until it's sent.
@@ -54,6 +76,18 @@ export function Composer({
   const ta = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const picker = useRef<HTMLDivElement>(null);
+  // Drafts put aside with ⌘S (lib/client/stash.ts): how many, for the button that brings one back.
+  const drafts = useSyncExternalStore(
+    subscribeStash,
+    () => {
+      try {
+        return readDrafts(localStorage, userId).length;
+      } catch {
+        return 0;
+      }
+    },
+    () => 0,
+  );
 
   // The agent list closes on a click elsewhere or Escape (focus goes back to its button).
   useEffect(() => {
@@ -134,6 +168,50 @@ export function Composer({
   // Starting a task opens its page, which would drop anything typed here meanwhile, so the box holds
   // still until then. In a task, a follow-up leaves the box at once and the next one can be written.
   const holding = busy && !sessionId;
+
+  // ⌘S / Ctrl+S puts the draft aside and empties the box; in an empty box it brings back the newest one.
+  function stash() {
+    if (holding || !agent) return;
+    const keys = stashKeys();
+    try {
+      if (text.trim() || files.length) {
+        if (uploading) return toast('Wait for the files to finish uploading, then put the draft aside.', 'error');
+        putAside(localStorage, userId, { text, files, ...(fromLink ? { fromLink: true } : {}) });
+        setText('');
+        setFiles([]);
+        setFromLink(false);
+        toast(`Draft put aside. Press ${keys} in an empty box to bring it back.`);
+      } else {
+        const back = takeBack(localStorage, userId);
+        if (!back) return toast(`No drafts put aside. ${keys} puts aside the one you’re writing.`);
+        setText(back.draft.text);
+        setFiles(back.draft.files);
+        setFromLink(!!back.draft.fromLink);
+        if (back.left) toast(`Brought back a draft. ${back.left} more ${back.left === 1 ? 'is' : 'are'} put aside.`);
+        caretToEnd(ta);
+      }
+      window.dispatchEvent(new Event(STASH_EVENT));
+    } catch {
+      toast('This browser won’t keep drafts (its storage is off or full).', 'error');
+    }
+  }
+
+  // A quote from an agent's answer (the task page's Quote button) goes at the end of the draft.
+  useEffect(() => {
+    if (!sessionId) return;
+    const onQuote = (e: Event) => {
+      const quote = String((e as CustomEvent<string>).detail ?? '').trim();
+      if (!quote || holding) return;
+      const block = `${quote
+        .split('\n')
+        .map((l) => `> ${l}`.trimEnd())
+        .join('\n')}\n\n`;
+      setText((cur) => (cur.trim() ? `${cur.trimEnd()}\n\n${block}` : block).slice(0, MAX_MESSAGE_CHARS));
+      caretToEnd(ta);
+    };
+    window.addEventListener(QUOTE_EVENT, onQuote);
+    return () => window.removeEventListener(QUOTE_EVENT, onQuote);
+  }, [sessionId, holding]);
 
   async function send() {
     if (!agent || busy || (!text.trim() && !files.length) || uploading) return;
@@ -224,6 +302,11 @@ export function Composer({
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && window.matchMedia('(pointer: fine)').matches) {
             e.preventDefault();
             send();
+          }
+          if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's' && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            stash();
+            return;
           }
           // ↑ in an empty box brings back the last message, to send again or change.
           if (e.key === 'ArrowUp' && !text && recall && !holding && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
@@ -319,6 +402,19 @@ export function Composer({
         <button type="button" onClick={() => fileInput.current?.click()} disabled={holding} className="flex h-8 w-8 items-center justify-center rounded-full text-faint transition-colors hover:bg-bg-subtle hover:text-text disabled:opacity-50" aria-label={uploading ? 'Uploading files' : 'Attach files'} title="Attach files">
           {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
         </button>
+        {drafts > 0 && !text && !files.length && (
+          <button
+            type="button"
+            onClick={stash}
+            disabled={holding || !agent}
+            className="flex h-8 items-center gap-1 rounded-full px-2 text-[12.5px] text-faint transition-colors hover:bg-bg-subtle hover:text-text disabled:opacity-50"
+            aria-label={`Bring back a draft you put aside (${drafts} put aside)`}
+            title={`Bring back a draft you put aside (${stashKeys()})`}
+          >
+            <ArchiveRestore className="h-4 w-4" aria-hidden />
+            <span className="tabular-nums">{drafts}</span>
+          </button>
+        )}
         <input
           ref={fileInput}
           type="file"

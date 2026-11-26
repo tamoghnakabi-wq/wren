@@ -2,19 +2,19 @@
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Archive, Clock, Cloud, Download, FileText, Laptop, LayoutTemplate, Maximize2, MoreHorizontal, PanelRightClose, PanelRightOpen, Pause, Play, Square, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ArrowLeft, Archive, Clock, Cloud, Download, FileText, Forward, Laptop, LayoutTemplate, Maximize2, MoreHorizontal, PanelRightClose, PanelRightOpen, Pause, Play, Quote, Square, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { AgentAvatar } from '@/components/agent-avatar';
 import type { Mood } from '@/lib/characters';
-import { Composer } from '@/components/app/composer';
+import { Composer, QUOTE_EVENT } from '@/components/app/composer';
 import { useApp } from '@/components/app/provider';
 import { StatusPill } from '@/components/app/status';
 import { useIsMac } from '@/components/app/shell';
 import { togglePane, usePaneCollapsed } from '@/lib/client/layout';
 import { PlanCard, Timeline, whenLabel } from '@/components/app/timeline';
 import { AgentCharacter } from '@/components/agent-character';
-import { Button, ButtonLink, cx, EmptyState, formatBytes, formatTokens, Menu, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
+import { Button, ButtonLink, cx, Dialog, EmptyState, formatBytes, formatTokens, Menu, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
 import { supabase } from '@/lib/client/supabase';
@@ -133,6 +133,7 @@ export default function SessionPage() {
   const live = useLive<RunLive>({ table: 'run_live', eq: { session_id: id }, pk: 'run_id', realtimeFilter: { column: 'session_id', value: id } });
   const files = useLive<Artifact>({ table: 'artifacts', eq: { session_id: id }, order: { column: 'created_at' }, realtimeFilter: { column: 'session_id', value: id } });
   const [panel, setPanel] = useState<'activity' | 'screen' | 'files'>('activity');
+  const [handing, setHanding] = useState(false);
   const confirm = useConfirm();
 
   const s = session.rows[0];
@@ -149,6 +150,9 @@ export default function SessionPage() {
   // A task another agent asked: link back to the task that asked.
   const parent = useLive<Session>({ table: 'sessions', eq: { id: s?.parent_session_id ?? undefined }, enabled: !!s?.parent_session_id });
   const asker = parent.rows[0];
+  // A task carried on from another agent's task: link back to it.
+  const handedFrom = useLive<Session>({ table: 'sessions', eq: { id: s?.handed_from ?? undefined }, enabled: !!s?.handed_from });
+  const earlier = handedFrom.rows[0];
   const plan = useMemo(() => {
     const p = [...latestPlan.rows].sort((a, b) => b.seq - a.seq)[0];
     return (p?.data.items as PlanItem[] | undefined) ?? null;
@@ -346,13 +350,28 @@ export default function SessionPage() {
             </button>
           )}
           items={[
+            ...(working
+              ? []
+              : [
+                  {
+                    label: 'Carry on with another agent…',
+                    icon: Forward,
+                    onSelect: () => setHanding(true),
+                  },
+                ]),
             {
               label: s.archived_at ? 'Unarchive' : 'Archive',
               icon: Archive,
               onSelect: async () => {
+                const archive = async (archived: boolean) => api(`/api/sessions/${id}`, { method: 'PATCH', body: { archived } });
                 try {
-                  await api(`/api/sessions/${id}`, { method: 'PATCH', body: { archived: !s.archived_at } });
-                  toast(s.archived_at ? 'Moved back to your tasks' : 'Archived', 'success');
+                  await archive(!s.archived_at);
+                  if (s.archived_at) toast('Moved back to your tasks', 'success');
+                  else
+                    toast('Archived', 'success', {
+                      label: 'Undo',
+                      run: () => archive(false).then(() => toast('Moved back to your tasks', 'success'), (e: Error) => toast(e.message, 'error')),
+                    });
                 } catch (e) {
                   toast((e as Error).message, 'error');
                 }
@@ -394,6 +413,8 @@ export default function SessionPage() {
         ))}
       </div>
 
+      {handing && <HandoffDialog sessionId={id} currentAgent={s.agent_id} onClose={() => setHanding(false)} onDone={(next) => router.push(`/app/s/${next}`)} />}
+
       <div className="flex min-h-0 flex-1">
         <div className={cx('flex min-w-0 flex-1 flex-col', panel !== 'activity' && 'hidden lg:flex')}>
           <div
@@ -432,6 +453,18 @@ export default function SessionPage() {
                   </span>
                 </p>
               )}
+              {earlier && (
+                <p className="mb-5 flex items-center justify-center gap-2 text-center text-[12.5px] text-muted" role="note">
+                  <Forward className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  <span>
+                    Carried on from{' '}
+                    <Link href={`/app/s/${earlier.id}`} title={earlier.title} className="font-medium text-text underline decoration-border-strong underline-offset-2 hover:decoration-text">
+                      {earlier.title.length > 60 ? `${earlier.title.slice(0, 59).trimEnd()}…` : earlier.title}
+                    </Link>
+                    {agentById(earlier.agent_id) ? `, which ${agentById(earlier.agent_id)!.name} started` : ''}.
+                  </span>
+                </p>
+              )}
               {events.loading ? (
                 <TimelineSkeleton />
               ) : (
@@ -439,6 +472,7 @@ export default function SessionPage() {
               )}
               {run?.status === 'failed' && run.error && !events.rows.some((e) => e.type === 'status' && e.data.text === run.error) && <p className="mt-4 text-center text-sm text-danger">{run.error}</p>}
             </div>
+            {agent && <QuoteSelection container={scroller} />}
           </div>
           <div className="border-t border-border bg-bg px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] kb-open:pb-3 sm:px-6">
             <div className="mx-auto max-w-3xl lg:details-off:max-w-4xl">
@@ -448,16 +482,22 @@ export default function SessionPage() {
                   <span className="min-w-0 flex-1">
                     {limitWake ? `Paused at a usage limit. It carries on ${whenLabel(limitWake)}.` : `Paused at a usage limit${limitReset ? `, which resets ${whenLabel(limitReset)}` : ''}. Resume it when you’re ready.`}
                   </span>
-                  {limitWake ? (
-                    <span className="flex gap-2">
-                      <Button size="sm" variant="secondary" onClick={() => act('resume')}>
-                        Resume now
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => act('hold')}>
-                        Don’t resume
-                      </Button>
-                    </span>
-                  ) : null}
+                  <span className="flex flex-wrap gap-2">
+                    {limitWake ? (
+                      <>
+                        <Button size="sm" variant="secondary" onClick={() => act('resume')}>
+                          Resume now
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => act('hold')}>
+                          Don’t resume
+                        </Button>
+                      </>
+                    ) : null}
+                    <Button size="sm" variant="ghost" onClick={() => setHanding(true)}>
+                      <Forward className="h-3.5 w-3.5" aria-hidden />
+                      Carry on with another agent
+                    </Button>
+                  </span>
                 </div>
               )}
               {agent ? (
@@ -528,6 +568,102 @@ function TimelineSkeleton() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Picks the agent that carries the task on (lib/runs.ts handOff); the new task opens. */
+function HandoffDialog({ sessionId, currentAgent, onClose, onDone }: { sessionId: string; currentAgent: string; onClose: () => void; onDone: (sessionId: string) => void }) {
+  const { agents } = useApp();
+  const toast = useToast();
+  const [busy, setBusy] = useState<string | null>(null);
+  const others = agents.filter((a) => a.id !== currentAgent);
+  const pick = async (agentId: string) => {
+    setBusy(agentId);
+    try {
+      const r = await api<{ sessionId: string }>(`/api/sessions/${sessionId}/handoff`, { body: { agentId } });
+      onDone(r.sessionId);
+      onClose();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+      setBusy(null);
+    }
+  };
+  return (
+    <Dialog open onClose={onClose} title="Carry on with another agent" busy={!!busy}>
+      <p className="mb-4 text-sm text-muted">
+        The agent you pick starts a new task with this one’s conversation and files. This task stays as it is{' '}
+        <span className="whitespace-nowrap">(paused, if it was).</span>
+      </p>
+      {others.length ? (
+        <ul className="space-y-1">
+          {others.map((a) => (
+            <li key={a.id}>
+              <button
+                type="button"
+                disabled={!!busy}
+                onClick={() => pick(a.id)}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-bg-subtle disabled:opacity-60"
+              >
+                <AgentAvatar icon={a.icon} color={a.color} size={32} seed={a.id} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">{a.name}</span>
+                  <span className="block truncate text-[12.5px] text-faint">{modelLabel(a.model?.source, a.model?.model)}</span>
+                </span>
+                {busy === a.id && <span className="text-[12.5px] text-faint">Starting…</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted">You have no other agent yet. Make one in Agents, then carry this task on with it.</p>
+      )}
+    </Dialog>
+  );
+}
+
+/**
+ * A Quote button under text selected in one of the agent's answers: it puts the text in the composer as a
+ * quote (QUOTE_EVENT). Hidden while nothing in an answer is selected, and when the conversation scrolls.
+ */
+function QuoteSelection({ container }: { container: RefObject<HTMLDivElement | null> }) {
+  const [at, setAt] = useState<{ x: number; y: number; text: string } | null>(null);
+  useEffect(() => {
+    const answerOf = (n: Node | null) => (n instanceof Element ? n : n?.parentElement)?.closest('[data-answer]');
+    const update = () => {
+      const sel = document.getSelection();
+      const range = sel && !sel.isCollapsed && sel.rangeCount ? sel.getRangeAt(0) : null;
+      const answer = range && answerOf(range.startContainer);
+      const text = sel?.toString().trim() ?? '';
+      if (!range || !answer || answer !== answerOf(range.endContainer) || !container.current?.contains(answer) || !text) return setAt(null);
+      const r = range.getBoundingClientRect();
+      setAt({ x: Math.min(window.innerWidth - 56, Math.max(56, r.left + r.width / 2)), y: Math.min(window.innerHeight - 48, r.bottom + 8), text: text.slice(0, 4000) });
+    };
+    const hide = () => setAt(null);
+    const el = container.current;
+    document.addEventListener('selectionchange', update);
+    el?.addEventListener('scroll', hide, { passive: true });
+    return () => {
+      document.removeEventListener('selectionchange', update);
+      el?.removeEventListener('scroll', hide);
+    };
+  }, [container]);
+  if (!at) return null;
+  return (
+    <button
+      type="button"
+      // Pressing it mustn't drop the selection before the click.
+      onPointerDown={(e) => e.preventDefault()}
+      onClick={() => {
+        window.dispatchEvent(new CustomEvent(QUOTE_EVENT, { detail: at.text }));
+        document.getSelection()?.removeAllRanges();
+        setAt(null);
+      }}
+      style={{ left: at.x, top: at.y }}
+      className="pop-in fixed z-30 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-fg shadow-pop"
+    >
+      <Quote className="h-3.5 w-3.5" aria-hidden />
+      Quote
+    </button>
   );
 }
 

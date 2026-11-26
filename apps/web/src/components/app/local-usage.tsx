@@ -278,6 +278,7 @@ function PlanLimits({ limits, place }: { limits: PlanLimitsReport | 'failed' | n
               <p className="mb-3 text-[13px] text-muted">
                 {name}
                 {a.plan && ` · ${a.plan} plan`}
+                {a.resetsBanked ? ` · ${a.resetsBanked} full ${a.resetsBanked === 1 ? 'reset' : 'resets'} banked` : ''}
               </p>
               {a.state === 'ok' ? (
                 <ul className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
@@ -298,9 +299,10 @@ function PlanLimits({ limits, place }: { limits: PlanLimitsReport | 'failed' | n
 }
 
 function limitsNote(state: PlanLimitsReport['apps'][number]['state'], name: string, place: string, note?: string): string {
-  if (state === 'none') return `This ${name} sign-in has no plan limits (an API key, Bedrock or Vertex).`;
+  if (state === 'none') return note ?? `This ${name} sign-in has no plan limits${name === 'Claude Code' ? ' (an API key, Bedrock or Vertex)' : ''}.`;
   if (state === 'untrusted') return `Wren won’t run the copy of ${name} it found on this ${place}, so it can’t ask.`;
   if (state === 'old') return `Update ${name} to see its limits here.`;
+  if (state === 'unavailable') return `${name} tells other apps its limits only while its background service runs, and it isn’t running now. You can see them with /usage inside ${name === 'Grok Build' ? 'Grok' : name}.`;
   return `${name} didn’t say${note ? ` (${note})` : ''}. Check that it’s signed in.`;
 }
 

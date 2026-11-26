@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { likePattern, markWords, MAX_WORDS, searchableInMessages, searchWords, snippet, tsQuery } from '../src/lib/search';
+import { likePattern, markWords, MAX_WORDS, phrasePattern, searchableInMessages, searchPhrases, searchWords, snippet, tsQuery } from '../src/lib/search';
 
 // The ⌘K palette's search: what the database is asked comes only from words, never from operators the user
 // typed, and the snippet and highlights follow the same words.
@@ -29,6 +29,23 @@ describe('the database query', () => {
     expect(tsQuery(['quarterly', 'rep'])).toBe('quarterly & rep:*');
     expect(tsQuery(['quarterly', 're'])).toBe('quarterly & re');
     expect(tsQuery(['deplo'])).toBe('deplo:*');
+  });
+
+  it('keeps quoted words together and in order', () => {
+    expect(searchPhrases('"deploy the API" friday')).toEqual([{ words: ['deploy', 'the', 'api'], open: false }]);
+    expect(tsQuery(['deploy', 'the', 'api', 'friday'], searchPhrases('"deploy the API" friday'))).toBe('(deploy <-> the <-> api) & friday:*');
+    // A quote still being typed: its last word is the start of one, and no loose word is.
+    expect(tsQuery(['release', 'deploy', 'the'], searchPhrases('release "deploy the'))).toBe('(deploy <-> the:*) & release');
+    expect(tsQuery(['release', 'deploy', 'api'], searchPhrases('release “deploy api'))).toBe('(deploy <-> api:*) & release');
+    // One-letter words stay in a phrase (they keep the others apart); a one-word quote is just a word.
+    expect(searchPhrases(`"don't do it" "x"`)).toEqual([{ words: ['don', 't', 'do', 'it'], open: false }]);
+    expect(searchPhrases('"a & b" "c | d" "e:* f" "g h"')).toEqual([
+      { words: ['a', 'b'], open: false },
+      { words: ['c', 'd'], open: false },
+      { words: ['e', 'f'], open: false },
+    ]);
+    expect(phrasePattern({ words: ['deploy', 'the', 'api'], open: false })).toBe('deploy[^[:alnum:]]+the[^[:alnum:]]+api');
+    expect(searchPhrases('no quotes here')).toEqual([]);
   });
 
   it('looks in messages only for a word of two characters or more', () => {

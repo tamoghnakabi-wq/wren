@@ -37,7 +37,7 @@ export const POST = route(async (req) => {
   const until = Date.now() + DEADLINE_MS;
   const left = () => until - Date.now();
   const sql = db();
-  const report = { kicked: 0, limits: 0, scheduled: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, asks: { woken: 0, stopped: 0 }, errors: [] as string[], skipped: [] as string[], late: [] as string[] };
+  const report = { kicked: 0, limits: 0, scheduled: 0, secrets: 0, expired: 0, cleaned: 0, orphaned: 0, unclaimed: 0, deleted: 0, removed: 0, asks: { woken: 0, stopped: 0 }, errors: [] as string[], skipped: [] as string[], late: [] as string[] };
   /** Wait for `work` at most `ms`, and never past the deadline: false if it was still going. */
   const inTime = async (work: Promise<unknown>, ms = Infinity): Promise<boolean> => {
     let timer: NodeJS.Timeout | undefined;
@@ -86,6 +86,12 @@ export const POST = route(async (req) => {
         // A schedule whose next time can't be worked out (its time zone or expression is no longer
         // understood) is switched off and its owner told. Left as it was, it failed this whole step
         // every minute, and with it everybody's schedules.
+        // A one-off schedule is switched off as it's claimed; it's deleted once its task has started.
+        if (!s.cron) {
+          await tx`update public.schedules set enabled = false, next_run_at = null where id = ${s.id}`;
+          ready.push(s);
+          continue;
+        }
         let next: Date;
         try {
           next = nextRunAfter(s.cron, s.timezone, new Date(s.next_run_at));
@@ -107,8 +113,9 @@ export const POST = route(async (req) => {
     await Promise.allSettled(
       due.map(async (s) => {
         try {
-          const r = await startTask({ userId: s.user_id, agentId: s.agent_id, text: s.prompt, trigger: 'schedule', scheduleId: s.id, scheduleName: s.name });
-          await sql`update public.schedules set last_run_at = now(), last_session_id = ${r.sessionId} where id = ${s.id}`;
+          const r = await startTask({ userId: s.user_id, agentId: s.agent_id, text: s.prompt, trigger: 'schedule', scheduleId: s.id, scheduleName: s.name, scheduleOnce: !s.cron });
+          if (s.cron) await sql`update public.schedules set last_run_at = now(), last_session_id = ${r.sessionId} where id = ${s.id}`;
+          else await sql`delete from public.schedules where id = ${s.id} and run_at is not null`;
           report.scheduled++;
         } catch (e) {
           const msg = (e as Error).message;
@@ -117,6 +124,12 @@ export const POST = route(async (req) => {
         }
       }),
     );
+  });
+
+  await stage('secrets', async () => {
+    // Secrets saved for a task (task.request_secret) last a day.
+    const gone = await sql`delete from public.task_secrets where expires_at <= now()`;
+    report.secrets = gone.count;
   });
 
   await stage('approvals', async () => {

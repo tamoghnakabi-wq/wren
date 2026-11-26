@@ -1,9 +1,11 @@
-import { pageFileName, type AgentAnswer, type ApprovalRequest, type ApprovalState, type AskAgentRequest, type AskAgentStart, type ModelUsage, type RunStore, type SessionEvent } from '@wren/core';
+import { pageFileName, type TaskSecret, type AgentAnswer, type ApprovalRequest, type ApprovalState, type AskAgentRequest, type AskAgentStart, type ModelUsage, type RunStore, type ScheduleRequest, type ScheduleResult, type SessionEvent } from '@wren/core';
 import { HttpError } from '../auth';
 import { saveArtifact } from '../blob';
 import { db, type Json } from '../db';
 import { notifyUser, sendPush } from '../notify';
 import { agentAnswer, askAgent } from '../runs';
+import { createReminder } from '../schedules';
+import { scrubForSession } from '../task-secrets';
 
 // RunStore backed by Postgres. Every write bumps the session's last_event_at
 // so lists sort by activity; Realtime pushes the rows to open browsers.
@@ -54,6 +56,12 @@ export function stripInline(data: unknown): unknown {
 export class DbRunStore implements RunStore {
   constructor(private readonly r: RunRefs) {}
 
+  /** The task's secrets, read once for this store: everything it saves has them blanked out (task.request_secret). */
+  private readonly secretCache: { secrets?: Promise<TaskSecret[]> } = {};
+  private scrub<T>(data: T): Promise<T> {
+    return scrubForSession(data, this.r.sessionId, this.r.userId, this.secretCache);
+  }
+
   /**
    * SQL condition: this worker still holds the run's lease. It is part of each write statement
    * itself and share-locks the run row, so a takeover (which updates that row) waits for the write
@@ -81,7 +89,7 @@ export class DbRunStore implements RunStore {
     const sql = db();
     const [row] = await sql<Row[]>`
       insert into public.events (user_id, session_id, run_id, type, status, data)
-      select ${this.r.userId}::uuid, ${this.r.sessionId}::uuid, ${this.r.runId}::uuid, ${type}, ${status ?? null}, ${sql.json(stripInline(data) as Json)}
+      select ${this.r.userId}::uuid, ${this.r.sessionId}::uuid, ${this.r.runId}::uuid, ${type}, ${status ?? null}, ${sql.json((await this.scrub(stripInline(data))) as Json)}
       where ${this.holds(sql)}
       returning id, seq, run_id, type, status, data, created_at`;
     if (!row) throw new LeaseLostError();
@@ -95,7 +103,7 @@ export class DbRunStore implements RunStore {
     if (patch.data === undefined && patch.status === undefined) return;
     const done =
       patch.data !== undefined
-        ? await sql`update public.events set data = ${sql.json(stripInline(patch.data) as Json)}, status = coalesce(${patch.status ?? null}, status)
+        ? await sql`update public.events set data = ${sql.json((await this.scrub(stripInline(patch.data))) as Json)}, status = coalesce(${patch.status ?? null}, status)
             where id = ${id} and run_id = ${this.r.runId} and ${this.holds(sql)} returning id`
         : await sql`update public.events set status = ${patch.status!} where id = ${id} and run_id = ${this.r.runId} and ${this.holds(sql)} returning id`;
     if (!done.length) await this.assertLease();
@@ -105,6 +113,12 @@ export class DbRunStore implements RunStore {
   async savePage(page: { title: string; html: string }): Promise<{ id: string; name: string }> {
     const a = await saveArtifact({ userId: this.r.userId, agentId: this.r.agentId, sessionId: this.r.sessionId, runId: this.r.runId, name: pageFileName(page.title), mime: 'text/html', data: Buffer.from(page.html, 'utf8'), kind: 'page', source: 'cloud', leaseId: this.r.leaseId });
     return { id: a.id, name: a.name };
+  }
+
+  /** task.schedule, approved by the user: a one-off schedule for this agent, from this task. */
+  async schedule(req: ScheduleRequest): Promise<ScheduleResult> {
+    await this.assertLease();
+    return createReminder({ userId: this.r.userId, agentId: this.r.agentId, sessionId: this.r.sessionId, ...req });
   }
 
   async control() {

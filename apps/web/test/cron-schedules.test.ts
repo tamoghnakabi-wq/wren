@@ -5,9 +5,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // It is now switched off and its owner told, and the others start.
 
 const h = vi.hoisted(() => ({
-  due: [] as { id: string; user_id: string; agent_id: string; name: string; prompt: string; cron: string; timezone: string; next_run_at: string }[],
+  due: [] as { id: string; user_id: string; agent_id: string; name: string; prompt: string; cron: string | null; timezone: string; next_run_at: string }[],
   updates: [] as { id: string; text: string }[],
+  deleted: [] as string[],
   started: [] as string[],
+  once: [] as boolean[],
   notified: [] as { userId: string; title: string }[],
 }));
 
@@ -16,6 +18,7 @@ vi.mock('@/lib/db', () => {
     const text = strings.join('?').replace(/\s+/g, ' ').trim();
     if (text.startsWith('select * from public.schedules where enabled')) return Promise.resolve(h.due);
     if (text.startsWith('update public.schedules set')) h.updates.push({ id: String(values[values.length - 1]), text });
+    if (text.startsWith('delete from public.schedules')) h.deleted.push(String(values[0]));
     return Promise.resolve([]);
   };
   return { db: () => Object.assign(tag, { begin: async <T>(fn: (tx: typeof tag) => Promise<T>) => fn(tag) }) };
@@ -35,7 +38,7 @@ vi.mock('@/lib/runs', () => ({
   kickTick: async () => {},
   kickRun: async () => {},
   cleanUpCloudRun: async () => true,
-  startTask: async (t: { scheduleId: string }) => (h.started.push(t.scheduleId), { sessionId: `session-of-${t.scheduleId}` }),
+  startTask: async (t: { scheduleId: string; scheduleOnce?: boolean }) => (h.started.push(t.scheduleId), h.once.push(!!t.scheduleOnce), { sessionId: `session-of-${t.scheduleId}` }),
   endRemovedAgentRuns: async () => 0,
   resumeLimitedRuns: async () => 0,
   tidyAsks: async () => ({ woken: 0, stopped: 0 }),
@@ -45,14 +48,24 @@ vi.mock('@/lib/cleanup', () => ({ runCleanups: async () => 0 }));
 const { POST } = (await import('../src/app/api/internal/cron/route')) as unknown as { POST: (req: Request) => Promise<Response> };
 const call = async () => (await POST(new Request('http://x/api/internal/cron', { method: 'POST', headers: { authorization: 'Bearer test-cron-secret' } }))).json();
 
-const schedule = (id: string, cron = '0 8 * * *') => ({ id, user_id: `owner-of-${id}`, agent_id: 'agent', name: `Schedule ${id}`, prompt: 'go', cron, timezone: 'UTC', next_run_at: '2026-11-10T08:00:00Z' });
+const schedule = (id: string, cron: string | null = '0 8 * * *') => ({ id, user_id: `owner-of-${id}`, agent_id: 'agent', name: `Schedule ${id}`, prompt: 'go', cron, timezone: 'UTC', next_run_at: '2026-11-10T08:00:00Z' });
 
 beforeEach(() => {
   h.due = [];
-  h.updates.length = h.started.length = h.notified.length = 0;
+  h.updates.length = h.deleted.length = h.started.length = h.once.length = h.notified.length = 0;
 });
 
 describe('due schedules', () => {
+  it('a one-off one is switched off as it is claimed, and deleted once its task has started', async () => {
+    h.due = [schedule('once', null), schedule('daily')];
+    const report = await call();
+    expect(report.scheduled).toBe(2);
+    expect(h.started).toEqual(['once', 'daily']);
+    expect(h.once).toEqual([true, false]);
+    expect(h.updates.find((u) => u.id === 'once')?.text).toMatch(/enabled = false, next_run_at = null/);
+    expect(h.deleted).toEqual(['once']);
+  });
+
   it('start, each moved to its next time first', async () => {
     h.due = [schedule('a'), schedule('b')];
     const report = await call();

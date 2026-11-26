@@ -21,6 +21,12 @@ const RISK = {
 function preview(args: Record<string, unknown> | undefined) {
   if (!args) return '';
   if (typeof args.command === 'string') return args.command;
+  // task.schedule: what starts, and when on this device's clock.
+  if (typeof args.task === 'string' && typeof args.when === 'string') {
+    const at = new Date(args.when);
+    const when = Number.isFinite(at.getTime()) ? at.toLocaleString(undefined, { weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' }) : args.when;
+    return `Starts on its own: ${when}\n\n${args.task.slice(0, 1200)}`;
+  }
   if (typeof args.path === 'string' && typeof args.content === 'string') return `${args.path}\n\n${String(args.content).slice(0, 600)}`;
   return JSON.stringify(args, null, 2).slice(0, 900);
 }

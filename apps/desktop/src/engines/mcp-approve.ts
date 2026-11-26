@@ -2,12 +2,13 @@
 // It forwards each permission prompt to the Wren desktop app (localhost, with a
 // per-run token) and returns Wren's allow/deny decision. When the user picked
 // other agents this one may ask, it also offers ask_agent, answered the same way,
-// and show_page always (a page the agent made, shown in the task).
+// and always show_page (a page the agent made, shown in the task), open, schedule
+// (a task for later, which the user approves) and request_secret (a secret card).
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { OPEN_DESCRIPTION, SHOW_PAGE_DESCRIPTION } from '@wren/core/tools';
+import { OPEN_DESCRIPTION, REQUEST_SECRET_FILE_DESCRIPTION, SCHEDULE_DESCRIPTION, SHOW_PAGE_DESCRIPTION } from '@wren/core/tools';
 import { APPROVE_HELPER_MS, ASK_HELPER_MS, PAGE_HELPER_MS, postToWren, uniqueNames } from './bridge-client';
 
 // The bridge's address and token come from Wren's private file (only this server's sandbox profile can
@@ -95,6 +96,49 @@ server.registerTool(
       // It may wait for the user's approval, as long as a permission prompt.
       const out = (await postToWren(url, token, { open: args }, { signal: extra.signal, timeoutMs: APPROVE_HELPER_MS })) as { text?: string; isError?: boolean };
       return { content: [{ type: 'text' as const, text: out.text ?? 'Nothing was opened.' }], isError: out.text === undefined || !!out.isError };
+    } catch (e) {
+      return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };
+    }
+  },
+);
+
+// A task for later (task.schedule in Wren's own agent loop): the user always approves it first, then Wren sets it.
+server.registerTool(
+  'schedule',
+  {
+    description: SCHEDULE_DESCRIPTION,
+    inputSchema: {
+      when: z.string().min(1).max(64).describe('When it starts: ISO 8601 with its UTC offset, e.g. 2026-11-27T17:00:00+11:00, from a minute to a year ahead.'),
+      task: z.string().min(1).max(8000).describe("The message the new task starts with, written for yourself then (it won't see this conversation)."),
+      title: z.string().max(80).optional().describe('A short name the user sees in Schedules.'),
+    },
+  },
+  async (args, extra) => {
+    try {
+      // It waits for the user's approval, as long as a permission prompt.
+      const out = (await postToWren(url, token, { schedule: args }, { signal: extra.signal, timeoutMs: APPROVE_HELPER_MS })) as { text?: string; isError?: boolean };
+      return { content: [{ type: 'text' as const, text: out.text ?? 'Nothing was set.' }], isError: out.text === undefined || !!out.isError };
+    } catch (e) {
+      return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };
+    }
+  },
+);
+
+// A secret the commands need (task.request_secret): the user types it into a card in the task, never the chat.
+server.registerTool(
+  'request_secret',
+  {
+    description: REQUEST_SECRET_FILE_DESCRIPTION,
+    inputSchema: {
+      name: z.string().min(1).max(64).describe('A name for it like an environment variable, e.g. STRIPE_API_KEY (capital letters, digits and _).'),
+      why: z.string().min(1).max(300).describe('What it is and what you need it for, in one sentence the user sees on the card.'),
+    },
+  },
+  async (args, extra) => {
+    try {
+      // It waits for the user to fill in the card, like an ask.
+      const out = (await postToWren(url, token, { secret: args }, { signal: extra.signal, timeoutMs: ASK_HELPER_MS })) as { text?: string; isError?: boolean };
+      return { content: [{ type: 'text' as const, text: out.text ?? 'No answer.' }], isError: out.text === undefined || !!out.isError };
     } catch (e) {
       return { content: [{ type: 'text' as const, text: `Wren is not reachable: ${(e as Error).message}` }], isError: true };
     }

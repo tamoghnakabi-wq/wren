@@ -1260,8 +1260,13 @@ export function assessCall(
       return assessGithub(s('method') || 'GET', s('path'), args.body);
     case 'screen.capture':
       return { risk: 'high', reason: 'captures your screen' };
+    case 'task.schedule':
+      // Asked every time, whatever the autonomy (loop.ts ALWAYS_ASK): a page or file could talk an agent
+      // into a task that later starts on its own while the user is away.
+      return { risk: 'high', reason: 'starts a task on its own later, while you may be away' };
     case 'memory.remember':
     case 'memory.forget':
+    case 'task.request_secret':
     case 'task.update_plan':
     case 'task.ask_user':
     case 'task.ask_agent':

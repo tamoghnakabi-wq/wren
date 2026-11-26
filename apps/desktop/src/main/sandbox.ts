@@ -259,6 +259,19 @@ export function nativeProgram(real: string, platform = process.platform): boolea
  * another file such as a package store's (W-178).
  */
 export function checkEngineProgram(engine: Engine, path: string, roots: string[], dataDir: string, home = homedir()): { program: string } | { why: string } {
+  return checkInstalledProgram(ENGINE_INSTALLS[engine], ENGINE_NAMES[engine], path, roots, dataDir, home);
+}
+
+/**
+ * Codex, which Wren runs only to ask its plan's limits (Usage → This Mac): its standalone installer's native
+ * program, or Homebrew's cask, checked as an engine's is (it runs outside any sandbox too).
+ */
+const CODEX_INSTALLS = { home: ['.codex/packages/standalone'], system: ['/opt/homebrew/Caskroom/codex', '/usr/local/Caskroom/codex'] };
+export function checkCodexProgram(path: string, roots: string[], dataDir: string, home = homedir()): { program: string } | { why: string } {
+  return checkInstalledProgram(CODEX_INSTALLS, 'Codex', path, roots, dataDir, home);
+}
+
+function checkInstalledProgram(where: { home: string[]; system: string[] }, label: string, path: string, roots: string[], dataDir: string, home: string): { program: string } | { why: string } {
   let real: string;
   try {
     real = realpathSync.native(path); // on macOS and Windows, the name as stored (case included)
@@ -267,7 +280,7 @@ export function checkEngineProgram(engine: Engine, path: string, roots: string[]
   }
   // Exact names on macOS: on a case-sensitive volume another case would be another, unprotected folder.
   const same = (x: string) => (process.platform === 'win32' ? x.toLowerCase() : x);
-  const { home: inHome, system } = ENGINE_INSTALLS[engine];
+  const { home: inHome, system } = where;
   const installs = [...inHome.map((p) => join(home, p)), ...system].map((p) => {
     try {
       return realpathSync.native(p);
@@ -275,7 +288,7 @@ export function checkEngineProgram(engine: Engine, path: string, roots: string[]
       return p;
     }
   });
-  if (!installs.some((d) => same(real).startsWith(same(d.endsWith(sep) ? d : d + sep)))) return { why: `${real} isn't where ${ENGINE_NAMES[engine]}'s own installer puts it, so Wren can't tell what else it runs (an npm or version-manager install loads code from other places)` };
+  if (!installs.some((d) => same(real).startsWith(same(d.endsWith(sep) ? d : d + sep)))) return { why: `${real} isn't where ${label}'s own installer puts it, so Wren can't tell what else it runs (an npm or version-manager install loads code from other places)` };
   if (agentCanWrite(real, roots, dataDir, home)) return { why: `${real} is in a folder agents on this computer may change` };
   const st = statSync(real);
   if (!st.isFile()) return { why: `${real} isn't a program file` };

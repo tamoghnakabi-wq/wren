@@ -40,6 +40,8 @@ export interface Session {
   created_at: string;
   /** Set when another agent asked this task (task.ask_agent): the task that asked. */
   parent_session_id?: string | null;
+  /** The task this one was carried on from, with another agent (handOff). */
+  handed_from?: string | null;
 }
 
 export interface Run {
@@ -154,7 +156,12 @@ export interface Schedule {
   agent_id: string;
   name: string;
   prompt: string;
-  cron: string;
+  /** A repeating schedule's cron expression; null for a one-off one. */
+  cron: string | null;
+  /** A one-off schedule's time; null for a repeating one. */
+  run_at: string | null;
+  /** The task an agent set it in (task.schedule). */
+  source_session_id: string | null;
   timezone: string;
   enabled: boolean;
   next_run_at: string | null;

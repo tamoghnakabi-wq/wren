@@ -22,6 +22,7 @@ import type {
 import { isPlanLimit } from './types';
 import { checkPage, utf8Bytes } from './pages';
 import { withAttachedText, type LoadAttachment } from './attachments';
+import { secretNameProblem, type TaskSecret } from './secrets';
 
 // The agent loop. It is written as a resumable state machine over the session's
 // event log so it can run in short "ticks" (Vercel Functions) or continuously
@@ -49,6 +50,19 @@ export interface AskAgentRequest {
 }
 
 export type AskAgentStart = { sessionId: string; agent: string } | { error: string };
+
+/**
+ * task.schedule, after the user approved it: a task for this agent that starts once at `when` (ISO 8601 with
+ * its offset). The same request again from the same task finds the one already set, so a call run again
+ * after a crash doesn't set two.
+ */
+export interface ScheduleRequest {
+  when: string;
+  task: string;
+  title?: string;
+}
+
+export type ScheduleResult = { id: string; at: string; name: string } | { error: string };
 
 export type AgentAnswer =
   | { state: 'pending'; agent: string }
@@ -87,6 +101,8 @@ export interface RunStore {
   agentAnswer?(key: string): Promise<AgentAnswer>;
   /** Save a page the agent made (task.show_page), checked for size already, as one of the task's files. */
   savePage?(page: { title: string; html: string }): Promise<{ id: string; name: string }>;
+  /** Set a task that starts once, later (task.schedule; asked about first, every time). */
+  schedule?(req: ScheduleRequest): Promise<ScheduleResult>;
   memory: {
     add(fact: string): Promise<string>;
     remove(id: string): Promise<boolean>;
@@ -104,6 +120,8 @@ export interface ToolContext {
   isCancelled?: () => Promise<boolean>;
   /** For browser actions: the element that was assessed; the browser refuses if it changed. */
   expect?: ToolCallData['target'];
+  /** Environment variables for a command (the task's secrets, by name); hosts add them to shell commands. */
+  env?: Record<string, string>;
 }
 
 export interface ToolHost {
@@ -136,6 +154,8 @@ export interface LoopOptions {
   signal?: AbortSignal;
   /** Reads attached files so text files reach the model (the run's own account's files only). */
   loadAttachment?: LoadAttachment;
+  /** The secrets the user saved for this task (task.request_secret): its shell commands get them as environment variables. */
+  secrets?: TaskSecret[];
   log?: (msg: string, extra?: unknown) => void;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -157,7 +177,7 @@ export type LoopOutcome =
   | { kind: 'paused'; steps: number; limit?: UsageLimit }
   | { kind: 'failed'; error: string; code?: string; steps: number };
 
-const OPEN_STATUSES = new Set(['pending', 'awaiting_approval', 'awaiting_input', 'awaiting_agent', 'running']);
+const OPEN_STATUSES = new Set(['pending', 'awaiting_approval', 'awaiting_input', 'awaiting_secret', 'awaiting_agent', 'running']);
 
 export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
   let steps = o.step;
@@ -230,6 +250,19 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
           continue;
         }
 
+        if (ev.status === 'awaiting_secret') {
+          // The card's answer is written on this step by the server (`secretAnswer`); a message instead of it
+          // means the user went on without it.
+          const name = String(d.args.name ?? '');
+          const answer = (d as ToolCallData & { secretAnswer?: string }).secretAnswer;
+          const replied = events.some((e) => e.type === 'message' && (e.seq ?? 0) > (ev.seq ?? 0) && (e.data as MessageData).role === 'user');
+          if (answer === 'saved') await finish(o, ev, d, { output: secretSavedText(name) });
+          else if (answer === 'declined') await finish(o, ev, d, { output: `The user declined to give ${name}. Carry on without it, or ask them what they'd like instead.`, isError: true });
+          else if (replied) await finish(o, ev, d, { output: `The user wrote a message instead of giving ${name}; read it.`, isError: true });
+          else return { kind: 'waiting_input', question: `Needs a secret: ${name}`, steps };
+          continue;
+        }
+
         if (ev.status === 'awaiting_approval') {
           const state = d.approvalId ? await o.store.approvalState(d.approvalId) : 'denied';
           if (state === 'pending') return { kind: 'waiting_approval', approvalId: d.approvalId!, steps };
@@ -267,7 +300,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
             await finish(o, ev, d, { output: "Couldn't identify that element on the current page, so the action can't be offered for approval. Take a new snapshot and use a current ref.", isError: true });
             continue;
           }
-          if (needsApproval(a.risk, o.autonomy) && !isBuiltin(d.name)) {
+          if ((needsApproval(a.risk, o.autonomy) && !isBuiltin(d.name)) || ALWAYS_ASK.has(d.name)) {
             const approvalId = await o.store.createApproval({ eventId: ev.id, tool: d.name, title: d.title, risk: a.risk, reason: a.reason, args: d.args });
             await o.store.update(ev.id, { status: 'awaiting_approval', data: { ...d, risk: a.risk, approvalId } });
             return { kind: 'waiting_approval', approvalId, steps };
@@ -282,6 +315,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopOutcome> {
         }
         if (r === 'yield') return { kind: 'yield', steps };
         if (r === 'input') return { kind: 'waiting_input', question: String(d.args.question ?? ''), steps };
+        if (r === 'secret') return { kind: 'waiting_input', question: `Needs a secret: ${String(d.args.name ?? '')}`, steps };
         if (r === 'agent') waitingAgent = true;
       }
       if (waitingAgent) return { kind: 'waiting_agent', steps };
@@ -398,7 +432,15 @@ function isBuiltin(name: string) {
  * before notifying), asking another agent (the same call finds the task it already started), forgetting a memory. A notification or a saved memory would be repeated, so those are
  * reported as interrupted like any other action (W-195).
  */
-const REPEATABLE_BUILTINS = new Set(['task.update_plan', 'task.ask_user', 'task.ask_agent', 'memory.forget']);
+const REPEATABLE_BUILTINS = new Set(['task.update_plan', 'task.ask_user', 'task.request_secret', 'task.ask_agent', 'task.schedule', 'memory.forget']);
+
+/** What an agent is told once the user saved the secret it asked for. */
+export function secretSavedText(name: string): string {
+  return `The user saved ${name}. Your shell commands get it as the environment variable $${name} (you don't see the value, and Wren blanks it out of what commands print). Use it as "$${name}"; don't print it.`;
+}
+
+/** Calls the user approves every time, whatever the agent's autonomy (and though they are built-ins). */
+export const ALWAYS_ASK = new Set(['task.schedule']);
 
 async function finish(o: LoopOptions, ev: SessionEvent, d: ToolCallData, result: ToolResult) {
   const capped: ToolResult = { ...result, output: clipMiddle(result.output ?? '', MAX_TOOL_OUTPUT) };
@@ -415,7 +457,7 @@ async function closeOpenCalls(o: LoopOptions, status: 'cancelled') {
   }
 }
 
-async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (m: string, e?: unknown) => void): Promise<'done' | 'yield' | 'input' | 'agent' | 'cancelled'> {
+async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (m: string, e?: unknown) => void): Promise<'done' | 'yield' | 'input' | 'secret' | 'agent' | 'cancelled'> {
   const name = d.name;
   const startedAt = d.startedAt ?? Date.now();
   if (ev.status !== 'running') await o.store.update(ev.id, { status: 'running', data: { ...d, startedAt } });
@@ -463,6 +505,40 @@ async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (
         await o.store.update(ev.id, { status: 'awaiting_agent', data: { ...d, ask: { sessionId: r.sessionId, agent: r.agent } } });
         return 'agent';
       }
+      case 'task.request_secret': {
+        const name = String(d.args.name ?? '').trim();
+        const why = String(d.args.why ?? '').trim().slice(0, 300);
+        const problem = secretNameProblem(name);
+        if (problem || !why) {
+          await finish(o, ev, d, { output: problem ?? 'Say what it is and what you need it for (why); the user sees it on the card.', isError: true });
+          return 'done';
+        }
+        // Already saved for this task: nothing to ask.
+        if (o.secrets?.some((s) => s.name === name)) {
+          await finish(o, ev, d, { output: secretSavedText(name) });
+          return 'done';
+        }
+        await o.store.update(ev.id, { status: 'awaiting_secret', data: { ...d, args: { name, why } } });
+        await o.store.notify('Your agent needs a secret', `${name}: ${why}`, 'question');
+        return 'secret';
+      }
+      case 'task.schedule': {
+        const when = String(d.args.when ?? '').trim();
+        const task = String(d.args.task ?? '').trim();
+        if (!when || !task) {
+          await finish(o, ev, d, { output: 'Say when it starts (when) and what the task is (task).', isError: true });
+          return 'done';
+        }
+        if (!o.store.schedule) {
+          await finish(o, ev, d, { output: 'Tasks for later can’t be set here. Tell the user to set one up in Schedules.', isError: true });
+          return 'done';
+        }
+        const title = String(d.args.title ?? '').trim();
+        const r = await o.store.schedule({ when: when.slice(0, 64), task: task.slice(0, 8000), ...(title ? { title: title.slice(0, 80) } : {}) });
+        if ('error' in r) await finish(o, ev, d, { output: r.error, isError: true });
+        else await finish(o, ev, d, { output: `Set: “${r.name}” starts on its own at ${r.at}, as a new task for you with that message. The user can see and change it in Schedules.`, meta: { schedule: r.id } });
+        return 'done';
+      }
       case 'task.notify': {
         await o.store.notify(String(d.args.title ?? 'Update').slice(0, 120), String(d.args.body ?? '').slice(0, 1000), 'agent');
         await finish(o, ev, d, { output: 'Notification sent.' });
@@ -507,6 +583,7 @@ async function execute(o: LoopOptions, ev: SessionEvent, d: ToolCallData, log: (
       signal: o.signal,
       callId: d.callId,
       expect: d.target,
+      env: o.secrets?.length ? Object.fromEntries(o.secrets.map((s) => [s.name, s.value])) : undefined,
       isCancelled: async () => (await o.store.control()).cancel,
       checkpoint: async (background) => {
         d.background = background;
