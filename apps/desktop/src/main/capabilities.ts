@@ -112,7 +112,7 @@ export function parseGrokModels(out: string): ModelChoice[] {
 }
 
 /** Runs the CLI (never in a shell) and gives back what it printed, stopping it once `done` says so or time is up. */
-function cliOutput(engine: EngineName, program: string, args: string[], opts: { input?: string; done?: (out: string) => boolean; timeoutMs: number }): Promise<string> {
+export function cliOutput(engine: EngineName, program: string, args: string[], opts: { input?: string; done?: (out: string) => boolean; timeoutMs: number }): Promise<string> {
   return new Promise((resolve) => {
     let out = '';
     let settled = false;

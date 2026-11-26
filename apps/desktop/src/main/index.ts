@@ -20,6 +20,7 @@ import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
 import { approveScriptPath } from '../engines/claude-code';
 import { localUsage, workerPath as localUsageWorker } from './local-usage';
+import { planLimits } from './plan-limits';
 
 const DIST = __dirname;
 setApproveScript(approveScriptPath(DIST));
@@ -719,6 +720,8 @@ function registerIpc() {
   });
   // Usage of the other AI apps on this computer (Usage page). Only totals reach the page.
   handle('localUsage', (opts) => localUsage(DIST, dataDir(), { refresh: (opts as { refresh?: unknown } | undefined)?.refresh === true }));
+  // How much of each app's plan limits is used (Usage page). Asked from the app itself; nothing is sent.
+  handle('planLimits', (opts) => planLimits(loadPolicy().folders, { refresh: (opts as { refresh?: unknown } | undefined)?.refresh === true }));
 }
 
 /**

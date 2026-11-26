@@ -28,6 +28,14 @@ export function buildTurns(events: SessionEvent[]): NeutralTurn[] {
   const turns: NeutralTurn[] = [];
   const byId = new Map<string, Extract<NeutralTurn, { kind: 'assistant' }>>();
   let lastAssistant: Extract<NeutralTurn, { kind: 'assistant' }> | undefined;
+  // An answer to task.ask_user is given as that call's result, so the message itself is skipped below. Its
+  // images and attached files go with the result: the stored result is the answer's text alone, and the
+  // message's text here may carry its files' contents (withAttachedText, which saves nothing).
+  const answers = new Map<string, MessageData>();
+  for (const ev of events) {
+    const d = ev.data as MessageData & { answersCallId?: string };
+    if (ev.type === 'message' && d.role === 'user' && d.answersCallId) answers.set(d.answersCallId, d);
+  }
 
   for (const ev of events) {
     if (ev.type === 'message') {
@@ -60,6 +68,11 @@ export function buildTurns(events: SessionEvent[]): NeutralTurn[] {
       if (!owner) continue;
       const { namespace, name } = splitName(d.name);
       const done = d.result !== undefined;
+      const answer = done && d.name === 'task.ask_user' && !d.result!.isError ? answers.get(d.callId) : undefined;
+      if (answer) {
+        owner.calls.push({ callId: d.callId, namespace, name, args: d.args ?? {}, output: `The user answered: ${answer.text ?? ''}`, isError: false, images: [...(d.result!.images ?? []), ...(answer.images ?? [])] });
+        continue;
+      }
       owner.calls.push({
         callId: d.callId,
         namespace,

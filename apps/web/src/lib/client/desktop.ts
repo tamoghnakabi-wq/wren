@@ -68,6 +68,32 @@ export interface LocalUsageReport {
   seconds: number;
 }
 
+/** One of an app's plan limits (desktop `main/plan-limits.ts`). */
+export interface LimitWindow {
+  /** `session`, `weekly`, or `weekly:<model>`. */
+  id: string;
+  label: string;
+  /** The window's length, to judge the pace; null when unknown. */
+  minutes: number | null;
+  /** Share used, 0–100. */
+  used: number;
+  /** When it resets (ms since 1970), or null. */
+  resetsAt: number | null;
+}
+
+/** How much of each app's plan limits is used, as the app itself says (desktop 0.1.54+). */
+export interface PlanLimitsReport {
+  version: 1;
+  generatedAt: number;
+  apps: {
+    app: 'claude-code';
+    state: 'ok' | 'none' | 'missing' | 'untrusted' | 'old' | 'failed';
+    plan?: string;
+    windows: LimitWindow[];
+    note?: string;
+  }[];
+}
+
 export interface WrenDesktop {
   /** 'hidden' when the window has no title bar (macOS, desktop 0.1.52+); lib/prefs.ts marks the page from it. */
   titleBar?: 'hidden';
@@ -88,6 +114,8 @@ export interface WrenDesktop {
   onStatus(cb: (s: DesktopStatus) => void): () => void;
   /** Usage of the other AI apps on this computer, read from their logs (0.1.53+). Never sent to Wren. */
   localUsage?(opts?: { refresh?: boolean }): Promise<LocalUsageReport>;
+  /** How much of the AI apps' plan limits is used, asked from the apps (0.1.54+). Never sent to Wren. */
+  planLimits?(opts?: { refresh?: boolean }): Promise<PlanLimitsReport>;
 }
 
 declare global {

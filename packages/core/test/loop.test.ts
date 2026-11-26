@@ -4,7 +4,7 @@ import { toolCatalog } from '../src/tools';
 import { assessCall, needsApproval } from '../src/policy';
 import { checkPage, pageFileName } from '../src/pages';
 import { DEFAULT_TOOLS, ModelError, PAGE_MAX_BYTES, type ModelClient, type ModelRequest, type ModelTurn, type SessionEvent, type ToolCallData } from '../src/types';
-import { buildTurns } from '../src/transcript';
+import { buildTurns, type NeutralTurn } from '../src/transcript';
 
 class MemStore implements RunStore {
   events_: SessionEvent[] = [];
@@ -382,6 +382,34 @@ describe('agent loop', () => {
     // the answer is delivered as the tool result, not as a duplicate user turn
     expect(turns.filter((t) => t.kind === 'user')).toHaveLength(1);
     expect((turns[1] as { calls: { output: string }[] }).calls[0].output).toBe('The user answered: Melbourne');
+  });
+
+  it('gives the model the files and images sent with an answer', async () => {
+    const store = new MemStore();
+    await store.userSays('fix the error');
+    const model = new ScriptModel([{ calls: [{ name: 'task.ask_user', args: { question: 'What does the log say?' } }] }, { text: 'It ran out of memory.' }, { text: 'Done.' }]);
+    const host = new FakeHost();
+    const load = async () => new TextEncoder().encode('FATAL: out of memory');
+    expect(await base(store, model, host, { loadAttachment: load })).toMatchObject({ kind: 'waiting_input' });
+    const image = { artifactId: 'img1', mime: 'image/png' };
+    await store.append(
+      'message',
+      { role: 'user', text: 'Here\n\n[Attached files: app.log, shot.png]', images: [image], attachments: [{ artifactId: 'log1', name: 'app.log', mime: 'text/plain', size: 20 }, { artifactId: 'img1', name: 'shot.png', mime: 'image/png', size: 9 }] },
+      'done',
+    );
+    await base(store, model, host, { loadAttachment: load });
+    const ask = (turns: NeutralTurn[]) => (turns[1] as Extract<NeutralTurn, { kind: 'assistant' }>).calls[0];
+    const call = ask(buildTurns(model.calls[1].events));
+    expect(call.output).toContain('The user answered: Here');
+    expect(call.output).toContain('<attached-file name="app.log">\nFATAL: out of memory\n</attached-file>');
+    expect(call.images).toEqual([image]);
+    expect(buildTurns(model.calls[1].events).filter((t) => t.kind === 'user')).toHaveLength(1);
+    // Nothing is saved: the step keeps the answer as it was written.
+    expect((store.events_.find((e) => e.type === 'tool')!.data as ToolCallData).result!.output).toBe('The user answered: Here\n\n[Attached files: app.log, shot.png]');
+    // A later turn still gets them (the transcript is built again for each model call).
+    await store.userSays('thanks');
+    await base(store, model, host, { loadAttachment: load });
+    expect(ask(buildTurns(model.calls[2].events)).images).toEqual([image]);
   });
 
   it('yields at the deadline and continues in the next tick', async () => {

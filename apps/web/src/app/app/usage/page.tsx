@@ -50,7 +50,7 @@ export default function UsagePage() {
   // In the desktop app (0.1.53+) the page can also show the other AI apps' usage on this computer.
   const bridge = useDesktop();
   // Stable, so the view reads once when it opens (the bridge's functions don't need `this`).
-  const local = useMemo(() => (bridge?.localUsage ? { localUsage: bridge.localUsage } : null), [bridge]);
+  const local = useMemo(() => (bridge?.localUsage ? { localUsage: bridge.localUsage, planLimits: bridge.planLimits } : null), [bridge]);
   const place = typeof navigator !== 'undefined' && /Windows/.test(navigator.userAgent) ? 'PC' : 'Mac';
   const [picked, setPicked] = useState<'agents' | 'local' | null>(null);
   const view = local ? (picked ?? remembered()) : 'agents';

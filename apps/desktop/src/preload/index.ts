@@ -24,6 +24,7 @@ if (origin && location.origin === origin) {
     installUpdate: () => invoke('installUpdate'),
     openExternal: (url: string) => invoke('openExternal', url),
     localUsage: (opts?: { refresh?: boolean }) => invoke('localUsage', { refresh: opts?.refresh === true }),
+    planLimits: (opts?: { refresh?: boolean }) => invoke('planLimits', { refresh: opts?.refresh === true }),
     decideApproval: (runId: string, approvalId: string) => invoke('decideApproval', runId, approvalId),
     onStatus: (cb: (s: unknown) => void) => {
       const listener = (_e: unknown, s: unknown) => cb(s);
