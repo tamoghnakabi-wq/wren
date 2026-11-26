@@ -3,9 +3,11 @@
 import { ExternalLink } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { AgentAvatar } from '@/components/agent-avatar';
+import { LocalUsage } from '@/components/app/local-usage';
 import { useApp } from '@/components/app/provider';
-import { Card, formatTokens, PageHeader, Skeleton } from '@/components/ui';
+import { Card, formatTokens, PageHeader, Skeleton, Tabs } from '@/components/ui';
 import { api } from '@/lib/client/api';
+import { useDesktop } from '@/lib/client/desktop';
 import { useLive } from '@/lib/client/live';
 import { sourceInfo } from '@/lib/client/sources';
 import { dayLabel, lastDays, USAGE_DAYS } from '@/lib/usage-days';
@@ -42,8 +44,60 @@ const BILLED_BY: Record<string, string> = {
 };
 
 const fmtDay = dayLabel;
+const VIEW_KEY = 'wren-usage-view';
 
 export default function UsagePage() {
+  // In the desktop app (0.1.53+) the page can also show the other AI apps' usage on this computer.
+  const bridge = useDesktop();
+  // Stable, so the view reads once when it opens (the bridge's functions don't need `this`).
+  const local = useMemo(() => (bridge?.localUsage ? { localUsage: bridge.localUsage } : null), [bridge]);
+  const place = typeof navigator !== 'undefined' && /Windows/.test(navigator.userAgent) ? 'PC' : 'Mac';
+  const [picked, setPicked] = useState<'agents' | 'local' | null>(null);
+  const view = local ? (picked ?? remembered()) : 'agents';
+  const pick = (v: 'agents' | 'local') => {
+    setPicked(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      /* remembered for this visit only */
+    }
+  };
+  return (
+    <div>
+      <PageHeader
+        title="Usage"
+        subtitle={
+          view === 'local'
+            ? `Every AI app on this ${place}, read from the logs each one keeps. It stays on this ${place}.`
+            : 'Model usage by your agents over the last 30 days. Each provider bills you directly; Wren adds nothing on top.'
+        }
+      />
+      {local && (
+        <Tabs
+          className="mb-5"
+          value={view}
+          onChange={pick}
+          items={[
+            { value: 'agents', label: 'Your agents' },
+            { value: 'local', label: `This ${place}` },
+          ]}
+        />
+      )}
+      {view === 'local' && local ? <LocalUsage bridge={local} place={place} /> : <AgentUsage />}
+    </div>
+  );
+}
+
+function remembered(): 'agents' | 'local' {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'local' ? 'local' : 'agents';
+  } catch {
+    return 'agents';
+  }
+}
+
+/** Your agents' model usage over the last 30 days, from Wren's own records. */
+function AgentUsage() {
   const { userId, agentById } = useApp();
   // The newest usage row (live) only tells us when to re-fetch the totals.
   const latest = useLive<{ id: string }>({ table: 'usage_records', select: 'id', eq: { user_id: userId }, order: { column: 'created_at' }, limit: 1, realtimeFilter: { column: 'user_id', value: userId } });
@@ -92,8 +146,6 @@ export default function UsagePage() {
   if (rows.loading)
     return (
       <div aria-busy="true">
-        <Skeleton className="h-7 w-28" />
-        <Skeleton className="mt-2 mb-6 h-4 w-96 max-w-full" />
         <div className="grid grid-cols-3 gap-2.5 sm:gap-4">
           {[0, 1, 2].map((i) => (
             <Skeleton key={i} className="h-20 rounded-2xl sm:h-24" />
@@ -104,7 +156,6 @@ export default function UsagePage() {
     );
   return (
     <div>
-      <PageHeader title="Usage" subtitle="Model usage by your agents over the last 30 days. Each provider bills you directly; Wren adds nothing on top." />
       {/* Side by side on phones too: three numbers don't need three screens' worth of cards. */}
       <div className="grid grid-cols-3 gap-2.5 sm:gap-4">
         <Stat label="Tokens" value={formatTokens(total)} />

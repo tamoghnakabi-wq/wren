@@ -19,6 +19,7 @@ import { giveBack, retryGiveBacks } from './revoke';
 import { DeviceRunner, setApproveScript } from './runner';
 import { Updater } from './updater';
 import { approveScriptPath } from '../engines/claude-code';
+import { localUsage, workerPath as localUsageWorker } from './local-usage';
 
 const DIST = __dirname;
 setApproveScript(approveScriptPath(DIST));
@@ -66,13 +67,14 @@ if (process.argv.includes('--selftest')) {
       // The approval server Claude Code starts: it must run, read its private file and pass on a decision.
       approveHelper: existsSync(approve) && (await approveHelperSelfTest(approve).catch(() => false)),
       grokHook: existsSync(approve.replace(/mcp-approve\.mjs$/, 'grok-hook.mjs')),
+      localUsageWorker: existsSync(localUsageWorker(DIST)),
       preload: existsSync(join(DIST, 'preload.js')),
       ...(updateDownload && { updateDownload }),
       ...(proctree && { proctree }),
       ...(browser && { browser }),
     };
     process.stdout.write(JSON.stringify(result) + '\n');
-    app.exit(result.electron === result.electronExpected && result.playwright && result.approveHelper && result.grokHook && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) && (!browser || browser.ok) ? 0 : 1);
+    app.exit(result.electron === result.electronExpected && result.playwright && result.approveHelper && result.grokHook && result.localUsageWorker && result.preload && !(updateDownload && 'error' in updateDownload) && (!proctree || proctree.ok) && (!browser || browser.ok) ? 0 : 1);
   });
 }
 /** Start the approval server like Claude Code would and ask it once; true when Wren's answer comes back. */
@@ -715,6 +717,8 @@ function registerIpc() {
   handle('openExternal', (url) => {
     if (typeof url === 'string' && /^https:\/\//.test(url)) void shell.openExternal(url);
   });
+  // Usage of the other AI apps on this computer (Usage page). Only totals reach the page.
+  handle('localUsage', (opts) => localUsage(DIST, dataDir(), { refresh: (opts as { refresh?: unknown } | undefined)?.refresh === true }));
 }
 
 /**
