@@ -1,11 +1,12 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { CalendarClock, CornerDownLeft, FolderOpen, Gauge, Home, Inbox, LayoutGrid, ListChecks, MessageSquare, Plug, Plus, Search, Settings, type LucideIcon } from 'lucide-react';
+import { usePathname, useRouter } from 'next/navigation';
+import { Archive, CalendarClock, CornerDownLeft, FolderOpen, Forward, Gauge, Home, Inbox, Keyboard, LayoutGrid, ListChecks, MessageSquare, Pause, Plug, Plus, Search, Settings, Square, type LucideIcon } from 'lucide-react';
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AgentAvatar } from '../agent-avatar';
 import { cx, Spinner, timeAgo } from '../ui';
 import { useApp } from './provider';
+import { openShortcuts } from './shortcuts';
 import { StatusPill } from './status';
 import { api } from '@/lib/client/api';
 import { supabase } from '@/lib/client/supabase';
@@ -62,9 +63,23 @@ const PAGES: { href: string; label: string; icon: LucideIcon; words?: string }[]
   { href: '/app/settings', label: 'Settings', icon: Settings, words: 'profile security notifications' },
 ];
 
+/** An action the palette asks the open task's page to do (it acts only on its own task). */
+export const TASK_ACTION_EVENT = 'wren:task-action';
+export type TaskAction = 'stop' | 'pause' | 'archive' | 'handoff';
+
+/** Actions for the open task (its page decides whether each applies). */
+const TASK_ACTIONS: { action: TaskAction; label: string; icon: LucideIcon; words: string }[] = [
+  { action: 'stop', label: 'Stop this task', icon: Square, words: 'cancel end' },
+  { action: 'pause', label: 'Pause this task', icon: Pause, words: 'hold' },
+  { action: 'archive', label: 'Archive this task', icon: Archive, words: 'hide' },
+  { action: 'handoff', label: 'Carry on with another agent', icon: Forward, words: 'hand off switch move' },
+];
+
 interface Item {
   key: string;
-  href: string;
+  /** Where it goes, or `run` for an action. */
+  href?: string;
+  run?: () => void;
   group: string;
   title: ReactNode;
   detail?: ReactNode;
@@ -95,7 +110,12 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
 function Palette({ onClose }: { onClose: () => void }) {
   const router = useRouter();
-  const { agents, agentById, userId } = useApp();
+  const pathname = usePathname();
+  const taskId = /^\/app\/s\/([0-9a-f-]{36})$/.exec(pathname)?.[1];
+  const { agents, agentById, userId, active: going } = useApp();
+  // Which of the task's actions fit what it's doing now (a finished task can't be stopped or paused; one that's
+  // working is carried on only once it stops). The task page still checks each one.
+  const taskStatus = taskId ? (going.find((s) => s.id === taskId)?.status ?? 'ended') : null;
   const [q, setQ] = useState('');
   const [found, setFound] = useState<{ q: string; result: SearchResult } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -160,6 +180,15 @@ function Palette({ onClose }: { onClose: () => void }) {
       for (const s of recent)
         out.push({ key: `r${s.id}`, href: `/app/s/${s.id}`, group: 'Recent tasks', title: s.title, detail: `${agentById(s.agent_id)?.name ?? 'Removed agent'}, ${timeAgo(s.last_event_at)}`, lead: taskLead(s.agent_id), trail: status(s.status, false) });
     }
+    if (taskId && taskStatus) {
+      const fits = (a: TaskAction) =>
+        a === 'archive' ||
+        (a === 'stop' && taskStatus !== 'ended') ||
+        (a === 'pause' && (taskStatus === 'queued' || taskStatus === 'running')) ||
+        (a === 'handoff' && taskStatus !== 'queued' && taskStatus !== 'running');
+      for (const t of TASK_ACTIONS.filter((x) => fits(x.action) && (!query || matches(x.label, x.words))))
+        out.push({ key: `x${t.action}`, group: 'This task', title: <Marked text={t.label} words={words} />, lead: <Icon icon={t.icon} />, run: () => window.dispatchEvent(new CustomEvent(TASK_ACTION_EVENT, { detail: { id: taskId, action: t.action } })) });
+    }
     const pages = PAGES.filter((p) => !query || matches(p.label, p.words));
     const people = query ? agents.filter((a) => matches(a.name)) : [];
     for (const p of pages.slice(0, query ? 5 : PAGES.length)) out.push({ key: p.href, href: p.href, group: 'Go to', title: <Marked text={p.label} words={words} />, lead: <Icon icon={p.icon} /> });
@@ -184,8 +213,10 @@ function Palette({ onClose }: { onClose: () => void }) {
         lead: <Icon icon={MessageSquare} />,
         trail: <span className="text-[12px] whitespace-nowrap text-faint">{timeAgo(m.at)}</span>,
       });
+    if (!query || matches('Keyboard shortcuts', 'keys hotkeys help'))
+      out.push({ key: 'shortcuts', group: 'Help', title: <Marked text="Keyboard shortcuts" words={words} />, lead: <Icon icon={Keyboard} />, trail: <kbd className="font-sans text-[11px] text-faint">?</kbd>, run: openShortcuts });
     return out;
-  }, [query, words, recent, agents, agentById, result]);
+  }, [query, words, recent, agents, agentById, result, taskId, taskStatus]);
 
   // The highlighted row stays in range and in view.
   const current = Math.min(active, Math.max(items.length - 1, 0));
@@ -196,7 +227,8 @@ function Palette({ onClose }: { onClose: () => void }) {
   const go = (item: Item | undefined) => {
     if (!item) return;
     onClose();
-    router.push(item.href);
+    if (item.run) item.run();
+    else if (item.href) router.push(item.href);
   };
 
   const groups: { name: string; items: (Item & { index: number })[] }[] = [];

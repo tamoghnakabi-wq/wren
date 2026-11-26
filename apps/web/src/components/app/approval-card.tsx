@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Check, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '@/lib/client/api';
 import { desktop } from '@/lib/client/desktop';
@@ -35,6 +35,8 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
   const { agentById } = useApp();
   const toast = useToast();
   const [busy, setBusy] = useState<'approve' | 'deny' | null>(null);
+  // Decided here: said so until the approval's row goes (the live list drops it a moment later).
+  const [decided, setDecided] = useState<'approved' | 'denied' | null>(null);
   // "Deny with a reason": what the user types goes to the agent with the denial.
   const [asking, setAsking] = useState(false);
   const [note, setNote] = useState('');
@@ -45,6 +47,8 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
     try {
       const why = reason?.trim() || undefined;
       await api(`/api/approvals/${approval.id}`, { body: { approve, note: why, via: window.matchMedia('(max-width: 640px)').matches ? 'mobile' : 'web' } });
+      setDecided(approve ? 'approved' : 'denied');
+      setAsking(false);
       toast(approve ? 'Approved — the agent is continuing.' : why ? 'Denied. The agent has your reason.' : 'Denied. The agent will try another way.');
     } catch (e) {
       toast((e as Error).message, 'error');
@@ -85,7 +89,11 @@ export function ApprovalCard({ approval, showAgent = true, compact }: { approval
           {approval.detail?.reason && <p className="mt-0.5 text-[13px] text-muted">This {approval.detail.reason}.</p>}
           {body && !compact && <pre className="mt-2.5 max-h-48 overflow-auto rounded-xl border border-border bg-bg-subtle p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{body}</pre>}
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            {localOnly && bridge?.decideApproval ? (
+            {decided ? (
+              <p className="flex items-center gap-1.5 text-[13px] font-medium text-muted" role="status">
+                <Check className="h-4 w-4" aria-hidden /> {decided === 'approved' ? 'Approved. The agent carries on.' : 'Denied.'}
+              </p>
+            ) : localOnly && bridge?.decideApproval ? (
               <Button size="sm" onClick={answerHere} loading={busy === 'approve'} disabled={!!busy}>
                 <ShieldCheck className="h-4 w-4" /> Answer on this computer
               </Button>

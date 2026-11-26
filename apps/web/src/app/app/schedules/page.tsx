@@ -100,6 +100,7 @@ function Schedules() {
                       await api(`/api/schedules/${x.id}`, { method: 'PATCH', body: { enabled: v } });
                     } catch (e) {
                       toast((e as Error).message, 'error');
+                      throw e;
                     }
                   }}
                 />

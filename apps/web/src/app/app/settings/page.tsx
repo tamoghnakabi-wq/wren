@@ -125,16 +125,23 @@ function Profile() {
 function ModelAccess() {
   const { profile, devices, desktop: status } = useApp();
   const toast = useToast();
-  const access = profile?.settings?.openaiAccess ?? 'chatgpt';
+  const saved = profile?.settings?.openaiAccess ?? 'chatgpt';
+  // The choice shows at once; the saved one takes over when it comes back (or if saving failed).
+  const [picked, setPicked] = useState<string | null>(null);
+  if (picked !== null && picked === saved) setPicked(null);
+  const access = picked ?? saved;
   const fallback = profile?.settings?.openaiAllowFallback !== false;
   const signedInSomewhere = devices.some((d) => d.capabilities?.chatgpt?.signedIn);
   const d = useDesktop();
   const [busy, setBusy] = useState(false);
-  const save = async (settings: object) => {
+  const save = async (settings: { openaiAccess?: string; openaiAllowFallback?: boolean }) => {
+    if (settings.openaiAccess) setPicked(settings.openaiAccess);
     try {
       await api('/api/account/settings', { body: { settings } });
     } catch (e) {
+      setPicked(null);
       toast((e as Error).message, 'error');
+      throw e;
     }
   };
   return (
@@ -146,7 +153,7 @@ function ModelAccess() {
             { id: 'api', title: 'Use my OpenAI API key', badge: null, body: 'Pay-as-you-go API billing on your OpenAI Platform account. Works everywhere, including cloud agents.' },
           ] as const
         ).map((o) => (
-          <button key={o.id} onClick={() => save({ openaiAccess: o.id })} className={cx('relative w-full rounded-2xl border p-4 text-left transition', access === o.id ? 'border-text bg-surface shadow-card' : 'border-border hover:border-border-strong')}>
+          <button key={o.id} onClick={() => save({ openaiAccess: o.id }).catch(() => {})} className={cx('relative w-full rounded-2xl border p-4 text-left transition', access === o.id ? 'border-text bg-surface shadow-card' : 'border-border hover:border-border-strong')}>
             <span className="flex flex-wrap items-center gap-2 text-sm font-semibold">
               {o.title} {o.badge && <Badge tone="brand">{o.badge}</Badge>}
             </span>
@@ -222,6 +229,7 @@ function UsageLimits() {
               await api('/api/account/settings', { body: { settings: { resumeAfterLimits: v } } });
             } catch (e) {
               toast((e as Error).message, 'error');
+              throw e;
             }
           }}
         />

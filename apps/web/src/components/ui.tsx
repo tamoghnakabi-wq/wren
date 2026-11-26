@@ -85,18 +85,42 @@ export function Label({ children, hint, htmlFor }: { children: ReactNode; hint?:
   );
 }
 
-export function Switch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string }) {
+/**
+ * A switch moves the moment it's pressed: most save to the server, and the value they're given changes only once
+ * the saved row comes back, which made them look stuck. It shows the new position until `checked` catches up, and
+ * goes back if the change failed (`onChange` rejected) or the value never followed (4 s after it settled).
+ */
+export function Switch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (v: boolean) => void | Promise<unknown>; disabled?: boolean; label?: string }) {
+  const [shown, setShown] = useState<boolean | null>(null);
+  const [settled, setSettled] = useState(0);
+  if (shown !== null && shown === checked) setShown(null);
+  useEffect(() => {
+    if (!settled || shown === null) return;
+    const t = setTimeout(() => setShown(null), 4000);
+    return () => clearTimeout(t);
+  }, [settled, shown]);
+  const on = shown ?? checked;
   return (
     <button
       type="button"
       role="switch"
-      aria-checked={checked}
+      aria-checked={on}
       aria-label={label}
       disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={cx('relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50', checked ? 'bg-brand' : 'bg-border-strong')}
+      onClick={() => {
+        const next = !on;
+        setShown(next);
+        setSettled(0);
+        Promise.resolve()
+          .then(() => onChange(next))
+          .then(
+            () => setSettled(Date.now()),
+            () => setShown(null),
+          );
+      }}
+      className={cx('relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50', on ? 'bg-brand' : 'bg-border-strong')}
     >
-      <span className={cx('inline-block h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 ease-out', checked ? 'translate-x-[18px]' : 'translate-x-0.5')} />
+      <span className={cx('inline-block h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 ease-out', on ? 'translate-x-[18px]' : 'translate-x-0.5')} />
     </button>
   );
 }

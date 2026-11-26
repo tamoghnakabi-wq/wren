@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { Cloud, Laptop } from 'lucide-react';
+import { preloadTask } from '@/lib/client/task-queries';
 import { isLiveDevice, type Session } from '@/lib/client/types';
 import { AgentAvatar, sessionMood } from '../agent-avatar';
 import { timeAgo } from '../ui';
@@ -13,13 +14,20 @@ export function SessionList({ sessions, showAgent = true, empty }: { sessions: S
   if (!sessions.length) return <>{empty ?? null}</>;
   return (
     <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
-      {sessions.map((s) => {
+      {sessions.map((s, i) => {
         const a = agentById(s.agent_id);
         const dev = devices.find((d) => d.id === s.device_id);
         const offline = s.status === 'queued' && s.runtime === 'desktop' && !(dev && isLiveDevice(dev));
         return (
           <li key={s.id}>
-            <Link href={`/app/s/${s.id}`} className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2 focus-visible:bg-surface-2">
+            <Link
+              href={`/app/s/${s.id}`}
+              // The first rows are prefetched whole (the page and its code); any row the pointer rests on, or
+              // that gets focus, also has its conversation loaded, so the task opens complete.
+              prefetch={i < 8 ? true : null}
+              onPointerEnter={() => preloadTask(s.id)}
+              onFocus={() => preloadTask(s.id)}
+              className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2 focus-visible:bg-surface-2">
               {showAgent && <AgentAvatar icon={a?.icon} color={a?.color} size={36} mood={offline ? 'idle' : sessionMood(s.status)} still={offline || !['running', 'queued', 'waiting'].includes(s.status)} seed={s.id} />}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[14.5px] font-medium">{s.title}</p>

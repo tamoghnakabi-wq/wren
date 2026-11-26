@@ -8,21 +8,24 @@ import { flushSync } from 'react-dom';
 import { AgentAvatar } from '@/components/agent-avatar';
 import type { Mood } from '@/lib/characters';
 import { Composer, QUOTE_EVENT } from '@/components/app/composer';
+import { TASK_ACTION_EVENT, type TaskAction } from '@/components/app/command-palette';
 import { useApp } from '@/components/app/provider';
 import { StatusPill } from '@/components/app/status';
 import { useIsMac } from '@/components/app/shell';
 import { togglePane, usePaneCollapsed } from '@/lib/client/layout';
 import { PlanCard, Timeline, whenLabel } from '@/components/app/timeline';
+import { SessionSkeleton, TimelineSkeleton } from '@/components/app/task-skeleton';
 import { AgentCharacter } from '@/components/agent-character';
-import { Button, ButtonLink, cx, Dialog, EmptyState, formatBytes, formatTokens, Menu, Skeleton, timeAgo, useConfirm, useToast } from '@/components/ui';
+import { Button, ButtonLink, cx, Dialog, EmptyState, formatBytes, formatTokens, Menu, timeAgo, useConfirm, useToast } from '@/components/ui';
 import { api } from '@/lib/client/api';
 import { useLive } from '@/lib/client/live';
+import { TASK_EVENTS_PAGE, taskQueries } from '@/lib/client/task-queries';
 import { supabase } from '@/lib/client/supabase';
 import { modelLabel } from '@/lib/client/sources';
 import { isLiveDevice, type Artifact, type EventRow, type PlanItem, type Run, type RunLive, type Session } from '@/lib/client/types';
 
 /** Events per page of task history. */
-const PAGE = 500;
+const PAGE = TASK_EVENTS_PAGE;
 
 // The address's query, read as an outside store (search opens a task at one message with `?at=<seq>`).
 const subscribeUrl = (cb: () => void) => {
@@ -46,13 +49,15 @@ export default function SessionPage() {
   const router = useRouter();
   const toast = useToast();
   const { agentById, approvals, devices } = useApp();
-  const session = useLive<Session>({ table: 'sessions', eq: { id }, realtimeFilter: { column: 'id', value: id } });
+  // The same queries a list preloads when the pointer rests on this task (lib/client/task-queries.ts).
+  const q = useMemo(() => taskQueries(id), [id]);
+  const session = useLive<Session>(q.session);
   // The newest events stay live; older history loads a page at a time on request (by seq).
   // keepAll: rows that scroll out of the newest page stay, so the timeline has no holes between
   // the live part and the older pages loaded below.
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  const eventsLive = useLive<EventRow>({ table: 'events', eq: { session_id: id }, order: { column: 'seq', ascending: false }, limit: PAGE, keepAll: true, realtimeFilter: { column: 'session_id', value: id } });
+  const eventsLive = useLive<EventRow>(q.events);
   const [older, setOlder] = useState<{ session: string; rows: EventRow[]; more: boolean }>({ session: id, rows: [], more: true });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderRows = useMemo(() => (older.session === id ? older.rows : []), [older, id]);
@@ -75,7 +80,7 @@ export default function SessionPage() {
   }, [events.rows]);
   const hasOlder = !eventsLive.loading && eventsLive.rows.length >= PAGE && (older.session !== id || older.more);
   // The current plan is fetched on its own, so it shows even when it is older than the loaded history.
-  const latestPlan = useLive<EventRow>({ table: 'events', eq: { session_id: id, type: 'plan' }, order: { column: 'seq', ascending: false }, limit: 1, realtimeFilter: { column: 'session_id', value: id } });
+  const latestPlan = useLive<EventRow>(q.plan);
   const loadOlder = async () => {
     const first = events.rows[0];
     if (!first || loadingOlder) return;
@@ -129,11 +134,13 @@ export default function SessionPage() {
       setJumpLoad((j) => (j?.key === jumpKey ? { key: jumpKey, stage: 'loaded' } : j));
     })();
   }, [jumpTo, jumpKey, jumpStage, id, eventsLive.loading, events.rows, toast]);
-  const runs = useLive<Run>({ table: 'runs', eq: { session_id: id }, order: { column: 'created_at' }, limit: 20, realtimeFilter: { column: 'session_id', value: id } });
-  const live = useLive<RunLive>({ table: 'run_live', eq: { session_id: id }, pk: 'run_id', realtimeFilter: { column: 'session_id', value: id } });
-  const files = useLive<Artifact>({ table: 'artifacts', eq: { session_id: id }, order: { column: 'created_at' }, realtimeFilter: { column: 'session_id', value: id } });
+  const runs = useLive<Run>(q.runs);
+  const live = useLive<RunLive>(q.live);
+  const files = useLive<Artifact>(q.files);
   const [panel, setPanel] = useState<'activity' | 'screen' | 'files'>('activity');
   const [handing, setHanding] = useState(false);
+  // Pause, Resume or Stop pressed and not answered yet: its button spins meanwhile.
+  const [acting, setActing] = useState<string | null>(null);
   const confirm = useConfirm();
 
   const s = session.rows[0];
@@ -205,6 +212,64 @@ export default function SessionPage() {
     };
   }, []);
 
+  const archive = async () => {
+    if (!s) return;
+    const set = async (archived: boolean) => api(`/api/sessions/${id}`, { method: 'PATCH', body: { archived } });
+    try {
+      await set(!s.archived_at);
+      if (s.archived_at) toast('Moved back to your tasks', 'success');
+      else
+        toast('Archived', 'success', {
+          label: 'Undo',
+          run: () => set(false).then(() => toast('Moved back to your tasks', 'success'), (e: Error) => toast(e.message, 'error')),
+        });
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+  const act = async (action: 'pause' | 'resume' | 'cancel' | 'hold') => {
+    if (!run || acting) return;
+    setActing(action);
+    try {
+      const { done } = await api<{ done?: boolean }>(`/api/runs/${run.id}/${action}`, { body: {} });
+      if (action === 'cancel') toast(done ? 'Stopped.' : 'Stopping…', done ? 'success' : undefined);
+      else if (action === 'pause') toast(done ? 'Paused.' : 'Pausing after the current step…', done ? 'success' : undefined);
+      else if (action === 'hold') toast('It stays paused until you resume it.');
+      else toast('Resuming…');
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setActing(null);
+    }
+  };
+
+  // The palette's actions for this task (⌘K → "This task").
+  const paletteAction = useRef<(a: TaskAction) => void>(() => {});
+  useEffect(() => {
+    paletteAction.current = (a) => {
+      if (a === 'archive') void archive();
+      else if (a === 'handoff') {
+        if (working) toast('It’s still working. Pause or stop it first, then carry it on with another agent.');
+        else setHanding(true);
+      } else if (a === 'stop') {
+        if (run && ['queued', 'running', 'waiting', 'paused'].includes(run.status)) void act('cancel');
+        else toast('This task isn’t running.');
+      } else if (a === 'pause') {
+        if (run && ['queued', 'running'].includes(run.status)) void act('pause');
+        else toast(run?.status === 'paused' ? 'It’s already paused.' : 'This task isn’t running.');
+      }
+    };
+  });
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ id: string; action: TaskAction }>).detail;
+      if (d?.id === id) paletteAction.current(d.action);
+    };
+    window.addEventListener(TASK_ACTION_EVENT, on);
+    return () => window.removeEventListener(TASK_ACTION_EVENT, on);
+  }, [id]);
+
+
   if (session.loading) return <SessionSkeleton />;
   if (!s)
     return (
@@ -226,18 +291,6 @@ export default function SessionPage() {
       </div>
     );
 
-  const act = async (action: 'pause' | 'resume' | 'cancel' | 'hold') => {
-    if (!run) return;
-    try {
-      const { done } = await api<{ done?: boolean }>(`/api/runs/${run.id}/${action}`, { body: {} });
-      if (action === 'cancel') toast(done ? 'Stopped.' : 'Stopping…', done ? 'success' : undefined);
-      else if (action === 'pause') toast(done ? 'Paused.' : 'Pausing after the current step…', done ? 'success' : undefined);
-      else if (action === 'hold') toast('It stays paused until you resume it.');
-      else toast('Resuming…');
-    } catch (e) {
-      toast((e as Error).message, 'error');
-    }
-  };
 
   const sidePanel = (
     <div className="space-y-4">
@@ -325,19 +378,19 @@ export default function SessionPage() {
         </div>
         <StatusPill status={s.status} computerOffline={waitingForComputer} className="hidden sm:inline-flex" />
         {run && ['queued', 'running'].includes(run.status) && (
-          <Button size="sm" variant="secondary" onClick={() => act('pause')} title="Pause">
+          <Button size="sm" variant="secondary" onClick={() => act('pause')} loading={acting === 'pause'} disabled={!!acting} title="Pause">
             <Pause className="h-4 w-4" />
             <span className="hidden sm:inline">Pause</span>
           </Button>
         )}
         {run?.status === 'paused' && (
-          <Button size="sm" variant="secondary" onClick={() => act('resume')}>
+          <Button size="sm" variant="secondary" onClick={() => act('resume')} loading={acting === 'resume'} disabled={!!acting}>
             <Play className="h-4 w-4" />
             <span className="hidden sm:inline">Resume</span>
           </Button>
         )}
         {run && ['queued', 'running', 'waiting', 'paused'].includes(run.status) && (
-          <Button size="sm" variant="secondary" onClick={() => act('cancel')} title="Stop">
+          <Button size="sm" variant="secondary" onClick={() => act('cancel')} loading={acting === 'cancel'} disabled={!!acting} title="Stop">
             <Square className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Stop</span>
           </Button>
@@ -362,20 +415,7 @@ export default function SessionPage() {
             {
               label: s.archived_at ? 'Unarchive' : 'Archive',
               icon: Archive,
-              onSelect: async () => {
-                const archive = async (archived: boolean) => api(`/api/sessions/${id}`, { method: 'PATCH', body: { archived } });
-                try {
-                  await archive(!s.archived_at);
-                  if (s.archived_at) toast('Moved back to your tasks', 'success');
-                  else
-                    toast('Archived', 'success', {
-                      label: 'Undo',
-                      run: () => archive(false).then(() => toast('Moved back to your tasks', 'success'), (e: Error) => toast(e.message, 'error')),
-                    });
-                } catch (e) {
-                  toast((e as Error).message, 'error');
-                }
-              },
+              onSelect: archive,
             },
             {
               label: 'Delete',
@@ -530,42 +570,6 @@ export default function SessionPage() {
             sidePanel
           )}
         </aside>
-      </div>
-    </div>
-  );
-}
-
-function SessionSkeleton() {
-  return (
-    <div className="relative flex h-dvh flex-col overflow-hidden" aria-busy="true">
-      <div className="flex items-center gap-3 border-b border-border px-3 py-3 sm:px-5">
-        <Skeleton className="h-7 w-7 rounded-lg" />
-        <Skeleton className="h-9 w-9 rounded-full" />
-        <div className="flex-1 space-y-1.5">
-          <Skeleton className="h-4 w-1/2 max-w-xs" />
-          <Skeleton className="h-3 w-24" />
-        </div>
-      </div>
-      <div className="mx-auto w-full max-w-3xl flex-1 px-3 py-6 sm:px-6">
-        <TimelineSkeleton />
-      </div>
-    </div>
-  );
-}
-
-function TimelineSkeleton() {
-  return (
-    <div className="space-y-6" role="status" aria-label="Loading activity">
-      <div className="flex justify-end">
-        <Skeleton className="h-11 w-2/3 rounded-[20px]" />
-      </div>
-      <div className="flex gap-3">
-        <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
-        <div className="flex-1 space-y-2">
-          <Skeleton className="h-3.5 w-11/12" />
-          <Skeleton className="h-3.5 w-4/5" />
-          <Skeleton className="h-24 w-full rounded-xl" />
-        </div>
       </div>
     </div>
   );

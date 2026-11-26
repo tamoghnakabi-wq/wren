@@ -4,6 +4,12 @@ const nextConfig: NextConfig = {
   transpilePackages: ['@wren/core'],
   serverExternalPackages: ['web-push'],
   poweredByHeader: false,
+  experimental: {
+    // Every app page is a client component that reads its own data (live, from the database), so a page's
+    // server payload is the same each time: keep a visited one for 5 minutes, so going back to it is instant
+    // instead of a round trip to the server (Next's default for dynamic pages is not at all).
+    staleTimes: { dynamic: 300, static: 300 },
+  },
   async headers() {
     return [
       {

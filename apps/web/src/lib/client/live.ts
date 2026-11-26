@@ -34,13 +34,76 @@ type Row = Record<string, unknown>;
 /** Rows per request when filling a gap in a keepAll list. */
 const GAP_PAGE = 1000;
 
+/**
+ * The last rows each query had (by its options), so a page opened again shows them at once while it loads
+ * them again, instead of a skeleton each time. Only in this window's memory, for the most recent queries, and
+ * cleared when the signed-in user changes or signs out (sign-out doesn't reload the page).
+ */
+const lastRows = new Map<string, unknown[]>();
+const MAX_REMEMBERED = 60;
+let rememberedFor: string | null | undefined;
+let watchingAuth = false;
+function remember(key: string, rows: unknown[]) {
+  lastRows.delete(key);
+  lastRows.set(key, rows);
+  if (lastRows.size > MAX_REMEMBERED) lastRows.delete(lastRows.keys().next().value!);
+}
+/** A query for these options' rows (filters only; the caller orders and limits). */
+function baseQuery(opts: LiveOptions) {
+  let q = supabase().from(opts.table).select(opts.select ?? '*');
+  for (const [k, v] of Object.entries(opts.eq ?? {})) if (v !== undefined) q = v === null ? q.is(k, null) : q.eq(k, v);
+  for (const k of Object.keys(opts.is ?? {})) q = q.is(k, null);
+  for (const k of opts.notNull ?? []) q = q.not(k, 'is', null);
+  if (opts.inList) q = q.in(opts.inList.column, opts.inList.values);
+  return q;
+}
+
+/** When each query was last preloaded: the pointer resting on a row again soon after doesn't ask again. */
+const preloaded = new Map<string, number>();
+
+/**
+ * Loads a query's rows into what useLive remembers, ahead of the page that reads them (a task row the pointer
+ * rests on): that page then opens with them instead of a skeleton, and loads them again itself.
+ */
+export async function preloadLive(o: LiveOptions): Promise<void> {
+  if (typeof window === 'undefined' || o.enabled === false) return;
+  const key = JSON.stringify(o);
+  if (lastRows.has(key) || Date.now() - (preloaded.get(key) ?? 0) < 15_000) return;
+  preloaded.set(key, Date.now());
+  watchAuth();
+  let q = baseQuery(o);
+  if (o.order) q = q.order(o.order.column, { ascending: !!o.order.ascending });
+  if (o.limit) q = q.limit(o.limit);
+  const { data, error } = await q;
+  if (!error && !lastRows.has(key)) remember(key, (data ?? []) as unknown[]);
+}
+
+function watchAuth() {
+  if (watchingAuth || typeof window === 'undefined') return;
+  watchingAuth = true;
+  supabase().auth.onAuthStateChange((event, session) => {
+    const user = session?.user?.id ?? null;
+    if (event === 'SIGNED_OUT' || (rememberedFor !== undefined && user !== rememberedFor)) {
+      lastRows.clear();
+      preloaded.clear();
+    }
+    rememberedFor = user;
+  });
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; loading: boolean; error: string | null; reload: () => void } {
-  const [rows, setRows] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
+  const key = JSON.stringify(o);
+  // A query this window ran before starts from its last rows (they're refreshed straight away).
+  const [rows, setRows] = useState<T[]>(() => (lastRows.get(key) as T[] | undefined) ?? []);
+  const [loading, setLoading] = useState(() => !lastRows.has(key));
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
-  const key = JSON.stringify(o);
+
+  useEffect(() => {
+    watchAuth();
+    if (!loading && !error) remember(key, rows);
+  }, [key, rows, loading, error]);
 
   useEffect(() => {
     // The options are plain data, so the effect reads them back from the key it depends on.
@@ -68,8 +131,10 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
       });
     };
 
-    // keepAll: everything seen for this subscription, by primary key.
+    // keepAll: everything seen for this subscription, by primary key (from what this query had last time, if
+    // anything: rows loaded again replace theirs).
     const kept = new Map<unknown, T>();
+    if (opts.keepAll) for (const r of (lastRows.get(key) ?? []) as T[]) kept.set((r as R)[pk], r);
     // keepAll: how far (by the order column) fetched pages reach without a hole. Rows that came in
     // over realtime don't count: there can be missed rows just below them.
     let fetchedTop: number | string | undefined;
@@ -77,14 +142,7 @@ export function useLive<T extends object = any>(o: LiveOptions): { rows: T[]; lo
       for (const r of list) kept.set((r as R)[pk], r);
       setRows(sortRows([...kept.values()]));
     };
-    const query = () => {
-      let q = sb.from(opts.table).select(opts.select ?? '*');
-      for (const [k, v] of Object.entries(opts.eq ?? {})) if (v !== undefined) q = v === null ? q.is(k, null) : q.eq(k, v);
-      for (const k of Object.keys(opts.is ?? {})) q = q.is(k, null);
-      for (const k of opts.notNull ?? []) q = q.not(k, 'is', null);
-      if (opts.inList) q = q.in(opts.inList.column, opts.inList.values);
-      return q;
-    };
+    const query = () => baseQuery(opts);
 
     // One load at a time (initial, after subscribing, after the tab comes back): an older response
     // can't land after a newer one and leave rows in between unfetched.

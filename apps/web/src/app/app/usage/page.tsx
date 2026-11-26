@@ -97,22 +97,28 @@ function remembered(): 'agents' | 'local' {
 }
 
 /** Your agents' model usage over the last 30 days, from Wren's own records. */
+/** The last totals this window read, so Usage opened again shows them at once while it asks again. */
+let lastUsage: { userId: string; usage: Usage } | null = null;
+
 function AgentUsage() {
   const { userId, agentById } = useApp();
   // The newest usage row (live) only tells us when to re-fetch the totals.
   const latest = useLive<{ id: string }>({ table: 'usage_records', select: 'id', eq: { user_id: userId }, order: { column: 'created_at' }, limit: 1, realtimeFilter: { column: 'user_id', value: userId } });
-  const [usage, setUsage] = useState<Usage | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(() => (lastUsage?.userId === userId ? lastUsage.usage : null));
   const changeKey = latest.rows.map((r) => r.id).join();
   useEffect(() => {
     let live = true;
     api<Usage>('/api/usage')
-      .then((r) => live && setUsage(r))
+      .then((r) => {
+        lastUsage = { userId, usage: r };
+        if (live) setUsage(r);
+      })
       // Nothing to show, but the chart still has its days (this browser's own, as the server didn't say).
       .catch(() => live && setUsage((cur) => cur ?? { days: lastDays(USAGE_DAYS), rows: [] }));
     return () => {
       live = false;
     };
-  }, [changeKey]);
+  }, [changeKey, userId]);
   const recent = usage?.rows ?? null;
   const rows = { loading: usage === null };
 

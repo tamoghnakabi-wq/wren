@@ -3,10 +3,10 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Bell, CalendarClock, FolderOpen, Gauge, Home, Inbox, LayoutGrid, LogOut, Menu, Monitor, PanelLeftClose, PanelLeftOpen, Plug, Plus, Search, Settings, X } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Logo, WrenMark } from '../brand';
 import { AgentAvatar } from '../agent-avatar';
-import { cx } from '../ui';
+import { cx, Dialog } from '../ui';
 import { useApp } from './provider';
 import { supabase } from '@/lib/client/supabase';
 import { isLiveDevice } from '@/lib/client/types';
@@ -15,6 +15,10 @@ import { forgetPushHere, PushPrompt } from './push';
 import { DesktopLinkBanner } from './desktop-link';
 import { ChatGPTWelcome } from './chatgpt-ui';
 import { CommandPalette, openPalette, usePaletteRequests } from './command-palette';
+import { SHORTCUTS_EVENT, shortcutList, useShortcuts } from './shortcuts';
+import { preloadTask } from '@/lib/client/task-queries';
+import { desktop } from '@/lib/client/desktop';
+import type { Approval, Session } from '@/lib/client/types';
 
 const NAV = [
   { href: '/app', label: 'Home', icon: Home, exact: true },
@@ -35,6 +39,25 @@ function useInboxCount() {
 /** Count badge text: very large numbers read as 99+. */
 const badge = (n: number) => (n > 99 ? '99+' : String(n));
 
+/** Active tasks the sidebar lists at most (⌘1–⌘9 open the first nine in the desktop app). */
+const ACTIVE_SHOWN = 6;
+
+type ActiveState = 'needs' | 'working' | 'queued' | 'paused';
+
+/**
+ * The sidebar's active tasks, in the order shown: the ones waiting for you first (a question, a card or an
+ * approval), then working, then waiting to start, then paused; newest activity first within each.
+ */
+function orderActive(active: Session[], approvals: Approval[]): { s: Session; state: ActiveState }[] {
+  const asked = new Set(approvals.map((a) => a.session_id));
+  const state = (s: Session): ActiveState => (s.status === 'waiting' || asked.has(s.id) ? 'needs' : s.status === 'running' ? 'working' : s.status === 'queued' ? 'queued' : 'paused');
+  const rank: Record<ActiveState, number> = { needs: 0, working: 1, queued: 2, paused: 3 };
+  return active
+    .filter((s) => !s.archived_at)
+    .map((s) => ({ s, state: state(s) }))
+    .sort((a, b) => rank[a.state] - rank[b.state] || Date.parse(b.s.last_event_at) - Date.parse(a.s.last_event_at));
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [drawer, setDrawer] = useState(false);
@@ -48,6 +71,15 @@ export function Shell({ children }: { children: ReactNode }) {
   const closeDrawer = useCallback(() => setDrawer(false), []);
   const [palette, setPalette] = useState(false);
   const closePalette = useCallback(() => setPalette(false), []);
+  const [shortcuts, setShortcuts] = useState(false);
+  const showShortcuts = useCallback(() => setShortcuts(true), []);
+  useEffect(() => {
+    window.addEventListener(SHORTCUTS_EVENT, showShortcuts);
+    return () => window.removeEventListener(SHORTCUTS_EVENT, showShortcuts);
+  }, [showShortcuts]);
+  const { active, approvals } = useApp();
+  const activeIds = useMemo(() => orderActive(active, approvals).map((x) => x.s.id), [active, approvals]);
+  useShortcuts(activeIds, showShortcuts);
   usePaletteRequests(() => {
     setDrawer(false);
     setPalette(true);
@@ -89,7 +121,104 @@ export function Shell({ children }: { children: ReactNode }) {
       <PushPrompt />
       <ChatGPTWelcome />
       <CommandPalette open={palette} onClose={closePalette} />
+      {shortcuts && <ShortcutsDialog onClose={() => setShortcuts(false)} />}
     </div>
+  );
+}
+
+/** Every keyboard shortcut (`?`, or the palette's "Keyboard shortcuts"). */
+function ShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const mac = useIsMac();
+  const inApp = useSyncExternalStore(noSubscribe, () => !!desktop(), () => false);
+  const list = shortcutList(mac, inApp);
+  const groups = [...new Set(list.map((x) => x.group))];
+  return (
+    <Dialog open onClose={onClose} title="Keyboard shortcuts">
+      <div className="space-y-5">
+        {groups.map((g) => (
+          <section key={g}>
+            <h3 className="mb-1.5 text-[12px] font-medium text-faint">{g}</h3>
+            <dl className="divide-y divide-border">
+              {list
+                .filter((x) => x.group === g)
+                .map((x) => (
+                  <div key={x.keys} className="flex items-center justify-between gap-4 py-2 text-sm">
+                    <dt className="text-muted">{x.what}</dt>
+                    <dd>
+                      <kbd className="rounded-md border border-border bg-bg-subtle px-1.5 py-0.5 font-sans text-[12px] whitespace-nowrap text-text">{x.keys}</kbd>
+                    </dd>
+                  </div>
+                ))}
+            </dl>
+          </section>
+        ))}
+      </div>
+    </Dialog>
+  );
+}
+
+/** Dot for an active task's state: amber is only ever "needs you". */
+function StateDot({ state }: { state: ActiveState }) {
+  const label = { needs: 'Needs you', working: 'Working', queued: 'Waiting to start', paused: 'Paused' }[state];
+  return (
+    <span className="relative flex h-2 w-2 shrink-0" title={label}>
+      <span className="sr-only">{label}</span>
+      {state === 'working' && <span aria-hidden className="absolute inset-0 animate-wren-pulse rounded-full bg-success" />}
+      <span aria-hidden className={cx('relative h-2 w-2 rounded-full', state === 'needs' ? 'bg-lamp' : state === 'working' ? 'bg-success' : state === 'queued' ? 'border border-border-strong' : 'bg-border-strong')} />
+    </span>
+  );
+}
+
+/**
+ * The tasks going on now, one click away (as T3 Code's thread list is): the ones that need you first. Each is
+ * prefetched, and its conversation loaded when the pointer rests on it, so it opens at once.
+ */
+function ActiveTasks({ pathname }: { pathname: string }) {
+  const { active, approvals, agentById } = useApp();
+  const mac = useIsMac();
+  const inApp = useSyncExternalStore(noSubscribe, () => !!desktop(), () => false);
+  const list = useMemo(() => orderActive(active, approvals), [active, approvals]);
+  if (!list.length) return null;
+  const shown = list.slice(0, ACTIVE_SHOWN);
+  return (
+    <section aria-label="Active tasks" className="mt-6 rail:hidden">
+      <div className="flex items-center justify-between px-6 text-[13px] font-semibold text-muted">
+        <span>
+          Active <span className="font-normal text-faint tabular-nums">{list.length}</span>
+        </span>
+        <Link href="/app/tasks" prefetch className="rounded px-1 text-[12px] font-normal text-faint transition-colors hover:bg-surface hover:text-text">
+          All
+        </Link>
+      </div>
+      <ul className="mt-1.5 space-y-0.5 px-3">
+        {shown.map(({ s, state }, i) => {
+          const on = pathname === `/app/s/${s.id}`;
+          const a = agentById(s.agent_id);
+          return (
+            <li key={s.id}>
+              <Link
+                href={`/app/s/${s.id}`}
+                prefetch
+                onPointerEnter={() => preloadTask(s.id)}
+                onFocus={() => preloadTask(s.id)}
+                aria-current={on ? 'page' : undefined}
+                title={`${s.title}${a ? ` · ${a.name}` : ''}${inApp && i < 9 ? ` (${mac ? '⌘' : 'Ctrl+'}${i + 1})` : ''}`}
+                className={cx('flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-[13px] transition-colors', on ? 'bg-surface font-medium text-text shadow-sm' : 'text-muted hover:bg-surface/70 hover:text-text')}
+              >
+                <StateDot state={state} />
+                <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                {a && <AgentAvatar icon={a.icon} color={a.color} size={18} still seed={a.id} />}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+      {list.length > shown.length && (
+        <Link href="/app/tasks" prefetch className="mx-3 mt-0.5 block rounded-lg px-3 py-1 text-[12.5px] text-faint transition-colors hover:bg-surface/70 hover:text-text">
+          {list.length - shown.length} more
+        </Link>
+      )}
+    </section>
   );
 }
 
@@ -209,7 +338,7 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
         {collapsible && <SidebarToggle />}
       </div>
       <div className="px-3 rail:px-0">
-        <Link href="/app?compose=1" aria-label="New task" className="group relative flex h-10 items-center justify-center gap-2 rounded-xl bg-primary text-sm font-medium text-primary-fg shadow-sm transition hover:opacity-90 rail:mx-auto rail:w-10">
+        <Link href="/app?compose=1" prefetch aria-label="New task" className="group relative flex h-10 items-center justify-center gap-2 rounded-xl bg-primary text-sm font-medium text-primary-fg shadow-sm transition hover:opacity-90 rail:mx-auto rail:w-10">
           <Plus className="h-4 w-4 shrink-0" aria-hidden /> <span className="rail:sr-only">New task</span>
           <RailTip>New task</RailTip>
         </Link>
@@ -222,6 +351,9 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
             <Link
               key={n.href}
               href={n.href}
+              // Prefetched whole (page and its code), not just the layout: every app page is dynamic, and
+              // without this a click waited for the server twice (the page, then its code) before anything moved.
+              prefetch
               aria-current={on ? 'page' : undefined}
               className={cx('group relative flex h-9 items-center gap-3 rounded-lg px-3 text-sm transition-colors rail:justify-center rail:px-0', on ? 'bg-surface font-medium text-text shadow-sm' : 'text-muted hover:bg-surface/70 hover:text-text')}
             >
@@ -237,6 +369,7 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
           );
         })}
       </nav>
+      <ActiveTasks pathname={pathname} />
       <div className="mt-6 flex items-center justify-between px-6 text-[13px] font-semibold text-muted rail:mt-4 rail:justify-center rail:border-t rail:border-border rail:px-0 rail:pt-4">
         <span className="rail:sr-only">Agents</span>
         <Link href="/app/agents/new" className="group relative rounded p-0.5 transition-colors hover:bg-surface hover:text-text rail:p-1.5" aria-label="New agent">
@@ -249,6 +382,7 @@ function SidebarContent({ collapsible = false }: { collapsible?: boolean }) {
           <Link
             key={a.id}
             href={`/app/agents/${a.id}`}
+            prefetch
             aria-current={pathname === `/app/agents/${a.id}` ? 'page' : undefined}
             title={collapsible ? a.name : undefined}
             className={cx('flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors rail:justify-center rail:px-0', pathname === `/app/agents/${a.id}` ? 'bg-surface font-medium shadow-sm' : 'text-muted hover:bg-surface/70 hover:text-text')}
@@ -345,6 +479,7 @@ function MobileTabBar() {
             <Link
               key={t.label}
               href={t.href}
+              prefetch
               aria-current={on ? 'page' : undefined}
               aria-label={t.badge ? `${t.label}, ${t.badge} new` : undefined}
               className={cx('relative flex w-14 flex-col items-center gap-0.5 py-1 text-[10.5px] font-medium transition-colors', on ? 'text-text' : 'text-faint hover:text-muted')}
