@@ -3,6 +3,7 @@
 import { RotateCw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Card, EmptyState, formatTokens, Skeleton } from '@/components/ui';
+import { AppLogo } from './app-logo';
 import type { LimitWindow, LocalApp, LocalUsageReport, PlanLimitsReport, WrenDesktop } from '@/lib/client/desktop';
 import { cx } from '@/lib/cx';
 import { appLabel, formatUsd, LOCAL_APPS, summarize, type Amount, type LocalSummary } from '@/lib/local-usage';
@@ -208,6 +209,7 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
                 <span aria-hidden className={cx('mt-1.5 h-2.5 w-2.5 shrink-0 rounded-[3px]', SHADE[a.id])} />
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">
+                    <AppLogo app={a.id} className="mr-1.5 inline-block h-[15px] w-[15px] align-[-3px]" />
                     {a.label} {a.tokens > 0 && <span className="font-normal text-faint">{a.sessions} {a.sessions === 1 ? 'session' : 'sessions'}</span>}
                   </p>
                   <p className="text-[12.5px] text-muted">{!a.found ? `Not on this ${place}` : a.tokens === 0 ? 'Nothing in this range' : `${share(a.tokens, s.total.tokens)} of tokens${priced ? ` · ${costText(a)}` : ''}`}</p>
@@ -257,7 +259,12 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
                     <td className="max-w-[16rem] truncate py-2 pr-3 font-mono text-[12.5px]" title={m.model}>
                       {m.model}
                     </td>
-                    <td className="py-2 pr-3 whitespace-nowrap text-muted">{LOCAL_APPS.find((a) => a.id === m.app)?.label}</td>
+                    <td className="py-2 pr-3 whitespace-nowrap text-muted">
+                      <span className="inline-flex items-center gap-1.5">
+                        <AppLogo app={m.app} className="h-3.5 w-3.5" />
+                        {appLabel(m.app)}
+                      </span>
+                    </td>
                     <td className="py-2 text-right tabular-nums">{m.requests.toLocaleString()}</td>
                     <td className="py-2 text-right tabular-nums">{formatTokens(m.tokens)}</td>
                     <td className="py-2 text-right text-muted tabular-nums">{share(m.tokens, s.total.tokens)}</td>
@@ -292,7 +299,14 @@ export function LocalUsage({ bridge, place }: { bridge: Required<Pick<WrenDeskto
                     return (
                       <tr key={d.day} className="border-t border-border">
                         <td className="py-2 pr-3 whitespace-nowrap">{dayLabel(d.day)}</td>
-                        <td className="py-2 pr-3 text-muted">{top ? LOCAL_APPS.find((a) => a.id === top[0])?.label : ''}</td>
+                        <td className="py-2 pr-3 text-muted">
+                          {top && (
+                            <span className="inline-flex items-center gap-1.5">
+                              <AppLogo app={top[0]} className="h-3.5 w-3.5" />
+                              {appLabel(top[0])}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-2 text-right tabular-nums">{formatTokens(d.total.tokens)}</td>
                         {priced && <td className="py-2 text-right tabular-nums">{costText(d.total)}</td>}
                       </tr>
@@ -355,7 +369,10 @@ function PlanLimits({ limits, place, onRetry }: { limits: PlanLimitsReport | 'fa
           <section key={a.app} aria-label={`${name} plan limits`}>
             <Card className="p-5 lg:p-6">
               <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                <h2 className="text-base font-semibold">{name}</h2>
+                <h2 className="flex items-center gap-2 text-base font-semibold">
+                  <AppLogo app={a.app} className="h-[18px] w-[18px]" />
+                  {name}
+                </h2>
                 {about && <p className="text-[13px] text-muted">{about}</p>}
               </div>
               {a.state === 'ok' ? (
